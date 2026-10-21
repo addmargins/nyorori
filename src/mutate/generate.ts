@@ -1,13 +1,17 @@
-import { parseSync, type Comment } from 'oxc-parser'
+import {
+  parseSync,
+  visitorKeys,
+  type CallExpression,
+  type Comment,
+  type Expression,
+  type ExpressionStatement,
+  type MemberExpression,
+  type Node,
+  type Span,
+} from 'oxc-parser'
+import { ScopeTracker } from 'oxc-walker'
 import { isOperator, type EquivalentMutant, type Mutant, type Operator, type Suppression, type SuppressionProblem } from '../types.ts'
 import { dropEquivalent } from './equivalent.ts'
-
-interface Node {
-  type: string
-  start: number
-  end: number
-  [key: string]: unknown
-}
 
 /**
  * A place in the source that the instrumenter rewrites. An expression site
@@ -44,12 +48,8 @@ export interface GenerateResult {
 
 export class ParseError extends Error {}
 
-// Keys that only hold TypeScript types or decorators; nothing in them runs as a mutable expression.
-const SKIP_KEYS = new Set([
-  'type',
-  'start',
-  'end',
-  'range',
+// Child keys that only hold TypeScript types or decorators; nothing in them runs as a mutable expression.
+const TYPE_KEYS = new Set([
   'typeAnnotation',
   'returnType',
   'typeParameters',
@@ -59,7 +59,10 @@ const SKIP_KEYS = new Set([
   'decorators',
 ])
 
-const SKIP_NODES = new Set([
+// The keys of each node type that hold child nodes, as oxc lists them, minus the type-only ones.
+const CHILD_KEYS = new Map(Object.entries(visitorKeys).map(([type, keys]) => [type, keys.filter((key) => !TYPE_KEYS.has(key))]))
+
+const SKIP_NODES = new Set<Node['type']>([
   'ImportDeclaration',
   'ExportAllDeclaration',
   'TSInterfaceDeclaration',
@@ -73,7 +76,13 @@ const SKIP_NODES = new Set([
   'TSEmptyBodyFunctionExpression',
 ])
 
-const FUNCTIONS = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'])
+const FUNCTIONS = new Set<Node['type']>(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'])
+
+/**
+ * Where a node sits. Module-level code runs once at import time, and the
+ * arguments of a global `console` call are only logged; neither is mutated.
+ */
+type Context = 'module' | 'function' | 'console'
 
 const BINARY: Record<string, [Operator, string]> = {
   '<': ['ComparisonBoundary', '<='],
@@ -107,7 +116,7 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
   const lines = lineStarts(code)
   const position = (offset: number) => toPosition(lines, offset)
   const sites = new Map<string, Site>()
-  const statements = new Map<number, Node>()
+  const statements = new Map<number, ExpressionStatement>()
 
   function add(
     site: { start: number; end: number },
@@ -129,12 +138,12 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
     target.mutants.push({ mutant: { id: 0, file, line, column, operator, description }, replacement })
   }
 
-  const text = (node: Node) => code.slice(node.start, node.end)
+  const text = (node: Span) => code.slice(node.start, node.end)
   // Replaces [from, to) inside the site with `insert`, returning the whole site text.
-  const edit = (site: Node, from: number, to: number, insert: string) =>
+  const edit = (site: Span, from: number, to: number, insert: string) =>
     code.slice(site.start, from) + insert + code.slice(to, site.end)
 
-  function condition(test: Node | null, values: string[]): void {
+  function condition(test: Expression | null, values: string[]): void {
     if (!test) return
     const inner = unwrap(test)
     if (isBooleanLiteral(inner)) return
@@ -147,23 +156,21 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
   function mutate(node: Node, parent: Node | null): void {
     switch (node.type) {
       case 'BinaryExpression': {
-        const entry = BINARY[node.operator as string]
+        const entry = BINARY[node.operator]
         if (!entry) break
         const [operator, replacementOp] = entry
-        const left = node.left as Node
-        const right = node.right as Node
+        const { left, right } = node
         if (node.operator === '+' && (isStringLike(left) || isStringLike(right))) break
         if ((node.operator === '*' || node.operator === '/') && isNumber(right, 1)) break
-        const at = findToken(code, left.end, right.start, node.operator as string)
+        const at = findToken(code, left.end, right.start, node.operator)
         if (at < 0) break
-        add(node, 'expression', at, operator, edit(node, at, at + (node.operator as string).length, replacementOp),
+        add(node, 'expression', at, operator, edit(node, at, at + node.operator.length, replacementOp),
           `\`${node.operator}\` → \`${replacementOp}\``)
         break
       }
       case 'LogicalExpression': {
-        const left = node.left as Node
-        const right = node.right as Node
-        const at = findToken(code, left.end, right.start, node.operator as string)
+        const { left, right } = node
+        const at = findToken(code, left.end, right.start, node.operator)
         if (at < 0) break
         if (node.operator === '??') {
           add(node, 'expression', at, 'Logical', text(left), `\`${snippet(text(node))}\` → \`${snippet(text(left))}\``)
@@ -174,7 +181,7 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
         break
       }
       case 'UnaryExpression': {
-        const argument = node.argument as Node
+        const { argument } = node
         if (node.operator === '-') {
           add(node, 'expression', node.start, 'UnaryMinus', text(argument), `\`${snippet(text(node))}\` → \`${snippet(text(argument))}\``)
         } else if (node.operator === '!') {
@@ -185,8 +192,7 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
         break
       }
       case 'UpdateExpression': {
-        const argument = node.argument as Node
-        const at = node.prefix ? node.start : findToken(code, argument.end, node.end, node.operator as string)
+        const at = node.prefix ? node.start : findToken(code, node.argument.end, node.end, node.operator)
         if (at < 0) break
         const other = node.operator === '++' ? '--' : '++'
         add(node, 'expression', at, 'Update', edit(node, at, at + 2, other), `\`${node.operator}\` → \`${other}\``)
@@ -200,17 +206,17 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
       }
       case 'IfStatement':
       case 'ConditionalExpression':
-        condition(node.test as Node, ['true', 'false'])
+        condition(node.test, ['true', 'false'])
         break
       case 'WhileStatement':
       case 'DoWhileStatement':
       case 'ForStatement':
         // `true` would only turn the loop into an infinite one.
-        condition(node.test as Node | null, ['false'])
+        condition(node.test, ['false'])
         break
       case 'ChainExpression': {
-        for (const link of optionalLinks(node.expression as Node)) {
-          const from = (link.type === 'MemberExpression' ? link.object : link.callee) as Node
+        for (const link of optionalLinks(node.expression)) {
+          const from = link.type === 'MemberExpression' ? link.object : link.callee
           const at = findToken(code, from.end, link.end, '?.')
           if (at < 0) continue
           const dot = link.type === 'MemberExpression' && !link.computed ? '.' : ''
@@ -218,41 +224,39 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
         }
         break
       }
-    }
-    if (FUNCTIONS.has(node.type)) {
-      const body = node.body as Node | null
-      if (!body) return
-      if (body.type === 'BlockStatement') {
-        const statements = body.body as Node[]
-        const onlyReturn = statements.length === 1 && statements[0]!.type === 'ReturnStatement' && statements[0]!.argument === null
-        if (statements.length === 0 || onlyReturn) return
-        const at = body.start + 1
-        add({ start: at, end: at }, 'body', body.start, 'FunctionBody', '', 'body → `return`')
-      } else if (!isUndefined(body)) {
-        add(body, 'expression', body.start, 'FunctionBody', 'undefined', `\`=> ${snippet(text(body))}\` → \`=> undefined\``)
+      case 'FunctionDeclaration':
+      case 'FunctionExpression':
+      case 'ArrowFunctionExpression': {
+        const { body } = node
+        if (!body) break
+        if (body.type === 'BlockStatement') {
+          const [first] = body.body
+          const onlyReturn = body.body.length === 1 && first?.type === 'ReturnStatement' && first.argument === null
+          if (body.body.length === 0 || onlyReturn) break
+          const at = body.start + 1
+          add({ start: at, end: at }, 'body', body.start, 'FunctionBody', '', 'body → `return`')
+        } else if (!isUndefined(body)) {
+          add(body, 'expression', body.start, 'FunctionBody', 'undefined', `\`=> ${snippet(text(body))}\` → \`=> undefined\``)
+        }
+        break
       }
     }
   }
 
-  function visit(node: Node, parent: Node | null, inFunction: boolean, inConsole: boolean): void {
-    if (SKIP_NODES.has(node.type) || node.declare === true) return
+  const scopes = new Scopes()
+  // The tracker records a name when the walk reaches its declaration, so a first
+  // pass collects them all and the second also sees names declared below their
+  // use: hoisted `var` and functions, or a module-level logger defined further down.
+  walk(parsed.program, null, undefined, scopes, () => undefined)
+  scopes.freeze()
+  walk<Context>(parsed.program, null, 'module', scopes, (node, parent, context) => {
     if (node.type === 'ExpressionStatement') statements.set(node.start, node)
-    // Module-level code runs once at import time; only code inside functions is mutated.
-    if (!inConsole && (inFunction || FUNCTIONS.has(node.type))) mutate(node, parent)
-    const childInFunction = inFunction || FUNCTIONS.has(node.type)
-    const childInConsole = inConsole || isConsoleCall(node)
-    for (const key in node) {
-      if (SKIP_KEYS.has(key)) continue
-      const value = node[key]
-      if (Array.isArray(value)) {
-        for (const child of value) if (isNode(child)) visit(child, node, childInFunction, childInConsole)
-      } else if (isNode(value)) {
-        visit(value, node, childInFunction, childInConsole)
-      }
-    }
-  }
-
-  visit(parsed.program as unknown as Node, null, false, false)
+    if (context === 'console') return context
+    const inner = context === 'function' || FUNCTIONS.has(node.type) ? 'function' : 'module'
+    if (inner === 'function') mutate(node, parent)
+    // A `console` declared in an enclosing scope (a parameter, an import, ...) is the code's own object.
+    return isConsoleCall(node) && !scopes.isDeclared('console') ? 'console' : inner
+  })
 
   for (const site of sites.values()) {
     const statement = site.kind === 'expression' ? statements.get(site.start) : undefined
@@ -313,12 +317,58 @@ function readSuppressions(
   return { suppressions, problems }
 }
 
+/**
+ * oxc-walker's ScopeTracker, kept in step by `walk` below rather than by
+ * oxc-walker's own walk. That one enters every key and every node, so the
+ * tracker would also count ambient declarations, which bind nothing at runtime:
+ * after `declare const console: …`, `console` is still the global. The hooks
+ * its walk calls are protected, hence the subclass.
+ */
+class Scopes extends ScopeTracker {
+  constructor() {
+    // Exited scopes stay recorded, so the second walk can look names up in them.
+    super({ preserveExitedScopes: true })
+  }
+
+  enter(node: Node): void {
+    this.processNodeEnter(node)
+  }
+
+  leave(node: Node): void {
+    this.processNodeLeave(node)
+  }
+}
+
+/**
+ * Visits the code that exists at runtime, parents before children, and keeps
+ * `scopes` in step. Type-only children and ambient (`declare`) declarations are
+ * not entered. SKIP_NODES reach `scopes` but not `enter`: an import, enum or
+ * namespace can still declare a name. `enter` returns the state its children get.
+ */
+function walk<T>(node: Node, parent: Node | null, state: T, scopes: Scopes, enter: (node: Node, parent: Node | null, state: T) => T): void {
+  if ('declare' in node && node.declare) return
+  scopes.enter(node)
+  if (!SKIP_NODES.has(node.type)) {
+    const inner = enter(node, parent, state)
+    for (const key of CHILD_KEYS.get(node.type) ?? []) {
+      // The key comes from oxc's table, so TypeScript cannot know which property it names.
+      const value: unknown = Reflect.get(node, key)
+      if (Array.isArray(value)) {
+        for (const child of value) if (isNode(child)) walk(child, node, inner, scopes, enter)
+      } else if (isNode(value)) {
+        walk(value, node, inner, scopes, enter)
+      }
+    }
+  }
+  scopes.leave(node)
+}
+
 function isNode(value: unknown): value is Node {
-  return typeof value === 'object' && value !== null && typeof (value as Node).type === 'string'
+  return typeof value === 'object' && value !== null && 'type' in value && typeof value.type === 'string'
 }
 
 function unwrap(node: Node): Node {
-  while (node.type === 'ParenthesizedExpression') node = node.expression as Node
+  while (node.type === 'ParenthesizedExpression') node = node.expression
   return node
 }
 
@@ -344,31 +394,29 @@ function isUndefined(node: Node): boolean {
 /** `x.length >= 0`: turning it into `true` changes nothing. */
 function isAlwaysTrue(node: Node): boolean {
   if (node.type !== 'BinaryExpression' || node.operator !== '>=') return false
-  const left = unwrap(node.left as Node)
-  return isNumber(node.right as Node, 0) && left.type === 'MemberExpression' && !left.computed &&
-    (left.property as Node).type === 'Identifier' && (left.property as Node).name === 'length'
+  const left = unwrap(node.left)
+  return isNumber(node.right, 0) && left.type === 'MemberExpression' && !left.computed &&
+    left.property.type === 'Identifier' && left.property.name === 'length'
 }
 
+/** `console.x(...)`, whichever `console` it names; the caller checks the scope. */
 function isConsoleCall(node: Node): boolean {
-  if (node.type !== 'CallExpression') return false
-  const callee = node.callee as Node
-  if (callee.type !== 'MemberExpression') return false
-  const object = callee.object as Node
-  return object.type === 'Identifier' && object.name === 'console'
+  return node.type === 'CallExpression' && node.callee.type === 'MemberExpression' &&
+    node.callee.object.type === 'Identifier' && node.callee.object.name === 'console'
 }
 
-function optionalLinks(expression: Node): Node[] {
-  const links: Node[] = []
+function optionalLinks(expression: Node): Array<MemberExpression | CallExpression> {
+  const links: Array<MemberExpression | CallExpression> = []
   let node: Node | undefined = expression
   while (node) {
     if (node.type === 'MemberExpression') {
       if (node.optional) links.push(node)
-      node = node.object as Node
+      node = node.object
     } else if (node.type === 'CallExpression') {
       if (node.optional) links.push(node)
-      node = node.callee as Node
+      node = node.callee
     } else if (node.type === 'TSNonNullExpression') {
-      node = node.expression as Node
+      node = node.expression
     } else {
       node = undefined
     }

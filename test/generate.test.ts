@@ -67,6 +67,45 @@ describe('scope', () => {
       '6:74 Equality `===` → `!==`',
     ])
   })
+
+  test('skips type arguments, decorators, abstract members and overload signatures', () => {
+    // Each `true`/`false` and `!x` here is a type or a decorator; only the method body runs.
+    const code = [
+      'export abstract class A<T extends true = true> implements I<false> {',
+      '  @dec(!x) declare p: true',
+      '  abstract m(x: true): false',
+      '  o(a: true): void',
+      '  o(a: any): boolean { return f<true>(a satisfies false) as true }',
+      '}',
+    ].join('\n')
+    expect(mutants(code)).toEqual(['5:22 FunctionBody body → `return`'])
+  })
+})
+
+describe('console filter', () => {
+  // Line 2 always holds the call; the other lines decide what `console` refers to.
+  const call = '  console.log(a > 1)'
+  const onCall = (lines: string[]) => mutants(lines.join('\n')).filter((m) => m.startsWith('2:'))
+
+  test.each([
+    ['the global console', ['export function f(a) {', call, '}']],
+    ['a console declared only in another function', ['function g(console) {} export function f(a) {', call, '}']],
+    ['an ambient console declaration', ['declare const console: { log(x: boolean): void }; export function f(a) {', call, '}']],
+    ['a type-only import', ["import type console from './logger'; export function f(a) {", call, '}']],
+  ])('skips arguments of %s', (_, lines) => {
+    expect(onCall(lines)).toEqual([])
+  })
+
+  test.each([
+    ['a parameter', ['export function f(console, a) {', call, '}']],
+    ['a local const', ['export function f(a) { const console = make()', call, '}']],
+    ['a var declared after the call', ['export function f(a) {', call, '  var console = make()', '}']],
+    ['a function declared after the call', ['export function f(a) {', call, '  function console() {}', '}']],
+    ['a module-level const declared below', ['export function f(a) {', call, '}', 'const console = make()']],
+    ['an import', ["import console from './logger'; export function f(a) {", call, '}']],
+  ])('mutates arguments when console is %s', (_, lines) => {
+    expect(onCall(lines)).toEqual(['2:17 ComparisonBoundary `>` → `>=`'])
+  })
 })
 
 describe('equivalent-mutant filters', () => {

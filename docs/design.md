@@ -129,7 +129,11 @@ Vitest는 JS 안에서 돈다. 모듈 그래프, 플러그인 transform, 워커 
 순수 Rust 바이너리로 만들면 mutant마다 Vitest를 새로 띄워야 하고(시작에만 1~2초), 어차피 JS 플러그인도 따로 배포해야 한다.
 그래서 오케스트레이션은 TS로 하고, 파싱은 voidzero의 `oxc-parser`(Rust, 플랫폼별로 미리 빌드되어 배포됨)를 쓴다.
 TCE에도 같은 oxc의 `oxc-transform`과 `oxc-minify`를 쓴다.
-mutant 생성과 계측은 TS visitor와 `magic-string`으로 한다.
+mutant 생성은 `oxc-parser`가 주는 타입 있는 AST(`@oxc-project/types`)를 TS로 순회해서 한다.
+- 자식 노드는 `oxc-parser`의 `visitorKeys`(노드 종류별 자식 키 목록)를 따라 방문한다. 타입이나 데코레이터만 담는 키(`typeAnnotation`, `typeArguments`, `decorators` 등)는 들어가지 않는다.
+- 이름이 어느 스코프에서 선언됐는지는 `oxc-walker`(버전 고정)의 `ScopeTracker`로 확인한다. `oxc-walker`의 `walk`는 쓰지 않는다. 그 `walk`는 모든 키와 노드에 들어가므로, 런타임에는 없는 ambient 선언까지 선언으로 센다. 그래서 nyorori의 순회가 `ScopeTracker`를 직접 진행시킨다. 이 진입/이탈 훅은 protected라서 하위 클래스로 연다.
+
+계측은 `magic-string`으로 한다.
 실행 시간의 거의 전부는 테스트 실행이고, diff 범위의 AST 처리는 미미하다.
 프로파일링에서 AST 단계가 병목으로 나오면 그 부분만 Rust 코어(napi-rs)로 옮긴다.
 
@@ -137,7 +141,7 @@ mutant 생성과 계측은 TS visitor와 `magic-string`으로 한다.
 src/
 ├─ cli.ts                인자 처리, 출력, exit code
 ├─ git.ts                merge-base, git diff → 바뀐 줄
-├─ mutate/generate.ts    oxc-parser AST → 지점과 mutant, L1 휴리스틱, L2 억제 주석
+├─ mutate/generate.ts    oxc-parser AST 순회(visitorKeys, ScopeTracker) → 지점과 mutant, L1 휴리스틱, L2 억제 주석
 ├─ mutate/equivalent.ts  L1 TCE: oxc-transform + oxc-minify 결과가 원본과 같은 mutant를 버림
 ├─ mutate/instrument.ts  schemata 삽입, 소스맵, 계측 결과 파싱 확인
 ├─ run.ts                오케스트레이션: 세션 관리, 기준 실행, mutant별 실행, 판정
@@ -175,7 +179,11 @@ merge-base를 구하려면 `actions/checkout`에 `fetch-depth: 0`이 필요하�
 
 **휴리스틱.** mutant를 만들 때 적용한다.
 
-- `console.*` 호출 인자 안쪽은 건너뛴다.
+- 전역 `console`의 `console.*` 호출이면 인자 안쪽은 건너뛴다.
+  - 둘러싼 스코프 어디에서든 `console`을 선언했으면 그것은 코드 자신의 객체이므로 건너뛰지 않는다. 매개변수, 지역 변수, `catch` 매개변수, `import console from './logger'` 등이 그렇다.
+  - `ScopeTracker`는 순회가 선언에 닿을 때 이름을 기록한다. 그래서 AST를 한 번 돌며 선언을 먼저 모으고, 두 번째 순회에서 mutant를 만든다. 이렇게 해야 쓰는 곳보다 아래에 있는 선언도 보인다. 호이스팅되는 `var`와 함수, 파일 아래쪽에서 정의한 모듈 상수가 그런 예다.
+  - `declare const console: …` 같은 ambient 선언은 런타임에 아무것도 만들지 않으므로 선언으로 치지 않는다. 그 `console`은 여전히 전역이다. `import type`도 마찬가지다.
+  - 이름으로만 판단하므로, sloppy mode 스크립트에서 블록 안의 함수 선언이 바깥으로 호이스팅되는 경우(Annex B)는 보지 못한다. 이때는 전역으로 보고 건너뛰므로 mutant를 놓치는 쪽으로만 틀린다.
 - `!!x`에서는 바깥 `!`만 변형한다. 안쪽을 빼도 결과가 같은 `!x`이기 때문이다.
 - `x.length >= 0` 같은 항상 참인 조건은 `true`로 바꾸지 않는다.
 - 조건이 이미 `true`/`false` 리터럴이면 Condition mutant를 만들지 않는다. BooleanLiteral mutant와 겹치기 때문이다.
