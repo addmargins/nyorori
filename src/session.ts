@@ -173,6 +173,10 @@ process.on('message', async (request: Request) => {
       case 'run':
         send(await run(request.active, request.limit, request.collect, request.specs))
         break
+      case 'close':
+        await vitest?.close()
+        send({ type: 'closed' })
+        break
     }
   } catch (error) {
     const message = error instanceof ProjectError ? error.message : error instanceof Error ? (error.stack ?? error.message) : String(error)

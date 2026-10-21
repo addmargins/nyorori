@@ -11,6 +11,7 @@ export type Request =
   | { type: 'init'; root: string; candidates: string[]; exclude: string[]; setupDir: string }
   | { type: 'plan'; files: FilePlan[] }
   | { type: 'run'; active: number; limit: number; collect: boolean; specs: SpecRef[] }
+  | { type: 'close' }
 
 export interface ModuleResult {
   spec: SpecRef
@@ -28,6 +29,7 @@ export type Response =
   | { type: 'ready'; eligible: string[] }
   | { type: 'planned'; specs: SpecRef[] }
   | { type: 'result'; modules: ModuleResult[]; unhandledErrors: string[]; wall: number }
+  | { type: 'closed' }
   | { type: 'error'; message: string }
 
 /** Keys passed from the session to test workers with `provide`/`inject`. */

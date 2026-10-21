@@ -293,7 +293,7 @@ return age >= 18
     - 사용자 설정을 감싸 project마다 플러그인을 넣는 방법은 설정 형태가 다양해서 깨지기 쉽다.
   - project마다 설정 파일이 있는 monorepo는 `--root`로 그 디렉터리를 가리키면 그 설정이 루트 설정이 되므로 돌릴 수 있다.
 - **`experimental.viteModuleRunner: false`.** Vite transform을 거치지 않고 Node가 직접 import하므로 계측되지 않는다. 같은 이유로 시작할 때 exit 2로 멈춘다.
-- **Vitest의 임시 디렉터리.** 세션은 SIGKILL로 끝나므로, Vitest가 `os.tmpdir()`에 만드는 임시 디렉터리(변환 결과)를 지우지 못한다. 실행이 끝날 때와 세션을 다시 띄울 때마다 남는다. 세션의 `TMPDIR`을 CLI의 임시 디렉터리로 돌리거나, 정상 종료 때 `vitest.close()`를 기다리면 없앨 수 있다.
+- **Vitest의 임시 디렉터리.** 실행이 정상적으로 끝나면 CLI가 세션에 `vitest.close()`를 요청하므로, Vitest가 `os.tmpdir()`에 만드는 임시 디렉터리도 지워진다(5초 안에 답이 없으면 SIGKILL). 무한 루프 때문에 강제 종료한 세션의 임시 디렉터리는 남는다.
 - **스냅샷 테스트.** `update: false`로 실행하므로, mutant가 스냅샷을 바꾸면 killed가 된다.
 - **flaky 테스트.** mutant가 우연히 killed로 판정되는 방향이라서 판정이 느슨해질 뿐, 거짓 실패는 만들지 않는다. 기준 실행이 실패하면 전체를 중단한다.
 - **브라우저 모드.** 지원하지 않는다.

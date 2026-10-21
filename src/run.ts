@@ -164,7 +164,7 @@ export async function run(options: RunOptions): Promise<Report> {
     }
     return report
   } finally {
-    session?.kill()
+    await session?.close()
     rmSync(setupDir, { recursive: true, force: true })
   }
 }
@@ -202,7 +202,7 @@ class Session {
     const session = new Session(child)
     const response = await session.send(init)
     if (response === 'timeout' || response.type !== 'ready') {
-      session.kill()
+      await session.close()
       throw unexpected(response)
     }
     session.eligible = response.eligible
@@ -220,6 +220,12 @@ class Session {
     if (response === 'timeout') return response
     if (response.type !== 'result') throw unexpected(response)
     return response
+  }
+
+  /** Lets Vitest remove its temporary files. A session that does not answer in time is killed. */
+  async close(): Promise<void> {
+    if (this.child.connected) await this.send({ type: 'close' }, 5_000)
+    this.kill()
   }
 
   kill(): void {

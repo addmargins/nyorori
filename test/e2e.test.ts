@@ -35,11 +35,10 @@ function project(name: string, base: Files, head: Files): string {
 function nyorori(dir: string, ...args: string[]): { status: number | null; output: string; report?: Report; leftovers: string[] } {
   // Keep the outer Vitest's worker settings away from the nested one.
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('VITEST') && key !== 'NODE_OPTIONS' && key !== 'GITHUB_ACTIONS'))
-  // A private TMPDIR shows whether the run removed its temporary directory. Vitest's
-  // own temporary directories are left out: a killed session cannot remove them.
+  // A private TMPDIR shows whether the run removed its temporary directories.
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'nyorori-e2e-'))
   const result = spawnSync(process.execPath, [CLI, 'run', '--base', 'HEAD~1', '--json', 'report.json', ...args], { cwd: dir, encoding: 'utf8', env: { ...env, TMPDIR: tmp } })
-  const leftovers = readdirSync(tmp).filter((name) => name.startsWith('nyorori-'))
+  const leftovers = readdirSync(tmp)
   rmSync(tmp, { recursive: true, force: true })
   const reportFile = path.join(dir, 'report.json')
   return {
@@ -102,8 +101,10 @@ export function untested(n: number): number {
 }
 `,
     })
-    const { status, report, output } = nyorori(dir)
+    const { status, report, output, leftovers } = nyorori(dir)
     expect(status, output).toBe(1)
+    // The session closes Vitest, so its temporary directories go too.
+    expect(leftovers).toEqual([])
     expect(statuses(report!)).toEqual([
       'src/age.ts:2 ComparisonBoundary `>=` → `>`: Survived',
       'src/age.ts:5 FunctionBody body → `return`: Killed',
@@ -178,7 +179,8 @@ test('double', () => { expect(double(3)).toBe(6) })
       'src/stride.ts:6 Arithmetic `*` → `/`: Killed',
     ])
     // Killed sessions cannot clean up after themselves; the CLI removes their setup directory.
-    expect(leftovers).toEqual([])
+    // Vitest's own temporary directory of a killed session stays behind.
+    expect(leftovers.filter((name) => name.startsWith('nyorori-'))).toEqual([])
   })
 
   test('drops mutants that minify to the original code, reports them and passes', () => {
