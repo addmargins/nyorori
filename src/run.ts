@@ -5,7 +5,7 @@ import { changedLines, gitRoot, mergeBase } from './git.ts'
 import { generate, ParseError } from './mutate/generate.ts'
 import { instrument, InstrumentError } from './mutate/instrument.ts'
 import type { ModuleResult, Request, Response, SpecRef } from './protocol.ts'
-import type { FilePlan, Mutant, MutantResult, MutantStatus, Suppression, SuppressionProblem } from './types.ts'
+import type { EquivalentMutant, FilePlan, Mutant, MutantResult, MutantStatus, Suppression, SuppressionProblem } from './types.ts'
 
 const SOURCE = /\.(?:[cm]?[jt]sx?)$/
 const DECLARATION = /\.d\.[cm]?ts$/
@@ -26,6 +26,8 @@ export interface Report {
   base: string
   files: string[]
   results: MutantResult[]
+  /** Mutants dropped before running because they minify to the original code (TCE). They never fail the run. */
+  equivalent: EquivalentMutant[]
   suppressions: Suppression[]
   problems: SuppressionProblem[]
   dryRun: boolean
@@ -50,7 +52,7 @@ export async function run(options: RunOptions): Promise<Report> {
     .filter((file) => SOURCE.test(file) && !DECLARATION.test(file) && !file.split(path.sep).includes('node_modules'))
     .filter((file) => existsSync(file))
     .sort()
-  const report: Report = { gitRoot: repo, base, files: [], results: [], suppressions: [], problems: [], dryRun: options.dryRun }
+  const report: Report = { gitRoot: repo, base, files: [], results: [], equivalent: [], suppressions: [], problems: [], dryRun: options.dryRun }
   if (candidates.length === 0) return report
 
   let session = await Session.start(root, candidates, options.exclude)
@@ -66,6 +68,7 @@ export async function run(options: RunOptions): Promise<Report> {
         if (error instanceof ParseError) throw new RunError(`Cannot parse ${relative(file)}: ${error.message}`)
         throw error
       }
+      report.equivalent.push(...generated.equivalent)
       report.suppressions.push(...generated.suppressions)
       report.problems.push(...generated.problems)
       if (generated.mutants.length === 0) continue

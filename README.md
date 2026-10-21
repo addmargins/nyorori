@@ -67,6 +67,9 @@ npx nyorori run --base origin/main
 | NoCoverage | 바뀐 코드를 실행하는 테스트가 없음 | 실패 |
 | Ignored | 억제 주석으로 제외 | 통과. 요약에 표시 |
 
+죽은 분기 안의 변경처럼 압축(`oxc-minify`)하면 원본과 같아지는 mutant는 실행하기 전에 버립니다(TCE).
+출력과 job summary에는 버린 개수만 표시하고, `--json`에는 `equivalent`로 남깁니다. CI 결과에는 영향이 없습니다.
+
 대상은 diff에서 추가되거나 바뀐 줄 중 함수 안의 코드입니다. 다음은 제외합니다.
 
 - 테스트 파일
@@ -91,7 +94,8 @@ npx nyorori run --base origin/main
 
 ## Equivalent mutant 억제
 
-바꿔도 동작이 정말 같은 mutant는 바로 윗줄에 이유를 적어 억제합니다.
+압축 결과로 알 수 있는 equivalent mutant는 nyorori가 알아서 버립니다.
+그 밖에 바꿔도 동작이 정말 같은 mutant는 바로 윗줄에 이유를 적어 억제합니다.
 
 ```ts
 // nyorori-ignore-next-line ComparisonBoundary -- 18세 경계는 상위 validator가 이미 막음

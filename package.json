@@ -21,7 +21,9 @@
   },
   "dependencies": {
     "magic-string": "^1.4.3",
+    "oxc-minify": "0.155.0",
     "oxc-parser": "^0.155.0",
+    "oxc-transform": "0.155.0",
     "picomatch": "^4.0.7"
   },
   "devDependencies": {

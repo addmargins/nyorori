@@ -172,6 +172,23 @@ test('double', () => { expect(double(3)).toBe(6) })
     ])
   })
 
+  test('drops mutants that minify to the original code, reports them and passes', () => {
+    const dir = project('equivalent', {
+      'src/age.ts': AGE_BASE,
+      'test/age.test.ts': "import { expect, test } from 'vitest'\nimport { isAdult } from '../src/age'\ntest('isAdult', () => { expect(isAdult(18)).toBe(true); expect(isAdult(17)).toBe(false) })\n",
+    }, {
+      'src/age.ts': 'const LENIENT = false\n\nexport function isAdult(age: number): boolean {\n  if (LENIENT) age++\n  return age > 17\n}\n',
+    })
+    const { status, report, output } = nyorori(dir)
+    expect(status, output).toBe(0)
+    expect(statuses(report!)).toEqual(['src/age.ts:4 Condition `LENIENT` → `true`: Killed'])
+    expect(report!.equivalent.map((m) => `${path.relative(report!.gitRoot, m.file)}:${m.line} ${m.operator} ${m.description}`)).toEqual([
+      'src/age.ts:4 Condition `LENIENT` → `false`',
+      'src/age.ts:4 Update `++` → `--`',
+    ])
+    expect(output).toContain('2 mutants dropped as equivalent (TCE)')
+  })
+
   test('stops with exit code 2 when the tests already fail without mutants', () => {
     const dir = project('baseline', { 'src/age.ts': AGE_BASE, 'test/age.test.ts': AGE_TEST }, {
       'src/age.ts': AGE_HEAD.replace('return total', 'return total + 1'),

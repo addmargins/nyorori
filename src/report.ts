@@ -22,6 +22,10 @@ function counts(report: Report): string {
     .join(', ')
 }
 
+function droppedAsEquivalent(report: Report): string {
+  return `${plural(report.equivalent.length, 'mutant')} dropped as equivalent (TCE)`
+}
+
 function where(report: Report, file: string, line: number, column?: number): string {
   const relative = path.relative(report.gitRoot, file)
   return column === undefined ? `${relative}:${line}` : `${relative}:${line}:${column}`
@@ -46,6 +50,7 @@ export function formatText(report: Report): string {
       lines.push(`  ${r.status.padEnd(10)} ${where(report, r.file, r.line, r.column)}  ${r.operator}  ${r.description}  (${EXPLAIN[r.status]})`)
     }
   }
+  if (report.equivalent.length > 0) lines.push(`  ${droppedAsEquivalent(report)}`)
   for (const s of report.suppressions.filter((s) => s.isNew)) {
     lines.push(`  NEW IGNORE ${where(report, s.file, s.line)}  ${s.operators.join(', ')} -- ${s.reason}`)
   }
@@ -113,6 +118,7 @@ export function formatSummary(report: Report): string {
       lines.push(`| ${r.status} | \`${where(report, r.file, r.line, r.column)}\` | ${r.operator} | ${cell(r.description)} |`)
     }
   }
+  if (report.equivalent.length > 0) lines.push('', `${droppedAsEquivalent(report)}.`)
   if (report.problems.length > 0) {
     lines.push('', '### Suppression problems', '')
     for (const p of report.problems) lines.push(`- \`${where(report, p.file, p.line)}\`: ${p.message}`)

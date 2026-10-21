@@ -60,10 +60,9 @@ describe('scope', () => {
       'declare function g(x: boolean): void',
       'export function f(x: number = 1 > 0 ? 1 : 2): x is 1 { return (x as any) === 1 }',
     ].join('\n')
+    // `1 > 0` is always true, so TCE drops `→ true` and `>` → `>=`: both minify to the original.
     expect(mutants(code)).toEqual([
-      '6:31 Condition `1 > 0` → `true`',
       '6:31 Condition `1 > 0` → `false`',
-      '6:33 ComparisonBoundary `>` → `>=`',
       '6:54 FunctionBody body → `return`',
       '6:74 Equality `===` → `!==`',
     ])

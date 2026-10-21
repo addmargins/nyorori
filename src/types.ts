@@ -31,6 +31,9 @@ export interface Mutant {
   description: string
 }
 
+/** A mutant dropped before instrumentation because it minifies to the original code (TCE). It never runs, so it has no id. */
+export type EquivalentMutant = Omit<Mutant, 'id'>
+
 export type MutantStatus = 'Killed' | 'Timeout' | 'Survived' | 'NoCoverage' | 'Ignored'
 
 export interface Suppression {

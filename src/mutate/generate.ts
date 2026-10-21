@@ -1,5 +1,6 @@
 import { parseSync, type Comment } from 'oxc-parser'
-import { isOperator, type Mutant, type Operator, type Suppression, type SuppressionProblem } from '../types.ts'
+import { isOperator, type EquivalentMutant, type Mutant, type Operator, type Suppression, type SuppressionProblem } from '../types.ts'
+import { dropEquivalent } from './equivalent.ts'
 
 interface Node {
   type: string
@@ -29,6 +30,8 @@ export interface PlannedMutant {
 export interface GenerateResult {
   sites: Site[]
   mutants: Mutant[]
+  /** Mutants dropped because they minify to the original code; they get no id and no site. */
+  equivalent: EquivalentMutant[]
   suppressions: Suppression[]
   problems: SuppressionProblem[]
 }
@@ -87,7 +90,8 @@ const SUPPRESS_RE = /^nyorori-ignore-next-line\s+([A-Za-z]+(?:\s*,\s*[A-Za-z]+)*
 
 /**
  * Builds the mutants whose anchor lies on one of `changed` lines, plus the
- * suppression comments that apply to them. Ids start at `firstId`.
+ * suppression comments that apply to them. Mutants that minify to the
+ * original code are set aside in `equivalent`. Ids start at `firstId`.
  */
 export function generate(file: string, code: string, changed: ReadonlySet<number>, firstId: number): GenerateResult {
   const parsed = parseSync(file, code)
@@ -242,7 +246,9 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
 
   visit(parsed.program as unknown as Node, null, false, false)
 
-  const ordered = [...sites.values()].sort((a, b) => a.start - b.start || b.end - a.end)
+  const sorted = [...sites.values()].sort((a, b) => a.start - b.start || b.end - a.end)
+  // Before ids are assigned, so each remaining site keeps a contiguous id range.
+  const { sites: ordered, equivalent } = dropEquivalent(file, code, sorted)
   const mutants: Mutant[] = []
   let id = firstId
   for (const site of ordered) {
@@ -253,7 +259,7 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
   }
 
   const { suppressions, problems } = readSuppressions(file, parsed.comments, lines, changed)
-  return { sites: ordered, mutants, suppressions, problems }
+  return { sites: ordered, mutants, equivalent, suppressions, problems }
 }
 
 function readSuppressions(

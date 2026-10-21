@@ -18,6 +18,7 @@ PR이 **추가하거나 바꾼 코드**에만 mutation을 넣고, 그 PR 시점�
 | 항목 | 결정 |
 |---|---|
 | AST 처리 | `oxc-parser` npm 패키지(voidzero의 Rust 파서) 위에 TS로 구현 |
+| equivalent 자동 판별 | TCE: `oxc-transform` + `oxc-minify`. 버전은 `oxc-parser`와 같게 고정 |
 | 이 PR이 새로 추가한 억제 | `warn`: 통과시키되 경고 어노테이션과 요약 맨 위에 표시 |
 | NoCoverage | Survived와 똑같이 CI 실패 |
 
@@ -30,7 +31,7 @@ nyorori run --base <ref>
                   세션이 Vitest 설정으로 대상 파일을 거른다
                   (테스트 파일, coverage.exclude, --exclude 제외)
   3. mutant 생성   oxc-parser로 파싱 → 바뀐 줄에 앵커가 걸린 노드에만 mutant를 만든다
-                  → 정적 equivalent 필터 (L1)
+                  → 정적 equivalent 필터 (L1: 휴리스틱, TCE)
                   → 억제 주석 읽기 (L2)
   4. 계측          모든 mutant를 파일에 한꺼번에 넣는다 (mutant schemata)
                   Vite 플러그인(enforce: 'pre')이 원본 대신 계측된 코드를 돌려준다
@@ -85,6 +86,7 @@ function f() { if (!__nyorori_h(5, 5)) return; ... }
 - 다른 플러그인이 먼저 소스를 바꿔 놓아 계측할 수 없는 경우
 
 NoCoverage는 테스트를 돌리지 않고 판정하므로 비용이 들지 않는다.
+TCE로 버린 mutant는 판정 대상이 아니다. 실행하지 않고, 개수만 보고한다(L1 참고).
 
 ### 범위 규칙
 
@@ -125,6 +127,7 @@ NoCoverage는 테스트를 돌리지 않고 판정하므로 비용이 들지 않
 Vitest는 JS 안에서 돈다. 모듈 그래프, 플러그인 transform, 워커 재사용을 쓰려면 오케스트레이터가 Vitest와 같은 런타임에 있어야 한다.
 순수 Rust 바이너리로 만들면 mutant마다 Vitest를 새로 띄워야 하고(시작에만 1~2초), 어차피 JS 플러그인도 따로 배포해야 한다.
 그래서 오케스트레이션은 TS로 하고, 파싱은 voidzero의 `oxc-parser`(Rust, 플랫폼별로 미리 빌드되어 배포됨)를 쓴다.
+TCE에도 같은 oxc의 `oxc-transform`과 `oxc-minify`를 쓴다.
 mutant 생성과 계측은 TS visitor와 `magic-string`으로 한다.
 실행 시간의 거의 전부는 테스트 실행이고, diff 범위의 AST 처리는 미미하다.
 프로파일링에서 AST 단계가 병목으로 나오면 그 부분만 Rust 코어(napi-rs)로 옮긴다.
@@ -133,7 +136,8 @@ mutant 생성과 계측은 TS visitor와 `magic-string`으로 한다.
 src/
 ├─ cli.ts                인자 처리, 출력, exit code
 ├─ git.ts                merge-base, git diff → 바뀐 줄
-├─ mutate/generate.ts    oxc-parser AST → 지점과 mutant, L1 필터, L2 억제 주석
+├─ mutate/generate.ts    oxc-parser AST → 지점과 mutant, L1 휴리스틱, L2 억제 주석
+├─ mutate/equivalent.ts  L1 TCE: oxc-transform + oxc-minify 결과가 원본과 같은 mutant를 버림
 ├─ mutate/instrument.ts  schemata 삽입, 소스맵, 계측 결과 파싱 확인
 ├─ run.ts                오케스트레이션: 세션 관리, 기준 실행, mutant별 실행, 판정
 ├─ session.ts            별도 프로세스에서 Vitest Node API 실행 (플러그인, setup 파일, provide)
@@ -159,7 +163,9 @@ merge-base를 구하려면 `actions/checkout`에 `fetch-depth: 0`이 필요하�
 
 ### L1. 생성 단계에서 거르기 (자동)
 
-보수적으로, 확실한 것만 거른다. 지금 구현된 규칙은 다음과 같다.
+보수적으로, 확실한 것만 거른다. 두 단계로 거른다.
+
+**휴리스틱.** mutant를 만들 때 적용한다.
 
 - `console.*` 호출 인자 안쪽은 건너뛴다.
 - `!!x`에서는 바깥 `!`만 변형한다. 안쪽을 빼도 결과가 같은 `!x`이기 때문이다.
@@ -168,7 +174,63 @@ merge-base를 구하려면 `actions/checkout`에 `fetch-depth: 0`이 필요하�
 - `x * 1`, `x / 1`은 `*`↔`/` 변형을 만들지 않는다.
 - 문자열 연결 `"a" + x`의 `+`는 변형하지 않는다. 문자열 변형은 2차로 미뤘다.
 
-TCE(Trivial Compiler Equivalence)는 아직 구현하지 않았다. 원본과 mutant를 각각 `oxc-minify`로 압축해 결과가 같으면 버리는 방식이다.
+TCE가 잡지 못하는 경우가 있어서 휴리스틱도 그대로 둔다. 예를 들어 `x * 1`은 압축해도 `x*1`로 남는다.
+
+**TCE(Trivial Compiler Equivalence).** id를 매기기 전에 원본과 각 mutant를 같은 방식으로 압축한다. 결과가 글자 그대로 같으면 그 mutant를 버린다(`src/mutate/equivalent.ts`).
+
+1. mutant 하나를 적용한 파일 전체를 만든다.
+   - 표현식 지점에는 대체 텍스트를 괄호로 감싸 넣는다. 계측 코드와 같은 연산자 우선순위가 되게 하려는 것이다.
+   - 줄 맨 앞의 지점에는 괄호 없이 넣는다. 앞줄에 세미콜론이 없으면 `(`가 앞줄과 이어져 호출이 되기 때문이다.
+   - 함수 본문 지점은 `{` 바로 뒤에 ` return;`을 넣는다.
+2. TS/TSX/MTS/CTS/JSX 파일은 먼저 `oxc-transform`(`transformSync`)으로 타입과 JSX를 걷어낸다.
+3. `oxc-minify`(`minifySync`)로 압축한다. 옵션은 `module: true`(`.cjs`/`.cts`는 `false`), `mangle: false`, `compress: { target: 'esnext' }`이다.
+4. 원본의 압축 결과는 파일마다 한 번만 만든다.
+
+이렇게 걸러지는 것의 예는 다음과 같다.
+
+- 죽은 분기 안의 mutant: `if (false) { i++ }`의 `++`→`--`
+- 모듈 최상위 상수 플래그 뒤의 mutant: `const DEBUG = false`일 때 `if (DEBUG)`의 `→ false`와 그 안의 mutant
+- `return` 뒤의 mutant
+- 항상 참인 조건의 일부 mutant: `1 > 0`의 `→ true`와 `>`→`>=`
+
+**오류가 나면 버리지 않는다.**
+
+- `minifySync`는 TypeScript를 받으면 throw하지 않고 빈 `code`와 `errors`를 돌려준다. 두 결과를 그대로 비교하면 모든 TS mutant가 같다고 나와서 도구가 조용히 꺼진다.
+- 그래서 원본이나 mutant 쪽에서 다음 중 하나라도 일어나면 그 mutant는 남긴다.
+  - transform이나 minify가 오류를 보고한다.
+  - 빈 결과를 낸다.
+  - 예외를 던진다.
+- 원본의 압축 결과가 비면 그 파일에서는 TCE를 하지 않는다. export하지 않은 함수만 있는 파일이 그런 경우다.
+
+**보고.**
+
+- 버린 mutant는 id를 받지 않고 계측되지도 않는다. mutant가 모두 버려진 지점은 사라지고, 남은 지점의 id는 여전히 연속이다.
+- 텍스트 출력과 step summary에는 "N mutants dropped as equivalent (TCE)" 한 줄만 표시한다.
+- `--json`에는 `equivalent` 배열로 위치, 연산자, 변경 내용을 남긴다.
+- 어노테이션은 만들지 않고, exit code에도 영향이 없다.
+- 이 PR이 추가한 억제 주석이 TCE로 버려진 mutant만 가리키면, 해당 mutant가 없다는 문제로 보고된다.
+
+**minifier의 가정.** oxc minifier는 [`crates/oxc_minifier/docs/ASSUMPTIONS.md`](https://github.com/oxc-project/oxc/blob/main/crates/oxc_minifier/docs/ASSUMPTIONS.md)에 적힌 가정을 전제로 코드를 바꾼다.
+코드가 이 가정을 깨면, 테스트가 잡을 수 있는 mutant를 TCE가 버릴 수 있다. 주요 가정은 다음과 같다.
+
+- `Function.prototype.toString()`의 결과에 기대지 않는다. 죽은 코드 안의 mutant도 함수의 소스 텍스트는 바꾸므로, `fn.toString()`을 스냅샷하는 테스트는 그 mutant를 잡을 수 있다.
+- 내장 객체를 덮어쓰지 않는다(monkey-patching 없음).
+- `toString`/`valueOf`/`Symbol.toPrimitive`에 부수 효과가 없다.
+- `Math.*`, `parseInt` 같은 순수 전역 함수는 Symbol 인자로 throw하지 않는다. 그래서 결과를 쓰지 않는 `Math.abs(x - 1)`은 통째로 지워지고, 그 안의 mutant도 버려진다.
+- TDZ 위반이 없다.
+- `with`와 `document.all`을 쓰지 않는다.
+- direct `eval`에서 선언한 변수를 밖에서 읽지 않는다.
+- 알려진 전역(`Math`, `console` 등)은 접근해도 부수 효과가 없다.
+- 쓰이지 않는 지역 객체의 속성에 값을 쓰는 것에는 부수 효과가 없다.
+- 함수와 클래스의 `name`에 기대지 않는다.
+- `/* @__PURE__ */`가 붙은 호출에는 부수 효과가 없다. 이 주석은 기본값대로 존중한다.
+
+어느 경우든 틀리는 방향은 **mutant를 놓치는 쪽**이다. 즉, 테스트할 수 있는 변경을 검사하지 않을 뿐이다.
+버린 mutant는 실행하지 않으므로, CI를 거짓으로 실패시키는 일은 없다.
+minifier 자체의 버그(아직 alpha)가 있어도 같은 방향으로만 틀린다.
+
+**비용.** mutant마다 파일 전체를 변환하고 압축하므로, 파일이 클수록 mutant 하나당 비용도 커진다.
+250~400줄 파일에서 mutant 76~88개에 45~125ms가 더 들었다. mutant 하나에 0.5~1.5ms로, 테스트를 한 번 실행하는 비용에 비하면 작다.
 
 ### L2. 소스 주석 억제
 
@@ -220,7 +282,6 @@ return age >= 18
 ## 다음 단계
 
 1. 실제 저장소 몇 곳에서 돌려 보고 오탐과 실행 시간을 측정한다.
-2. TCE로 equivalent mutant를 걸러낸다.
-3. 여러 project 설정에서의 동작을 확인한다.
-4. mutant를 병렬로 실행한다. Vitest 세션 여러 개를 쓰는 방식이다.
-5. B: base와 head를 비교해서 기존 테스트가 약해졌는지 확인한다.
+2. 여러 project 설정에서의 동작을 확인한다.
+3. mutant를 병렬로 실행한다. Vitest 세션 여러 개를 쓰는 방식이다.
+4. B: base와 head를 비교해서 기존 테스트가 약해졌는지 확인한다.
