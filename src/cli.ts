@@ -17,6 +17,7 @@ Options:
   --max-mutants <n>   Stop with an error instead of running more than n mutants
   --json <file>       Write the full report as JSON
   --dry-run           List the mutants without running tests
+  --no-types          Tell string \`+\` from numeric \`+\` by syntax only, without starting tsrs
   -h, --help          Show this help
 
 Exit codes: 0 all mutants detected, 1 findings, 2 the run could not judge the change.`
@@ -33,8 +34,10 @@ async function main(argv: string[]): Promise<number> {
       'max-mutants': { type: 'string' },
       json: { type: 'string' },
       'dry-run': { type: 'boolean', default: false },
+      types: { type: 'boolean', default: true },
       help: { type: 'boolean', short: 'h', default: false },
     },
+    allowNegative: true,
   })
   if (values.help || positionals[0] !== 'run') {
     console.log(USAGE)
@@ -53,6 +56,7 @@ async function main(argv: string[]): Promise<number> {
     timeout: Number(values.timeout),
     maxMutants: values['max-mutants'] === undefined ? undefined : Number(values['max-mutants']),
     dryRun: values['dry-run'],
+    types: values.types,
   })
 
   console.log(formatText(report))

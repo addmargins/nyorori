@@ -200,6 +200,40 @@ test('double', () => { expect(double(3)).toBe(6) })
     expect(output).toContain('2 mutants dropped as equivalent (TCE)')
   })
 
+  test('does not mutate a `+` that joins string variables, by their types', ({ skip }) => {
+    const tsconfig = '{ "compilerOptions": { "strict": true, "module": "nodenext", "noEmit": true }, "include": ["src"] }\n'
+    const dir = project('types', { 'tsconfig.json': tsconfig, 'src/name.ts': 'export {}\n' }, {
+      'src/name.ts': `export function fullName(first: string, last: string): string {
+  return first + last
+}
+
+export function total(a: number, b: number): number {
+  return a + b
+}
+`,
+      'test/name.test.ts': `import { expect, test } from 'vitest'
+import { fullName, total } from '../src/name'
+test('fullName', () => { expect(fullName('Ada ', 'Lovelace')).toBe('Ada Lovelace') })
+test('total', () => { expect(total(2, 3)).toBe(5) })
+`,
+    })
+    const { status, report, output } = nyorori(dir)
+    const { types } = report!
+    if (types.backend === 'none') skip(types.reason.startsWith('tsrs is unavailable'), `tsrs cannot run here: ${types.reason}`)
+    expect(status, output).toBe(0)
+    expect(types).toEqual({ backend: 'tsrs', files: 1, untyped: [] })
+    expect(statuses(report!)).toEqual([
+      'src/name.ts:1 FunctionBody body → `return`: Killed',
+      'src/name.ts:5 FunctionBody body → `return`: Killed',
+      'src/name.ts:6 Arithmetic `+` → `-`: Killed',
+    ])
+    expect(output).not.toContain('without type information')
+
+    const syntactic = nyorori(dir, '--no-types', '--dry-run').report!
+    expect(syntactic.types).toEqual({ backend: 'none', reason: 'disabled with --no-types', untyped: [] })
+    expect(syntactic.results.filter((r) => r.operator === 'Arithmetic').map((r) => r.line)).toEqual([2, 6])
+  })
+
   test('stops with exit code 2 when the tests already fail without mutants', () => {
     const dir = project('baseline', { 'src/age.ts': AGE_BASE, 'test/age.test.ts': AGE_TEST }, {
       'src/age.ts': AGE_HEAD.replace('return total', 'return total + 1'),

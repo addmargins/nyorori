@@ -62,6 +62,22 @@ export interface SuppressionProblem {
   message: string
 }
 
+/** A TypeScript file with a `+` on a changed line that was judged by syntax alone. */
+export interface UntypedFile {
+  /** Absolute path. */
+  file: string
+  reason: string
+}
+
+/**
+ * Whether operand types told string concatenation apart from arithmetic.
+ * `files` counts the TypeScript files whose `+` on changed lines were answered
+ * from types; `reason` says why no file was.
+ */
+export type TypesUsage =
+  | { backend: 'tsrs'; files: number; untyped: UntypedFile[] }
+  | { backend: 'none'; reason: string; untyped: UntypedFile[] }
+
 /** What the CLI hands to the Vitest session for one source file. */
 export interface FilePlan {
   file: string

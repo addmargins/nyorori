@@ -50,6 +50,7 @@ npx nyorori run --base origin/main
 | `--max-mutants <n>` | mutant가 n개를 넘으면 실행하지 않고 에러로 끝냄 |
 | `--json <file>` | 전체 결과를 JSON으로 저장 |
 | `--dry-run` | 테스트를 돌리지 않고 mutant 목록만 출력 |
+| `--no-types` | 문자열 `+`를 타입 정보 없이 문법으로만 가림(tsrs를 띄우지 않음). [문자열 `+`](#문자열-) 참고 |
 
 종료 코드는 세 가지입니다.
 
@@ -104,6 +105,18 @@ Vite에 영향을 주지 않는 `test` 옵션(`name`, `include`, `environment` �
 | `Condition` | `if`/삼항의 조건 → `true`, `false`. 루프 조건 → `false` |
 | `FunctionBody` | 함수 본문 → 즉시 `return` |
 | `OptionalChaining` | `a?.b`→`a.b` |
+
+### 문자열 `+`
+
+문자열을 이어 붙이는 `+`는 변형하지 않습니다.
+
+- 문자열 리터럴이나 템플릿 리터럴이 붙은 `+`(`"n=" + x`)는 문법으로 알아봅니다.
+- TypeScript 파일에서는 [tsrs](https://github.com/oxc-project/tsrs)(TypeScript 7 컴파일러의 Rust 포트)로 타입을 확인합니다. 그래서 `name + suffix`처럼 변수끼리 잇는 `+`도 거르고, `a + b`(숫자)는 변형합니다.
+  - 파일이 속한 `tsconfig.json`은 편집기처럼 찾습니다. `references`도 따라갑니다.
+  - 어느 tsconfig에도 속하지 않는 파일, `any`인 값, JavaScript 파일은 문법으로만 판단합니다.
+- tsrs는 optional dependency이고, 바이너리는 macOS(Apple Silicon)와 Linux(x64, arm64)용만 있습니다.
+  - Windows와 Intel Mac에서도 설치는 되지만 타입 정보 없이 실행됩니다.
+  - 타입 정보 없이 판단한 TypeScript 파일이 있으면 출력에 그 이유를 한 줄로 알립니다. `--json`에는 `types`로 남습니다.
 
 ## Equivalent mutant 억제
 

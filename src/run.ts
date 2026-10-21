@@ -5,8 +5,9 @@ import path from 'node:path'
 import { changedLines, gitRoot, mergeBase } from './git.ts'
 import { generate, ParseError } from './mutate/generate.ts'
 import { instrument, InstrumentError } from './mutate/instrument.ts'
+import { TsrsTypes } from './mutate/typecheck.ts'
 import type { ModuleResult, Request, Response, SpecRef } from './protocol.ts'
-import type { EquivalentMutant, FilePlan, Mutant, MutantResult, MutantStatus, Suppression, SuppressionProblem } from './types.ts'
+import type { EquivalentMutant, FilePlan, Mutant, MutantResult, MutantStatus, Suppression, SuppressionProblem, TypesUsage } from './types.ts'
 
 const SOURCE = /\.(?:[cm]?[jt]sx?)$/
 const DECLARATION = /\.d\.[cm]?ts$/
@@ -19,6 +20,8 @@ export interface RunOptions {
   timeout: number
   maxMutants?: number
   dryRun: boolean
+  /** Ask tsrs for operand types to tell string `+` from numeric `+`. */
+  types: boolean
 }
 
 export interface Report {
@@ -31,6 +34,8 @@ export interface Report {
   equivalent: EquivalentMutant[]
   suppressions: Suppression[]
   problems: SuppressionProblem[]
+  /** Whether type information decided which `+` are string concatenation (and are not mutated). */
+  types: TypesUsage
   dryRun: boolean
 }
 
@@ -53,7 +58,18 @@ export async function run(options: RunOptions): Promise<Report> {
     .filter((file) => SOURCE.test(file) && !DECLARATION.test(file) && !file.split(path.sep).includes('node_modules'))
     .filter((file) => existsSync(file))
     .sort()
-  const report: Report = { gitRoot: repo, base, files: [], results: [], equivalent: [], suppressions: [], problems: [], dryRun: options.dryRun }
+  const types = options.types ? new TsrsTypes(root) : undefined
+  const report: Report = {
+    gitRoot: repo,
+    base,
+    files: [],
+    results: [],
+    equivalent: [],
+    suppressions: [],
+    problems: [],
+    types: types?.usage() ?? { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
+    dryRun: options.dryRun,
+  }
   if (candidates.length === 0) return report
 
   // Holds the session's Vitest setup file. The CLI owns it because it SIGKILLs sessions.
@@ -68,7 +84,7 @@ export async function run(options: RunOptions): Promise<Report> {
       const code = readFileSync(file, 'utf8')
       let generated: ReturnType<typeof generate>
       try {
-        generated = generate(file, code, changed.get(file)!, mutants.length + 1)
+        generated = generate(file, code, changed.get(file)!, mutants.length + 1, types)
       } catch (error) {
         if (error instanceof ParseError) throw new RunError(`Cannot parse ${relative(file)}: ${error.message}`)
         throw error
@@ -87,6 +103,11 @@ export async function run(options: RunOptions): Promise<Report> {
         throw error
       }
       plans.push({ file, original: code, instrumented: instrumented.code, map: instrumented.map })
+    }
+    if (types) {
+      // Mutants exist now; the type checker's process should not sit beside the test runs.
+      types.close()
+      report.types = types.usage()
     }
     if (options.maxMutants !== undefined && mutants.length > options.maxMutants) {
       throw new RunError(`${mutants.length} mutants exceed --max-mutants ${options.maxMutants}. Split the PR or raise the limit.`)
@@ -164,6 +185,7 @@ export async function run(options: RunOptions): Promise<Report> {
     }
     return report
   } finally {
+    types?.close()
     await session?.close()
     rmSync(setupDir, { recursive: true, force: true })
   }

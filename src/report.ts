@@ -26,6 +26,13 @@ function droppedAsEquivalent(report: Report): string {
   return `${plural(report.equivalent.length, 'mutant')} dropped as equivalent (TCE)`
 }
 
+/** Only when TypeScript files needed types and went without: a string `+` there may have become a mutant. */
+function withoutTypes(report: Report): string | undefined {
+  const { untyped } = report.types
+  if (untyped.length === 0) return undefined
+  return `${plural(untyped.length, 'TypeScript file')} without type information for \`+\` (${untyped[0]!.reason}); string concatenation there may be mutated`
+}
+
 function where(report: Report, file: string, line: number, column?: number): string {
   const relative = path.relative(report.gitRoot, file)
   return column === undefined ? `${relative}:${line}` : `${relative}:${line}:${column}`
@@ -51,6 +58,8 @@ export function formatText(report: Report): string {
     }
   }
   if (report.equivalent.length > 0) lines.push(`  ${droppedAsEquivalent(report)}`)
+  const untyped = withoutTypes(report)
+  if (untyped) lines.push(`  ${untyped}`)
   for (const s of report.suppressions.filter((s) => s.isNew)) {
     lines.push(`  NEW IGNORE ${where(report, s.file, s.line)}  ${s.operators.join(', ')} -- ${s.reason}`)
   }

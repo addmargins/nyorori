@@ -19,6 +19,7 @@ PR이 **추가하거나 바꾼 코드**에만 mutation을 넣고, 그 PR 시점�
 |---|---|
 | AST 처리 | `oxc-parser` npm 패키지(voidzero의 Rust 파서) 위에 TS로 구현 |
 | equivalent 자동 판별 | TCE: `oxc-transform` + `oxc-minify`. 버전은 `oxc-parser`와 같게 고정 |
+| 문자열 `+` 판별 | TS 파일은 `tsrs`(TypeScript 7 컴파일러의 Rust 포트)의 unstable API로 타입을 본다. optionalDependency로 버전을 정확히 고정하고, 쓸 수 없으면 문법 규칙으로 돌아간다 |
 | 이 PR이 새로 추가한 억제 | `warn`: 통과시키되 경고 어노테이션과 요약 맨 위에 표시 |
 | NoCoverage | Survived와 똑같이 CI 실패 |
 
@@ -32,6 +33,7 @@ nyorori run --base <ref>
                   (테스트 파일, coverage.exclude, --exclude 제외)
   3. mutant 생성   oxc-parser로 파싱 → 바뀐 줄에 앵커가 걸린 노드에만 mutant를 만든다
                   → 정적 equivalent 필터 (L1: 휴리스틱, TCE)
+                  TS 파일의 `+`는 tsrs에 타입을 묻는다. tsrs 프로세스는 이 단계에서만 떠 있다
                   → 억제 주석 읽기 (L2)
   4. 계측          모든 mutant를 파일에 한꺼번에 넣는다 (mutant schemata)
                   Vite 플러그인(enforce: 'pre')이 원본 대신 계측된 코드를 돌려준다
@@ -143,6 +145,7 @@ src/
 ├─ git.ts                merge-base, git diff → 바뀐 줄
 ├─ mutate/generate.ts    oxc-parser AST 순회(visitorKeys, ScopeTracker) → 지점과 mutant, L1 휴리스틱, L2 억제 주석
 ├─ mutate/equivalent.ts  L1 TCE: oxc-transform + oxc-minify 결과가 원본과 같은 mutant를 버림
+├─ mutate/typecheck.ts   tsrs 어댑터: `+`가 문자열 연결인지 숫자 덧셈인지 타입으로 답함
 ├─ mutate/instrument.ts  schemata 삽입, 소스맵, 계측 결과 파싱 확인
 ├─ run.ts                오케스트레이션: 세션 관리, 기준 실행, mutant별 실행, 판정
 ├─ session.ts            별도 프로세스에서 Vitest Node API 실행 (플러그인, setup 파일, provide)
@@ -164,6 +167,46 @@ action.yml               composite action: npm ci 후 dist/cli.js 실행
 GitHub Action에서는 `::error file=…,line=…` 워크플로 명령을 쓴다.
 그래서 토큰 권한 없이도 문제가 된 mutant가 PR diff의 해당 줄에 바로 표시된다.
 merge-base를 구하려면 `actions/checkout`에 `fetch-depth: 0`이 필요하다. merge-base가 없으면 이것을 안내하고 exit 2로 끝낸다.
+
+### 타입 정보 (tsrs)
+
+`name + suffix`가 문자열 연결인지는 문법만으로 알 수 없다. 그래서 TS 파일의 `+`는 `tsrs`에 타입을 묻는다(L1 참고).
+`tsrs`는 TypeScript 7 컴파일러와 언어 서버를 Rust로 옮긴 것이고, TypeScript 7의 IPC API를 `tsrs/unstable/sync`로 그대로 제공한다.
+동기 API라서 동기로 도는 mutant 생성 안에서 바로 물을 수 있다.
+
+- **설치.** `optionalDependencies`에 버전을 정확히 고정한다(`0.18.0-ts7.1.0-dev.20260929`).
+  - JS 패키지는 모든 플랫폼에 설치되고, 네이티브 바이너리(약 29MB, lib `.d.ts` 포함 32MB)는 `@tsrs/<플랫폼>` optional 패키지에 따로 있다.
+  - 바이너리가 없는 플랫폼에서도 설치는 실패하지 않는다. `npm install --os=win32`에서는 `tsrs`만 설치되고 바이너리 패키지는 빠졌다. `--omit=optional`이면 `tsrs` 자체가 없다.
+  - npm 10의 lockfile에는 libc가 기록되지 않아서, `npm ci`(Action의 설치 단계)는 Linux x64에서 glibc용과 musl용 바이너리를 모두 받는다(54MB). oxc 바인딩도 같다. 실행할 때는 맞는 쪽만 쓴다.
+- **지연 로딩.** 바뀐 줄에 `+`가 있는 TS 파일(`.ts`, `.tsx`, `.mts`, `.cts`)을 처음 만났을 때에만 모듈을 읽고 프로세스를 띄운다.
+  - 모듈은 ESM이지만 생성이 동기이므로 `createRequire`로 require한다(Node 22.12 이상의 `require(esm)`). 읽는 데만 75~95ms가 든다.
+  - 그런 `+`가 없으면 tsrs는 읽지도 않는다.
+- **프로젝트 찾기.** 파일마다 snapshot을 `openFiles: [file]`로 갱신하고 `getDefaultProjectForFile`로 프로젝트를 받는다.
+  - 편집기가 파일을 열 때처럼 tsrs가 위쪽 디렉터리에서 그 파일을 포함하는 `tsconfig.json`을 찾고, `references`도 따라간다. Vite 템플릿처럼 루트 `tsconfig.json`이 `files: []`와 references만 가진 경우에도 `tsconfig.app.json`을 찾는다.
+  - 한 번 읽은 프로젝트는 tsrs가 다시 쓴다. 같은 프로젝트의 두 번째 파일은 3~6ms면 열린다.
+  - 어느 tsconfig에도 속하지 않는 파일은 기본 옵션의 inferred 프로젝트로 간다. 이것은 타입 정보가 없는 것으로 친다.
+- **질의.** oxc-parser와 tsrs의 위치는 둘 다 UTF-16 오프셋이라 그대로 쓴다. 한글이나 BMP 밖의 문자가 앞에 있어도 맞는 것을 확인했다.
+  - 피연산자 첫 토큰의 위치로 타입을 물으면 틀린다. `name.length + 1`에서는 `name`(문자열)을, `n.toFixed(1) + n`에서는 `n`(숫자)을 보게 된다.
+  - 그래서 tsrs의 AST에서 `getTokenAtPosition(sourceFile, left.end)`로 `+` 토큰을 찾고, 그 부모인 `BinaryExpression` 노드 자체를 묻는다. 왼쪽 피연산자가 끝나는 곳에서 `+` 토큰의 leading trivia가 시작하기 때문이다.
+  - 두 피연산자의 끝 위치가 oxc의 것과 다르면 묻지 않는다. 예를 들어 BOM이 있는 파일은 tsrs가 BOM을 빼고 읽으므로 한 칸씩 어긋나고, 문법 규칙으로 돌아간다.
+  - 식 전체와 두 피연산자의 타입을 `checker.getTypeAtLocation`으로 한 번에 묻는다.
+- **수명.** 생성이 끝나면 `close()`로 프로세스를 끝낸다. 그래서 Vitest가 테스트를 돌리는 동안에는 떠 있지 않다.
+  - 생성 중 예외가 나도 `run()`의 `finally`가 닫는다. CLI 프로세스가 끝날 때는 tsrs가 등록한 `exit` 훅이 남은 프로세스를 죽인다.
+  - 프로세스는 `unref()`되어 있어서 이벤트 루프를 붙잡지 않는다.
+- **실패.** 다음 경우에는 그 뒤로 tsrs를 쓰지 않고, 프로세스를 끝내고, 문법 규칙으로 돌아간다. 이유는 보고서에 남긴다.
+  - 모듈이 없다(`--omit=optional`).
+  - 바이너리가 없다(지원하지 않는 플랫폼, 다른 플랫폼에서 만든 `node_modules`).
+  - 바이너리를 실행할 수 없다.
+  - 요청이 하나라도 실패한다. unstable API가 한 번 틀리면 그 뒤의 답도 믿지 않는다.
+  - 실행할 수 없는 바이너리(EACCES 등)는 다음 tick에 child process의 `'error'` 이벤트를 낸다. 리스너가 없으면 CLI가 죽고 exit 1(발견 있음)처럼 보이게 된다. 그래서 tsrs 클라이언트 내부의 child(`client.channel.child`)에 빈 리스너를 단다. 실패는 그 뒤의 요청이 EPIPE로 알린다.
+- **보고.**
+  - `--json`의 `types`에 `{ backend: 'tsrs', files, untyped }` 또는 `{ backend: 'none', reason, untyped }`를 남긴다. `untyped`는 바뀐 줄에 `+`가 있는데 타입 없이 판단한 TS 파일과 그 이유다.
+  - 그런 파일이 있을 때만 텍스트 출력에 한 줄을 쓴다. 변수끼리의 문자열 `+`가 왜 변형됐는지 알 수 있게 하려는 것이다.
+  - `--no-types`로 끄면 tsrs를 읽지 않고, 이 줄도 쓰지 않는다.
+  - step summary와 어노테이션은 바꾸지 않는다.
+- **비용.** 이 저장소의 `src/mutate/generate.ts`(467줄, `+` 16개, 프로그램 파일 282개)를 기준으로 쟀다.
+  - 모듈 로딩 약 75ms, 프로세스 시작과 프로젝트 열기와 첫 질의 약 85ms, 그 뒤의 `+` 하나에 약 0.7ms, 같은 프로젝트의 다른 파일 하나에 4~6ms, 종료 약 10ms였다.
+  - CLI `--dry-run` 전체로는 1.09초에서 1.36초로, 실행 한 번에 0.2~0.3초가 늘었다. mutant 실행 시간에 비하면 작다.
 
 ## Equivalent mutant
 
@@ -188,7 +231,16 @@ merge-base를 구하려면 `actions/checkout`에 `fetch-depth: 0`이 필요하�
 - `x.length >= 0` 같은 항상 참인 조건은 `true`로 바꾸지 않는다.
 - 조건이 이미 `true`/`false` 리터럴이면 Condition mutant를 만들지 않는다. BooleanLiteral mutant와 겹치기 때문이다.
 - `x * 1`, `x / 1`은 `*`↔`/` 변형을 만들지 않는다.
-- 문자열 연결 `"a" + x`의 `+`는 변형하지 않는다. 문자열 변형은 2차로 미뤘다.
+- 문자열 연결 `+`는 변형하지 않는다. 문자열 변형은 2차로 미뤘다.
+  - 피연산자 하나가 문자열 리터럴이나 템플릿 리터럴이면 문법만으로 문자열 연결이다(`"a" + x`).
+  - 그 밖의 `+`는 TS 파일이면 tsrs에 타입을 묻는다("타입 정보 (tsrs)" 참고).
+    - 식 전체의 타입이 문자열 계열이면 변형하지 않는다. 체커가 정한 결과라서 문자열 변수, 템플릿 리터럴 타입, 문자열 enum, `string`으로 제한된 타입 매개변수, branded string이 모두 들어간다.
+    - 식 전체의 타입이 `number`나 `bigint`이면 변형한다. 숫자 리터럴 타입과 숫자 enum이 여기에 든다.
+    - 타입 오류 때문에 식 전체가 `any`인데 피연산자 하나가 문자열을 포함하는 union이면(`string | undefined` + 숫자) 문자열 연결로 본다.
+    - `any`, 타입 오류, tsconfig에 속하지 않는 파일, tsrs를 쓸 수 없는 경우, JS 파일은 문법 규칙만 쓴다. 이때는 변수끼리의 문자열 `+`도 변형된다.
+  - tsrs가 틀리면 다음 둘 중 하나가 된다.
+    - 숫자 `+`를 문자열로 보면 mutant를 놓친다.
+    - 문자열 `+`를 숫자로 보면 타입 정보가 없을 때처럼 변형된다.
 
 TCE가 잡지 못하는 경우가 있어서 휴리스틱도 그대로 둔다. 예를 들어 `x * 1`은 압축해도 `x*1`로 남는다.
 
@@ -304,6 +356,16 @@ return age >= 18
 - **Vitest의 임시 디렉터리.** 실행이 정상적으로 끝나면 CLI가 세션에 `vitest.close()`를 요청하므로, Vitest가 `os.tmpdir()`에 만드는 임시 디렉터리도 지워진다(5초 안에 답이 없으면 SIGKILL). 무한 루프 때문에 강제 종료한 세션의 임시 디렉터리는 남는다.
 - **스냅샷 테스트.** `update: false`로 실행하므로, mutant가 스냅샷을 바꾸면 killed가 된다.
 - **flaky 테스트.** mutant가 우연히 killed로 판정되는 방향이라서 판정이 느슨해질 뿐, 거짓 실패는 만들지 않는다. 기준 실행이 실패하면 전체를 중단한다.
+- **tsrs 의존.**
+  - API가 unstable이다. 같은 TypeScript 7 API라도 typescript@7.0.2와 메서드 이름이 다르다. tsrs는 `createSnapshot`/`getConfiguredProject`, 7.0.2는 `updateSnapshot`/`getProject`다.
+  - 그래서 버전을 정확히 고정하고, 올릴 때는 `test/typecheck.test.ts`로 확인한다. 쓰는 것은 다음과 같다.
+    - `tsrs/unstable/sync`: `API`, `createSnapshot`, `Snapshot.update({ openFiles })`, `getDefaultProjectForFile`, `Project.configFileName`, `program.getSourceFile`, `checker.getTypeAtLocation`, `Type.flags`/`isUnionType`/`getTypes`, `TypeFlags`
+    - `tsrs/unstable/ast`: `getTokenAtPosition`, `isBinaryExpression`, `SyntaxKind`
+    - 공개되지 않은 클라이언트 내부 필드 `client.channel.child`. 구조가 바뀌면 이 보호만 조용히 빠진다.
+  - 버전 이름(`0.18.0-ts7.1.0-dev.20260929`)대로 TypeScript 7.1 개발판을 따라가는 0.x 버전이다.
+  - 바이너리는 macOS arm64와 Linux x64/arm64(glibc, musl)용만 있다. Windows와 Intel macOS에서는 설치는 되지만 타입 정보 없이 돈다.
+  - 통신이 동기라서, tsrs가 답하지 않고 멈추면 CLI도 멈춘다. 시간 제한을 걸 수 없다.
+  - 프로젝트를 여는 비용은 프로그램 크기에 비례한다. 큰 monorepo에서는 references를 따라 여러 프로젝트를 읽을 수 있다.
 - **브라우저 모드.** 지원하지 않는다.
 - **실행 시간.**
   - mutant 수 × 관련 테스트 시간만큼 걸린다.

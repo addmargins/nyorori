@@ -12,6 +12,7 @@ import {
 import { ScopeTracker } from 'oxc-walker'
 import { isOperator, type EquivalentMutant, type Mutant, type Operator, type Suppression, type SuppressionProblem } from '../types.ts'
 import { dropEquivalent } from './equivalent.ts'
+import type { TypeOracle } from './typecheck.ts'
 
 /**
  * A place in the source that the instrumenter rewrites. An expression site
@@ -100,6 +101,8 @@ const BINARY: Record<string, [Operator, string]> = {
   '%': ['Arithmetic', '*'],
 }
 
+const NO_TYPES: TypeOracle = { plus: () => 'unknown' }
+
 const SUPPRESS_PREFIX = 'nyorori-ignore'
 const SUPPRESS_RE = /^nyorori-ignore-next-line\s+([A-Za-z]+(?:\s*,\s*[A-Za-z]+)*)\s+--\s+(\S.*)$/
 
@@ -107,8 +110,9 @@ const SUPPRESS_RE = /^nyorori-ignore-next-line\s+([A-Za-z]+(?:\s*,\s*[A-Za-z]+)*
  * Builds the mutants whose anchor lies on one of `changed` lines, plus the
  * suppression comments that apply to them. Mutants that minify to the
  * original code are set aside in `equivalent`. Ids start at `firstId`.
+ * `types` tells string `+` from numeric `+` where the syntax cannot.
  */
-export function generate(file: string, code: string, changed: ReadonlySet<number>, firstId: number): GenerateResult {
+export function generate(file: string, code: string, changed: ReadonlySet<number>, firstId: number, types = NO_TYPES): GenerateResult {
   const parsed = parseSync(file, code)
   if (parsed.errors.length > 0) {
     throw new ParseError(parsed.errors[0]!.message)
@@ -143,6 +147,17 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
   const edit = (site: Span, from: number, to: number, insert: string) =>
     code.slice(site.start, from) + insert + code.slice(to, site.end)
 
+  /**
+   * String `+` is not mutated (string mutations are deferred). A string or
+   * template literal operand settles it; otherwise the operand types do, where known.
+   */
+  function isConcatenation(left: Node, right: Node, at: number): boolean {
+    if (isStringLike(left) || isStringLike(right)) return true
+    // Only a `+` that can become a mutant is worth starting the type checker for.
+    if (!changed.has(position(at).line)) return false
+    return types.plus(file, left, right) === 'string'
+  }
+
   function condition(test: Expression | null, values: string[]): void {
     if (!test) return
     const inner = unwrap(test)
@@ -160,10 +175,10 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
         if (!entry) break
         const [operator, replacementOp] = entry
         const { left, right } = node
-        if (node.operator === '+' && (isStringLike(left) || isStringLike(right))) break
         if ((node.operator === '*' || node.operator === '/') && isNumber(right, 1)) break
         const at = findToken(code, left.end, right.start, node.operator)
         if (at < 0) break
+        if (node.operator === '+' && isConcatenation(left, right, at)) break
         add(node, 'expression', at, operator, edit(node, at, at + node.operator.length, replacementOp),
           `\`${node.operator}\` → \`${replacementOp}\``)
         break
