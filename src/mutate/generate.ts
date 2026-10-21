@@ -19,6 +19,12 @@ export interface Site {
   end: number
   kind: 'expression' | 'body'
   mutants: PlannedMutant[]
+  /**
+   * The expression statement this site begins, if any. A `(` there would
+   * continue a previous line that has no semicolon (`g(1)` then `(i++)` is a
+   * call), so the rewrite wraps the whole statement in a block.
+   */
+  statement?: { start: number; end: number }
 }
 
 export interface PlannedMutant {
@@ -101,6 +107,7 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
   const lines = lineStarts(code)
   const position = (offset: number) => toPosition(lines, offset)
   const sites = new Map<string, Site>()
+  const statements = new Map<number, Node>()
 
   function add(
     site: { start: number; end: number },
@@ -229,6 +236,7 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
 
   function visit(node: Node, parent: Node | null, inFunction: boolean, inConsole: boolean): void {
     if (SKIP_NODES.has(node.type) || node.declare === true) return
+    if (node.type === 'ExpressionStatement') statements.set(node.start, node)
     // Module-level code runs once at import time; only code inside functions is mutated.
     if (!inConsole && (inFunction || FUNCTIONS.has(node.type))) mutate(node, parent)
     const childInFunction = inFunction || FUNCTIONS.has(node.type)
@@ -246,6 +254,10 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
 
   visit(parsed.program as unknown as Node, null, false, false)
 
+  for (const site of sites.values()) {
+    const statement = site.kind === 'expression' ? statements.get(site.start) : undefined
+    if (statement) site.statement = { start: statement.start, end: statement.end }
+  }
   const sorted = [...sites.values()].sort((a, b) => a.start - b.start || b.end - a.end)
   // Before ids are assigned, so each remaining site keeps a contiguous id range.
   const { sites: ordered, equivalent } = dropEquivalent(file, code, sorted)

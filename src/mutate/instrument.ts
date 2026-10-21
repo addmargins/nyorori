@@ -30,6 +30,7 @@ export class InstrumentError extends Error {}
  * Inserts all mutants of a file into its source at once (mutant schemata):
  *   site            →  (__nyorori_h(lo, hi) ? (site) : active === lo ? (m1) : (m2))
  *   function body   →  { if (!__nyorori_h(id, id)) return; ...body }
+ *   statement start →  { (__nyorori_h(...) ? ...) }   (see Site.statement)
  * Original text stays in place, so the source map is exact outside the inserted code.
  */
 export function instrument(file: string, code: string, sites: readonly Site[]): { code: string; map: string } {
@@ -50,6 +51,12 @@ export function instrument(file: string, code: string, sites: readonly Site[]): 
     )
     s.prependRight(site.start, `(__nyorori_h(${lo}, ${hi}) ? (`)
     s.appendLeft(site.end, `) : ${branches.join('')})`)
+  }
+  // After all sites, so the braces land outside every wrapper at the same position.
+  const statements = new Map(sites.flatMap((site) => (site.statement ? [[site.statement.start, site.statement] as const] : [])))
+  for (const statement of statements.values()) {
+    s.prependRight(statement.start, '{ ')
+    s.appendLeft(statement.end, ' }')
   }
   s.append(HELPER)
 

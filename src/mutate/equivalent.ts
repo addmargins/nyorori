@@ -54,14 +54,16 @@ export function normalize(file: string, code: string): string | undefined {
 }
 
 /**
- * The whole file with one mutant applied. The replacement is parenthesized, as
- * in the instrumented code, so that operator precedence cannot regroup it
- * (`a && b && c` with the inner `&&` → `||`). At the start of a line a `(`
- * would continue a previous line that has no semicolon, so it is left bare there.
+ * The whole file with one mutant applied, written the way the instrumenter
+ * writes it: the replacement is parenthesized so operator precedence cannot
+ * regroup it (`a && b && c` with the inner `&&` → `||`), and a statement that
+ * starts with the site is wrapped in a block (see Site.statement).
  */
-function applyMutant(code: string, site: Site, planned: PlannedMutant): string {
+export function applyMutant(code: string, site: Site, planned: PlannedMutant): string {
   if (site.kind === 'body') return `${code.slice(0, site.start)} return;${code.slice(site.start)}`
-  const lineStart = code.lastIndexOf('\n', site.start - 1) + 1
-  const replacement = code.slice(lineStart, site.start).trim() === '' ? planned.replacement : `(${planned.replacement})`
-  return code.slice(0, site.start) + replacement + code.slice(site.end)
+  const mutated = `${code.slice(0, site.start)}(${planned.replacement})${code.slice(site.end)}`
+  if (!site.statement) return mutated
+  // The statement starts at the site, so only its end moves.
+  const end = site.statement.end + mutated.length - code.length
+  return `${mutated.slice(0, site.statement.start)}{ ${mutated.slice(site.statement.start, end)} }${mutated.slice(end)}`
 }

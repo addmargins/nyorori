@@ -1,6 +1,7 @@
 import vm from 'node:vm'
 import { describe, expect, test } from 'vitest'
-import { generate, type Site } from '../src/mutate/generate.ts'
+import { applyMutant } from '../src/mutate/equivalent.ts'
+import { generate } from '../src/mutate/generate.ts'
 import { instrument } from '../src/mutate/instrument.ts'
 
 const SOURCE = `function compare(a, b) { return a >= b && a !== 3 }
@@ -25,11 +26,6 @@ function evaluate(code: string, state: object): string {
   }
 }
 
-function applyDirectly(code: string, site: Site, replacement: string): string {
-  if (site.kind === 'body') return `${code.slice(0, site.start)} return;${code.slice(site.start)}`
-  return code.slice(0, site.start) + replacement + code.slice(site.end)
-}
-
 describe('instrument', () => {
   const { sites, mutants } = generate('file.js', SOURCE, changed, 1)
   const instrumented = instrument('file.js', SOURCE, sites).code
@@ -46,7 +42,7 @@ describe('instrument', () => {
   test.each(sites.flatMap((site) => site.mutants.map((planned) => ({ site, planned, label: `${planned.mutant.id} ${planned.mutant.operator} ${planned.mutant.description}` }))))(
     'mutant $label behaves like the source with only that change',
     ({ site, planned }) => {
-      const expected = evaluate(applyDirectly(SOURCE, site, planned.replacement), state(0))
+      const expected = evaluate(applyMutant(SOURCE, site, planned), state(0))
       expect(evaluate(instrumented, state(planned.mutant.id))).toBe(expected)
     },
   )
@@ -72,5 +68,38 @@ describe('instrument', () => {
   test('keeps a source map that points into the original', () => {
     const { map } = instrument('file.js', SOURCE, sites)
     expect(JSON.parse(map)).toMatchObject({ version: 3, sources: ['file.js'], sourcesContent: [SOURCE] })
+  })
+})
+
+describe('instrument without semicolons', () => {
+  // Each mutated statement follows a line whose last token could be called or indexed.
+  const source = [
+    'function g(x) { return x }',
+    'function f(n) {',
+    '  let i = n',
+    '  const out = g(1)',
+    '  i++',
+    '  const list = [1, 2]',
+    '  !n ? i-- : i++',
+    '  if (n) i--',
+    '  else n > 0 && i++',
+    '  return [i, out, list.length]',
+    '}',
+    'function main() { return JSON.stringify([f(0), f(1), f(-1)]) }',
+  ].join('\n')
+  const { sites, mutants } = generate('file.js', source, new Set([5, 7, 8, 9]), 1)
+  const instrumented = instrument('file.js', source, sites).code
+  const state = (active: number) => ({ active, limit: 0, hits: null, count: 0, exceeded: false })
+
+  test('wraps statements that start with a site in a block', () => {
+    expect(sites.some((site) => site.statement)).toBe(true)
+    expect(instrumented).toContain('const out = g(1)\n  { (__nyorori_h(')
+    expect(evaluate(instrumented, state(0))).toBe(evaluate(source, state(0)))
+  })
+
+  test.each(mutants.map((m) => ({ id: m.id, label: `${m.id} ${m.operator} ${m.description}` })))('mutant $label behaves like the source with only that change', ({ id }) => {
+    const site = sites.find((s) => s.mutants.some((p) => p.mutant.id === id))!
+    const planned = site.mutants.find((p) => p.mutant.id === id)!
+    expect(evaluate(instrumented, state(id))).toBe(evaluate(applyMutant(source, site, planned), state(0)))
   })
 })
