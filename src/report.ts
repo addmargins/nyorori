@@ -1,0 +1,125 @@
+import path from 'node:path'
+import type { Report } from './run.ts'
+import type { MutantResult, MutantStatus } from './types.ts'
+
+const FAILING: ReadonlySet<MutantStatus> = new Set(['Survived', 'NoCoverage'])
+
+export function failures(report: Report): MutantResult[] {
+  return report.results.filter((r) => FAILING.has(r.status))
+}
+
+export function exitCode(report: Report): 0 | 1 {
+  if (report.dryRun) return 0
+  return failures(report).length > 0 || report.problems.length > 0 ? 1 : 0
+}
+
+function counts(report: Report): string {
+  const order: MutantStatus[] = ['Killed', 'Timeout', 'Survived', 'NoCoverage', 'Ignored']
+  return order
+    .map((status) => [status, report.results.filter((r) => r.status === status).length] as const)
+    .filter(([, n]) => n > 0)
+    .map(([status, n]) => `${n} ${status}`)
+    .join(', ')
+}
+
+function where(report: Report, file: string, line: number, column?: number): string {
+  const relative = path.relative(report.gitRoot, file)
+  return column === undefined ? `${relative}:${line}` : `${relative}:${line}:${column}`
+}
+
+const EXPLAIN: Record<string, string> = {
+  Survived: 'every test still passes with this change',
+  NoCoverage: 'no test runs this code',
+}
+
+export function formatText(report: Report): string {
+  const lines: string[] = []
+  const n = report.results.length
+  if (n === 0) {
+    lines.push('nyorori: no mutants in the changed code.')
+  } else if (report.dryRun) {
+    lines.push(`nyorori: ${plural(n, 'mutant')} in ${plural(report.files.length, 'changed file')} (dry run)`)
+    for (const r of report.results) lines.push(`  ${where(report, r.file, r.line, r.column)}  ${r.operator}  ${r.description}`)
+  } else {
+    lines.push(`nyorori: ${plural(n, 'mutant')} in ${plural(report.files.length, 'changed file')}: ${counts(report)}`)
+    for (const r of failures(report)) {
+      lines.push(`  ${r.status.padEnd(10)} ${where(report, r.file, r.line, r.column)}  ${r.operator}  ${r.description}  (${EXPLAIN[r.status]})`)
+    }
+  }
+  for (const s of report.suppressions.filter((s) => s.isNew)) {
+    lines.push(`  NEW IGNORE ${where(report, s.file, s.line)}  ${s.operators.join(', ')} -- ${s.reason}`)
+  }
+  for (const p of report.problems) lines.push(`  PROBLEM    ${where(report, p.file, p.line)}  ${p.message}`)
+  return lines.join('\n')
+}
+
+function escapeData(value: string): string {
+  return value.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A')
+}
+
+function escapeProperty(value: string): string {
+  return escapeData(value).replace(/:/g, '%3A').replace(/,/g, '%2C')
+}
+
+function command(kind: 'error' | 'warning', report: Report, file: string, line: number, column: number | undefined, title: string, message: string): string {
+  const props = [`file=${escapeProperty(path.relative(report.gitRoot, file))}`, `line=${line}`]
+  if (column !== undefined) props.push(`col=${column}`)
+  props.push(`title=${escapeProperty(title)}`)
+  return `::${kind} ${props.join(',')}::${escapeData(message)}`
+}
+
+/** GitHub workflow commands; they show up on the PR diff without any token. */
+export function formatAnnotations(report: Report): string[] {
+  if (report.dryRun) return []
+  const out: string[] = []
+  for (const r of failures(report)) {
+    const title = r.status === 'Survived' ? 'nyorori: mutant survived' : 'nyorori: changed code is not tested'
+    const advice = r.status === 'Survived'
+      ? `No test fails when ${r.operator} changes this code (${r.description}). Add or strengthen a test that checks this behavior.`
+      : `No test runs this code, so the ${r.operator} mutant (${r.description}) goes unnoticed. Add a test that exercises it.`
+    out.push(command('error', report, r.file, r.line, r.column, title, advice))
+  }
+  for (const s of report.suppressions.filter((s) => s.isNew)) {
+    out.push(command('warning', report, s.file, s.line, undefined, 'nyorori: new suppression', `${s.operators.join(', ')} -- ${s.reason}`))
+  }
+  for (const p of report.problems) out.push(command('error', report, p.file, p.line, undefined, 'nyorori: suppression', p.message))
+  return out
+}
+
+function cell(value: string): string {
+  return value.replace(/\|/g, '\\|').replace(/\n/g, ' ')
+}
+
+export function formatSummary(report: Report): string {
+  const lines = ['## nyorori', '']
+  const newSuppressions = report.suppressions.filter((s) => s.isNew)
+  if (newSuppressions.length > 0) {
+    lines.push(`> [!WARNING]`, `> This PR adds ${newSuppressions.length} suppression(s). Check that each reason holds.`, '')
+    lines.push('| Location | Operators | Reason |', '|---|---|---|')
+    for (const s of newSuppressions) {
+      lines.push(`| \`${where(report, s.file, s.line)}\` | ${s.operators.join(', ')} | ${cell(s.reason)} |`)
+    }
+    lines.push('')
+  }
+  const failed = failures(report)
+  if (report.results.length === 0) {
+    lines.push('No mutants in the changed code.')
+  } else if (failed.length === 0) {
+    lines.push(`All ${report.results.length} mutants in the changed code are detected by tests (${counts(report)}).`)
+  } else {
+    lines.push(`**${failed.length} of ${report.results.length} mutants in the changed code go unnoticed by tests** (${counts(report)}).`, '')
+    lines.push('| Status | Location | Operator | Change |', '|---|---|---|---|')
+    for (const r of failed) {
+      lines.push(`| ${r.status} | \`${where(report, r.file, r.line, r.column)}\` | ${r.operator} | ${cell(r.description)} |`)
+    }
+  }
+  if (report.problems.length > 0) {
+    lines.push('', '### Suppression problems', '')
+    for (const p of report.problems) lines.push(`- \`${where(report, p.file, p.line)}\`: ${p.message}`)
+  }
+  return `${lines.join('\n')}\n`
+}
+
+function plural(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? '' : 's'}`
+}

@@ -1,0 +1,33 @@
+{
+  "name": "nyorori",
+  "version": "0.0.0",
+  "description": "Diff-scoped mutation testing for Vitest: fail the PR when changed code has surviving mutants",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "nyorori": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": "^22.12.0 || ^24.0.0 || >=26.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "npm run build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "magic-string": "^1.4.3",
+    "oxc-parser": "^0.155.0",
+    "picomatch": "^4.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/picomatch": "^4.0.3",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  }
+}

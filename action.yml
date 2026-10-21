@@ -1,0 +1,44 @@
+name: nyorori
+description: Fail a pull request when its Vitest tests do not notice mutations of the code it changed
+branding:
+  icon: check-circle
+  color: orange
+
+inputs:
+  base:
+    description: Git ref or SHA to diff against. Defaults to the pull request's base commit.
+    default: ${{ github.event.pull_request.base.sha }}
+  working-directory:
+    description: Root of the Vitest project.
+    default: .
+  exclude:
+    description: Globs of source files to leave out, relative to the working directory, one per line.
+    default: ''
+  max-mutants:
+    description: Stop with an error instead of running more mutants than this.
+    default: ''
+  timeout:
+    description: Extra milliseconds a mutant run may take beyond twice the baseline before it counts as a timeout.
+    default: '10000'
+
+runs:
+  using: composite
+  steps:
+    - name: Install nyorori
+      shell: bash
+      run: npm ci --prefix "$GITHUB_ACTION_PATH" --no-audit --no-fund --loglevel=error
+    - name: Run nyorori
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        NYORORI_BASE: ${{ inputs.base }}
+        NYORORI_EXCLUDE: ${{ inputs.exclude }}
+        NYORORI_MAX_MUTANTS: ${{ inputs.max-mutants }}
+        NYORORI_TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        args=(run --base "$NYORORI_BASE" --timeout "$NYORORI_TIMEOUT")
+        while IFS= read -r glob; do
+          if [ -n "$glob" ]; then args+=(--exclude "$glob"); fi
+        done <<< "$NYORORI_EXCLUDE"
+        if [ -n "$NYORORI_MAX_MUTANTS" ]; then args+=(--max-mutants "$NYORORI_MAX_MUTANTS"); fi
+        node "$GITHUB_ACTION_PATH/dist/cli.js" "${args[@]}"
