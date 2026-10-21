@@ -84,6 +84,7 @@ function f() { if (!__nyorori_h(5, 5)) return; ... }
 다음은 개별 mutant의 판정이 아니라 실행 전체를 exit 2로 끝낸다.
 - 계측한 코드가 파싱되지 않는 경우
 - 다른 플러그인이 먼저 소스를 바꿔 놓아 계측할 수 없는 경우
+- 계측 플러그인이 닿지 않는 Vitest project가 있는 경우 (남은 위험의 "여러 project 설정" 참고)
 
 NoCoverage는 테스트를 돌리지 않고 판정하므로 비용이 들지 않는다.
 TCE로 버린 mutant는 판정 대상이 아니다. 실행하지 않고, 개수만 보고한다(L1 참고).
@@ -141,13 +142,20 @@ src/
 ├─ mutate/instrument.ts  schemata 삽입, 소스맵, 계측 결과 파싱 확인
 ├─ run.ts                오케스트레이션: 세션 관리, 기준 실행, mutant별 실행, 판정
 ├─ session.ts            별도 프로세스에서 Vitest Node API 실행 (플러그인, setup 파일, provide)
+├─ vitest.ts             프로젝트가 쓰는 Vitest 찾기 (Vite+ 포함)
 ├─ protocol.ts           CLI ↔ 세션 IPC 메시지
 └─ report.ts             텍스트, GitHub 어노테이션, step summary
 action.yml               composite action: npm ci 후 dist/cli.js 실행
 ```
 
-- 세션은 프로젝트에 설치된 Vitest를 찾아 import한다. 그래서 프로젝트가 고정한 버전과 설정을 그대로 쓴다.
-- setup 파일은 `'vitest'`를 import해야 하므로, 프로젝트의 `node_modules/.nyorori/`에 생성한다.
+- 세션은 프로젝트가 쓰는 Vitest를 찾아 import한다. 그래서 프로젝트가 고정한 버전과 설정을 그대로 쓴다.
+  - 프로젝트 루트나 그 위의 `package.json`이 `vite-plus`에 의존하면, vite-plus가 의존하는 Vitest를 쓴다. `vp test`도 vite-plus의 Vitest를 먼저 찾는다. 이 Vitest는 `vite` 대신 `@voidzero-dev/vite-plus-core` 위에서 돈다.
+  - pnpm에서는 vite-plus에만 의존하는 프로젝트의 루트에서 `vitest`가 보이지 않는다. 그래서 디렉터리를 직접 뒤지지 않고 Node의 모듈 해석(`createRequire`)으로 찾는다.
+  - 그 밖에는 루트에서 `vitest`를 해석한다. 둘 다 없으면 exit 2로 끝낸다.
+- setup 파일은 CLI가 실행마다 만드는 임시 디렉터리(`os.tmpdir()` 아래 `nyorori-*`)에 둔다.
+  - setup 파일은 `'vitest'`를 import한다. Vitest의 `vitest:resolve-core` 플러그인은 bare `'vitest'`를 import하는 파일의 위치와 상관없이 실행 중인 Vitest의 dist로 해석한다. 그래서 사용자의 `node_modules`에 쓰지 않아도 된다. `pool: 'threads'`, `isolate: false`, `vmThreads`에서도 확인했다.
+  - CLI는 세션을 SIGKILL하므로 세션이 스스로 지울 수 없다. 그래서 디렉터리는 CLI가 만들고 실행이 끝나면 지운다. CLI가 먼저 죽으면 세션이 IPC 연결이 끊길 때 지운다.
+- `createVitest` 직후에 모든 project가 계측 플러그인을 거치는지 확인한다. 플러그인이 닿지 않는 project의 코드는 테스트가 실행하지 않는 것처럼 보이므로, 판정하기 전에 project 이름과 함께 exit 2로 멈춘다.
 
 GitHub Action에서는 `::error file=…,line=…` 워크플로 명령을 쓴다.
 그래서 토큰 권한 없이도 문제가 된 mutant가 PR diff의 해당 줄에 바로 표시된다.
@@ -267,10 +275,25 @@ return age >= 18
   - `runTestSpecifications()`의 반환값에는 이 인스턴스가 지금까지 실행한 모든 모듈이 들어 있다. 앞선 mutant에서 실패한 파일이 뒤 mutant의 결과에 섞이므로, 결과는 `onTestRunEnd`로 받는다.
   - Vitest 5의 디스크 transform 캐시(`fsModuleCache`)는 소스 내용만으로 키를 만든다. 다른 실행이 다른 mutant id로 계측한 코드를 재사용하게 되므로 끈다. 실행마다 1초 정도 느려진다. 계획 해시를 캐시 키에 넣으면(`defineCacheKeyGenerator`) 되살릴 수 있다.
   - setup 파일의 `afterAll(({}, suite) => …)` 형태는 Vitest 5에서 바뀐 것이다.
+  - setup 파일을 `node_modules` 밖에 두는 것은 `vitest:resolve-core`가 bare `'vitest'`를 실행 중인 Vitest로 해석하는 동작에 기댄다.
+  - 지원하지 않는 설정은 `project.vite.config.plugins`와 `project.config.experimental.viteModuleRunner`로 알아낸다.
   - 지원 범위를 Vitest 5.x로 고정한다.
-- **여러 project(workspace) 설정.**
-  - setup 파일은 모든 project에 추가한다.
-  - 계측 플러그인은 루트 Vite 서버에만 넘긴다. `extends: true`가 아닌 project에도 적용되는지는 아직 확인하지 않았다.
+- **여러 project 설정.**
+  - 계측 플러그인은 `createVitest`로 루트 Vite 서버에만 넘긴다. setup 파일은 모든 project에 추가한다.
+  - Vitest 5에서 `test` 옵션만 바꾸는 inline project는 루트 Vite 서버를 같이 쓴다. 그래서 계측되고, 지원한다.
+  - 다음 project는 Vitest가 Vite 서버를 따로 만든다.
+    - Vite 옵션(`plugins`, `resolve` 등)을 직접 정한 inline project
+    - Vite 설정에 영향을 주는 `test` 옵션(`alias`, `css`, `mode`, `root` 등)을 정한 inline project
+    - `extends: false`이거나 `extends`로 선언한 설정이 아닌 다른 설정 파일을 가리키는 inline project
+    - 설정 파일이나 디렉터리로 정한 project
+  - Vitest는 이런 서버에 루트의 `plugins`를 넘기지 않는다(`inheritRootViteOverrides`). 그래서 계측되지 않고, 이 project의 테스트만 실행하는 코드는 모두 NoCoverage가 되어 CI를 거짓으로 실패시킨다. 이런 project가 있으면 시작할 때 project 이름과 함께 exit 2로 멈춘다.
+  - 이런 project에 플러그인을 넣는 공식 방법은 Vitest 5.0.5에 없다.
+    - Node API로 넘긴 `plugins`는 루트 서버에만 들어간다.
+    - `configureVitest` 훅은 이미 그 project 설정에 있는 플러그인에서만 불린다.
+    - 사용자 설정을 감싸 project마다 플러그인을 넣는 방법은 설정 형태가 다양해서 깨지기 쉽다.
+  - project마다 설정 파일이 있는 monorepo는 `--root`로 그 디렉터리를 가리키면 그 설정이 루트 설정이 되므로 돌릴 수 있다.
+- **`experimental.viteModuleRunner: false`.** Vite transform을 거치지 않고 Node가 직접 import하므로 계측되지 않는다. 같은 이유로 시작할 때 exit 2로 멈춘다.
+- **Vitest의 임시 디렉터리.** 세션은 SIGKILL로 끝나므로, Vitest가 `os.tmpdir()`에 만드는 임시 디렉터리(변환 결과)를 지우지 못한다. 실행이 끝날 때와 세션을 다시 띄울 때마다 남는다. 세션의 `TMPDIR`을 CLI의 임시 디렉터리로 돌리거나, 정상 종료 때 `vitest.close()`를 기다리면 없앨 수 있다.
 - **스냅샷 테스트.** `update: false`로 실행하므로, mutant가 스냅샷을 바꾸면 killed가 된다.
 - **flaky 테스트.** mutant가 우연히 killed로 판정되는 방향이라서 판정이 느슨해질 뿐, 거짓 실패는 만들지 않는다. 기준 실행이 실패하면 전체를 중단한다.
 - **브라우저 모드.** 지원하지 않는다.
@@ -282,6 +305,6 @@ return age >= 18
 ## 다음 단계
 
 1. 실제 저장소 몇 곳에서 돌려 보고 오탐과 실행 시간을 측정한다.
-2. 여러 project 설정에서의 동작을 확인한다.
+2. Vite 서버를 따로 쓰는 project와 `experimental.viteModuleRunner: false`를 지원한다.
 3. mutant를 병렬로 실행한다. Vitest 세션 여러 개를 쓰는 방식이다.
 4. B: base와 head를 비교해서 기존 테스트가 약해졌는지 확인한다.

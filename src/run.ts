@@ -1,5 +1,6 @@
 import { fork, type ChildProcess } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { changedLines, gitRoot, mergeBase } from './git.ts'
 import { generate, ParseError } from './mutate/generate.ts'
@@ -55,8 +56,12 @@ export async function run(options: RunOptions): Promise<Report> {
   const report: Report = { gitRoot: repo, base, files: [], results: [], equivalent: [], suppressions: [], problems: [], dryRun: options.dryRun }
   if (candidates.length === 0) return report
 
-  let session = await Session.start(root, candidates, options.exclude)
+  // Holds the session's Vitest setup file. The CLI owns it because it SIGKILLs sessions.
+  const setupDir = mkdtempSync(path.join(os.tmpdir(), 'nyorori-'))
+  const start = () => Session.start({ type: 'init', root, candidates, exclude: options.exclude, setupDir })
+  let session: Session | undefined
   try {
+    session = await start()
     const plans: FilePlan[] = []
     const mutants: Mutant[] = []
     for (const file of session.eligible) {
@@ -139,7 +144,7 @@ export async function run(options: RunOptions): Promise<Report> {
         if (outcome === 'timeout') {
           status = 'Timeout'
           session.kill()
-          session = await Session.start(root, candidates, options.exclude)
+          session = await start()
           await session.plan(plans)
         } else {
           status = judge(outcome.modules, outcome.unhandledErrors)
@@ -159,7 +164,8 @@ export async function run(options: RunOptions): Promise<Report> {
     }
     return report
   } finally {
-    session.kill()
+    session?.kill()
+    rmSync(setupDir, { recursive: true, force: true })
   }
 }
 
@@ -189,13 +195,16 @@ class Session {
     })
   }
 
-  static async start(root: string, candidates: string[], exclude: string[]): Promise<Session> {
+  static async start(init: Extract<Request, { type: 'init' }>): Promise<Session> {
     const entry = new URL(import.meta.url.endsWith('.ts') ? './session.ts' : './session.js', import.meta.url)
     // Detached so the session leads its own process group and kill() also stops its test workers.
-    const child = fork(entry, [], { cwd: root, detached: true, stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
+    const child = fork(entry, [], { cwd: init.root, detached: true, stdio: ['ignore', 'ignore', 'inherit', 'ipc'] })
     const session = new Session(child)
-    const response = await session.send({ type: 'init', root, candidates, exclude })
-    if (response === 'timeout' || response.type !== 'ready') throw unexpected(response)
+    const response = await session.send(init)
+    if (response === 'timeout' || response.type !== 'ready') {
+      session.kill()
+      throw unexpected(response)
+    }
     session.eligible = response.eligible
     return session
   }

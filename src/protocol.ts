@@ -7,7 +7,8 @@ export interface SpecRef {
 }
 
 export type Request =
-  | { type: 'init'; root: string; candidates: string[]; exclude: string[] }
+  /** `setupDir` is a temporary directory the CLI owns and removes after the run. */
+  | { type: 'init'; root: string; candidates: string[]; exclude: string[]; setupDir: string }
   | { type: 'plan'; files: FilePlan[] }
   | { type: 'run'; active: number; limit: number; collect: boolean; specs: SpecRef[] }
 

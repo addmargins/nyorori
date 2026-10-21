@@ -33,7 +33,7 @@ jobs:
 ```
 
 - 문제가 된 mutant는 PR diff의 해당 줄에 어노테이션으로 표시되고, 요약은 job summary에 실립니다. 토큰 권한은 필요 없습니다.
-- 프로젝트에 Vitest 5가 설치되어 있어야 합니다. nyorori는 프로젝트의 Vitest와 설정을 그대로 사용합니다.
+- 프로젝트에 Vitest 5나 Vite+(`vite-plus`)가 설치되어 있어야 합니다. nyorori는 프로젝트의 Vitest와 설정을 그대로 사용합니다. Vite+ 프로젝트에서는 `vp test`처럼 vite-plus에 들어 있는 Vitest를 씁니다.
 
 ## CLI
 
@@ -55,7 +55,7 @@ npx nyorori run --base origin/main
 
 - `0`: 모든 mutant가 테스트에 걸렸습니다.
 - `1`: 살아남은 mutant, 테스트가 실행하지 않는 코드, 또는 억제 주석의 문제가 있습니다.
-- `2`: 판정할 수 없습니다. mutant 없이도 테스트가 실패하는 경우, merge-base가 없는 경우 등입니다.
+- `2`: 판정할 수 없습니다. mutant 없이도 테스트가 실패하는 경우, merge-base가 없는 경우, [지원하지 않는 Vitest 설정](#지원하지-않는-vitest-설정)인 경우 등입니다.
 
 ## 판정
 
@@ -75,6 +75,19 @@ npx nyorori run --base origin/main
 - 테스트 파일
 - 타입 선언
 - Vitest `coverage.exclude`에 걸리는 파일(설정 파일 등)
+
+## 지원하지 않는 Vitest 설정
+
+nyorori는 Vite 플러그인으로 바뀐 코드를 계측합니다.
+플러그인이 닿지 않는 테스트에서는 바뀐 코드가 실행되지 않는 것처럼 보여 NoCoverage로 거짓 실패하게 됩니다.
+그래서 다음 설정에서는 판정하지 않고, 해당 project를 알려 주고 exit 2로 끝납니다.
+
+- `test.projects` 중 Vite 서버를 따로 쓰는 project
+  - Vite 옵션(`plugins`, `resolve` 등)이나 Vite에 영향을 주는 `test` 옵션(`alias`, `css`, `mode`, `root` 등)을 직접 정했거나, `extends: false`인 inline project
+  - 설정 파일이나 디렉터리로 정한 project. project마다 설정 파일이 있는 monorepo라면 `--root`(Action은 `working-directory`)로 project마다 따로 실행하세요.
+- `experimental.viteModuleRunner: false`
+
+Vite에 영향을 주지 않는 `test` 옵션(`name`, `include`, `environment` 등)만 바꾸는 inline project는 루트 설정의 Vite 서버를 같이 쓰므로 지원합니다.
 
 ## Mutation 연산자
 

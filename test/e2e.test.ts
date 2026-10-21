@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, test } from 'vitest'
 import type { Report } from '../src/run.ts'
@@ -31,15 +32,21 @@ function project(name: string, base: Files, head: Files): string {
   return dir
 }
 
-function nyorori(dir: string, ...args: string[]): { status: number | null; output: string; report?: Report } {
+function nyorori(dir: string, ...args: string[]): { status: number | null; output: string; report?: Report; leftovers: string[] } {
   // Keep the outer Vitest's worker settings away from the nested one.
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('VITEST') && key !== 'NODE_OPTIONS' && key !== 'GITHUB_ACTIONS'))
-  const result = spawnSync(process.execPath, [CLI, 'run', '--base', 'HEAD~1', '--json', 'report.json', ...args], { cwd: dir, encoding: 'utf8', env })
+  // A private TMPDIR shows whether the run removed its temporary directory. Vitest's
+  // own temporary directories are left out: a killed session cannot remove them.
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'nyorori-e2e-'))
+  const result = spawnSync(process.execPath, [CLI, 'run', '--base', 'HEAD~1', '--json', 'report.json', ...args], { cwd: dir, encoding: 'utf8', env: { ...env, TMPDIR: tmp } })
+  const leftovers = readdirSync(tmp).filter((name) => name.startsWith('nyorori-'))
+  rmSync(tmp, { recursive: true, force: true })
   const reportFile = path.join(dir, 'report.json')
   return {
     status: result.status,
     output: result.stdout + result.stderr,
     report: existsSync(reportFile) ? JSON.parse(readFileSync(reportFile, 'utf8')) : undefined,
+    leftovers,
   }
 }
 
@@ -162,7 +169,7 @@ test('double', () => { expect(double(3)).toBe(6) })
     }, {
       'src/stride.ts': 'export function stride(): number {\n  return 2 - 1\n}\n\nexport function double(x: number): number {\n  return x * 2\n}\n',
     })
-    const { status, report, output } = nyorori(dir, '--timeout', '1500')
+    const { status, report, output, leftovers } = nyorori(dir, '--timeout', '1500')
     expect(status, output).toBe(0)
     // Line 1 is unchanged, so stride() gets no FunctionBody mutant.
     expect(statuses(report!)).toEqual([
@@ -170,6 +177,8 @@ test('double', () => { expect(double(3)).toBe(6) })
       'src/stride.ts:5 FunctionBody body → `return`: Killed',
       'src/stride.ts:6 Arithmetic `*` → `/`: Killed',
     ])
+    // Killed sessions cannot clean up after themselves; the CLI removes their setup directory.
+    expect(leftovers).toEqual([])
   })
 
   test('drops mutants that minify to the original code, reports them and passes', () => {
@@ -210,6 +219,66 @@ test('double', () => { expect(double(3)).toBe(6) })
     expect(status, output).toBe(0)
     expect(report!.results).toEqual([])
     expect(output).toContain('nyorori: no mutants in the changed code.')
+  })
+
+  test('runs Vitest projects that share the root Vite server', () => {
+    const dir = project('projects', {
+      'vitest.config.ts': `export default {
+  test: {
+    projects: [
+      { test: { name: 'unit', include: ['test/**/*.test.ts'] } },
+      { test: { name: 'spec', include: ['test/**/*.spec.ts'] } },
+    ],
+  },
+}
+`,
+      'src/age.ts': AGE_BASE,
+      'test/age.test.ts': AGE_TEST.replace("test('sum', () => {\n  expect(sum(4)).toBe(6)\n})\n", ''),
+      'test/sum.spec.ts': "import { expect, test } from 'vitest'\nimport { sum } from '../src/age'\ntest('sum', () => { expect(sum(4)).toBe(6) })\n",
+    }, { 'src/age.ts': AGE_HEAD })
+    const { status, report, output } = nyorori(dir)
+    expect(status, output).toBe(1)
+    expect(statuses(report!)).toEqual([
+      'src/age.ts:2 ComparisonBoundary `>=` → `>`: Survived',
+      'src/age.ts:5 FunctionBody body → `return`: Killed',
+      'src/age.ts:6 Condition `isAdult(age)` → `true`: Killed',
+      'src/age.ts:6 Condition `isAdult(age)` → `false`: Killed',
+      'src/age.ts:10 FunctionBody body → `return`: Killed',
+      'src/age.ts:12 Condition `i < n` → `false`: Killed',
+      'src/age.ts:12 ComparisonBoundary `<` → `<=`: Killed',
+      'src/age.ts:12 Update `++` → `--`: Timeout',
+    ])
+    expect(report!.results[0]!.tests).toEqual(['test/age.test.ts'])
+    expect(report!.results.at(-1)!.tests).toEqual(['test/sum.spec.ts'])
+  })
+
+  describe('stops with exit code 2 where it cannot instrument code, instead of calling it untested', () => {
+    const run = (name: string, config: string) =>
+      nyorori(project(name, { 'vitest.config.ts': config, 'src/age.ts': AGE_BASE, 'test/age.test.ts': AGE_TEST }, { 'src/age.ts': AGE_HEAD }))
+
+    test('a Vitest project with its own Vite config', () => {
+      const { status, output, leftovers } = run('own-vite', `export default {
+  test: {
+    projects: [
+      { test: { name: 'unit' } },
+      { resolve: { alias: { '#src': './src' } }, test: { name: 'aliased' } },
+    ],
+  },
+}
+`)
+      expect(status, output).toBe(2)
+      expect(output).toContain('nyorori: Vitest project "aliased" has its own Vite config')
+      expect(output).toContain('This setup is not supported yet.')
+      expect(output).not.toContain('    at ')
+      expect(leftovers).toEqual([])
+    })
+
+    test('experimental.viteModuleRunner: false', () => {
+      const { status, output } = run('native-runner', 'export default { test: { experimental: { viteModuleRunner: false } } }\n')
+      expect(status, output).toBe(2)
+      expect(output).toContain('nyorori: The Vitest config sets experimental.viteModuleRunner: false')
+      expect(output).toContain('This setup is not supported yet.')
+    })
   })
 
   describe('verdicts do not leak between runs', () => {

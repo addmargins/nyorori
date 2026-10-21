@@ -3,13 +3,14 @@
  * so the CLI can kill it (and every test worker with it) when a mutant hangs
  * a worker in a loop that never reaches a mutant site.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import picomatch from 'picomatch'
 import type { Reporter, TestModule, TestProject, TestSpecification, Vitest } from 'vitest/node'
 import { PROVIDE, type ModuleResult, type Request, type Response, type SpecRef } from './protocol.ts'
 import type { FilePlan } from './types.ts'
+import { findVitest, ProjectError } from './vitest.ts'
 
 const SETUP = `import { inject, afterAll } from 'vitest'
 const s = (globalThis.__nyorori ??= {})
@@ -25,6 +26,7 @@ afterAll(({}, suite) => {
 `
 
 let vitest: Vitest | undefined
+let setupDir: string | undefined
 const plans = new Map<string, FilePlan>()
 
 // runTestSpecifications() returns every module the instance has ever run, so
@@ -41,27 +43,31 @@ function send(message: Response): void {
   process.send!(message)
 }
 
-/** Finds the project's own Vitest, so tests run with the version the project pins. */
-function findVitest(root: string): string {
-  for (let dir = root; ; dir = path.dirname(dir)) {
-    const pkg = path.join(dir, 'node_modules', 'vitest', 'package.json')
-    if (existsSync(pkg)) return path.dirname(pkg)
-    if (path.dirname(dir) === dir) throw new Error(`Cannot find vitest from ${root}. Install it in the project first.`)
-  }
-}
-
-async function init(root: string, candidates: string[], exclude: string[]): Promise<string[]> {
+async function init(root: string, candidates: string[], exclude: string[], dir: string): Promise<string[]> {
   const vitestDir = findVitest(root)
   const pkg = JSON.parse(readFileSync(path.join(vitestDir, 'package.json'), 'utf8'))
   const entry = pkg.exports['./node'].default ?? pkg.exports['./node']
   const { createVitest } = (await import(pathToFileURL(path.join(vitestDir, entry)).href)) as typeof import('vitest/node')
 
-  // The setup file imports 'vitest', so it must live where that resolves to the project's copy.
-  const setupDir = path.join(path.dirname(vitestDir), '.nyorori')
-  mkdirSync(setupDir, { recursive: true })
-  const setupFile = path.join(setupDir, 'setup.mjs')
+  // Vitest resolves a bare 'vitest' import to the running Vitest (its
+  // vitest:resolve-core plugin) wherever the importer lives, so the setup file
+  // can stay in the CLI's temporary directory instead of the project's node_modules.
+  setupDir = dir
+  const setupFile = path.join(dir, 'setup.mjs')
   writeFileSync(setupFile, SETUP)
 
+  const plugin = {
+    name: 'nyorori',
+    enforce: 'pre' as const,
+    transform(code: string, id: string) {
+      const plan = plans.get(id.split('?')[0]!)
+      if (!plan) return undefined
+      if (code !== plan.original) {
+        throw new Error(`nyorori: ${plan.file} reached the transform already changed by another plugin; it cannot be mutated.`)
+      }
+      return { code: plan.instrumented, map: plan.map }
+    },
+  }
   vitest = await createVitest(
     'test',
     {
@@ -78,24 +84,25 @@ async function init(root: string, candidates: string[], exclude: string[]): Prom
       coverage: { enabled: false },
       provide: { [PROVIDE.active]: 0, [PROVIDE.limit]: 0, [PROVIDE.collect]: false },
     },
-    {
-      plugins: [
-        {
-          name: 'nyorori',
-          enforce: 'pre',
-          transform(code: string, id: string) {
-            const plan = plans.get(id.split('?')[0]!)
-            if (!plan) return undefined
-            if (code !== plan.original) {
-              throw new Error(`nyorori: ${plan.file} reached the transform already changed by another plugin; it cannot be mutated.`)
-            }
-            return { code: plan.instrumented, map: plan.map }
-          },
-        },
-      ],
-    },
+    { plugins: [plugin] },
   )
-  for (const project of vitest.projects) project.config.setupFiles.push(setupFile)
+  // Code that never passes through the plugin looks untested, so these setups
+  // would fail the PR with false NoCoverage. Stop before judging anything.
+  for (const project of vitest.projects) {
+    const name = project.name ? `Vitest project "${project.name}"` : 'The Vitest config'
+    if (!project.vite.config.plugins.includes(plugin)) {
+      // Vitest gives such a project its own Vite server and does not pass it the root's plugins.
+      throw new ProjectError(
+        `${name} has its own Vite config (Vite options such as plugins, resolve or alias, or its own config file), so nyorori cannot instrument the code its tests run. This setup is not supported yet.`,
+      )
+    }
+    if (project.config.experimental.viteModuleRunner === false) {
+      throw new ProjectError(
+        `${name} sets experimental.viteModuleRunner: false, which skips the Vite transform nyorori instruments code with. This setup is not supported yet.`,
+      )
+    }
+    project.config.setupFiles.push(setupFile)
+  }
 
   const config = vitest.config
   const coverageInclude = config.coverage.include?.length ? picomatch(config.coverage.include, { dot: true }) : () => true
@@ -155,7 +162,7 @@ process.on('message', async (request: Request) => {
   try {
     switch (request.type) {
       case 'init':
-        send({ type: 'ready', eligible: await init(request.root, request.candidates, request.exclude) })
+        send({ type: 'ready', eligible: await init(request.root, request.candidates, request.exclude, request.setupDir) })
         break
       case 'plan': {
         for (const file of request.files) plans.set(file.file, file)
@@ -168,8 +175,13 @@ process.on('message', async (request: Request) => {
         break
     }
   } catch (error) {
-    send({ type: 'error', message: error instanceof Error ? (error.stack ?? error.message) : String(error) })
+    const message = error instanceof ProjectError ? error.message : error instanceof Error ? (error.stack ?? error.message) : String(error)
+    send({ type: 'error', message })
   }
 })
 
-process.on('disconnect', () => process.exit(0))
+process.on('disconnect', () => {
+  // The CLI removes the setup directory after the run; this covers a CLI that died first.
+  if (setupDir) rmSync(setupDir, { recursive: true, force: true })
+  process.exit(0)
+})
