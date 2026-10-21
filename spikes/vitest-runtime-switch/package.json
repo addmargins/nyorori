@@ -1,0 +1,7 @@
+{
+  "name": "spike-vitest-runtime-switch",
+  "private": true,
+  "type": "module",
+  "scripts": { "spike": "node run.mjs" },
+  "devDependencies": { "vitest": "5.0.5" }
+}
