@@ -20,6 +20,9 @@ inputs:
   timeout:
     description: Extra milliseconds a mutant run may take beyond twice the baseline before it counts as a timeout.
     default: '10000'
+  types:
+    description: Set to 'false' to tell string `+` from numeric `+` by syntax only, without starting tsrs.
+    default: 'true'
 
 runs:
   using: composite
@@ -35,10 +38,12 @@ runs:
         NYORORI_EXCLUDE: ${{ inputs.exclude }}
         NYORORI_MAX_MUTANTS: ${{ inputs.max-mutants }}
         NYORORI_TIMEOUT: ${{ inputs.timeout }}
+        NYORORI_TYPES: ${{ inputs.types }}
       run: |
         args=(run --base "$NYORORI_BASE" --timeout "$NYORORI_TIMEOUT")
         while IFS= read -r glob; do
           if [ -n "$glob" ]; then args+=(--exclude "$glob"); fi
         done <<< "$NYORORI_EXCLUDE"
         if [ -n "$NYORORI_MAX_MUTANTS" ]; then args+=(--max-mutants "$NYORORI_MAX_MUTANTS"); fi
+        if [ "$NYORORI_TYPES" = 'false' ]; then args+=(--no-types); fi
         node "$GITHUB_ACTION_PATH/dist/cli.js" "${args[@]}"

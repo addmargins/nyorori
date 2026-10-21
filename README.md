@@ -30,6 +30,7 @@ jobs:
         #   exclude: |
         #     scripts/**
         #   max-mutants: 300
+        #   types: false # tsrs 없이 문법으로만 문자열 `+`를 가림
 ```
 
 - 문제가 된 mutant는 PR diff의 해당 줄에 어노테이션으로 표시되고, 요약은 job summary에 실립니다. 토큰 권한은 필요 없습니다.
