@@ -1,0 +1,13 @@
+{
+  "extraKnownMarketplaces": {
+    "addmargins": {
+      "source": {
+        "source": "github",
+        "repo": "addmargins/skills"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "addmargins@addmargins": true
+  }
+}
