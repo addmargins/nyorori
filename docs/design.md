@@ -201,7 +201,9 @@ return age >= 18
 ## 남은 위험
 
 - **Vitest API 의존.**
-  - 쓰는 API: `related` + `getRelevantTestSpecifications()`, `project.provide()`, `project.createSpecification()`, `TestModule.meta()`
+  - 쓰는 API: `related` + `getRelevantTestSpecifications()`, `project.provide()`, `project.createSpecification()`, `TestModule.meta()`, 리포터의 `onTestRunEnd`
+  - `runTestSpecifications()`의 반환값에는 이 인스턴스가 지금까지 실행한 모든 모듈이 들어 있다. 앞선 mutant에서 실패한 파일이 뒤 mutant의 결과에 섞이므로, 결과는 `onTestRunEnd`로 받는다.
+  - Vitest 5의 디스크 transform 캐시(`fsModuleCache`)는 소스 내용만으로 키를 만든다. 다른 실행이 다른 mutant id로 계측한 코드를 재사용하게 되므로 끈다. 실행마다 1초 정도 느려진다. 계획 해시를 캐시 키에 넣으면(`defineCacheKeyGenerator`) 되살릴 수 있다.
   - setup 파일의 `afterAll(({}, suite) => …)` 형태는 Vitest 5에서 바뀐 것이다.
   - 지원 범위를 Vitest 5.x로 고정한다.
 - **여러 project(workspace) 설정.**

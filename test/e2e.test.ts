@@ -194,4 +194,34 @@ test('double', () => { expect(double(3)).toBe(6) })
     expect(report!.results).toEqual([])
     expect(output).toContain('nyorori: no mutants in the changed code.')
   })
+
+  describe('verdicts do not leak between runs', () => {
+    const base = {
+      'src/a.ts': 'export function inc(x: number): number {\n  return x + 1\n}\n',
+      'src/b.ts': 'export function isAdult(age: number): boolean {\n  return age > 17\n}\n',
+      'test/a.test.ts': "import { expect, test } from 'vitest'\nimport { inc } from '../src/a'\ntest('inc', () => { expect(inc(1)).toBe(2) })\n",
+      'test/b.test.ts': "import { expect, test } from 'vitest'\nimport { isAdult } from '../src/b'\ntest('isAdult', () => { expect(isAdult(30)).toBe(true); expect(isAdult(3)).toBe(false) })\n",
+    }
+    const head = {
+      'src/a.ts': 'export function inc(x: number): number {\n  return x + 1 \n}\n',
+      'src/b.ts': 'export function isAdult(age: number): boolean {\n  return age >= 18\n}\n',
+    }
+    const expected = [
+      'src/a.ts:2 Arithmetic `+` → `-`: Killed',
+      'src/b.ts:2 ComparisonBoundary `>=` → `>`: Survived',
+    ]
+
+    test('a test file that failed for an earlier mutant does not kill a later one', () => {
+      const { report, output } = nyorori(project('earlier-failure', base, head))
+      expect(statuses(report!), output).toEqual(expected)
+    })
+
+    test('a second run with different mutant ids does not reuse cached instrumentation', () => {
+      const dir = project('warm-cache', base, head)
+      // b.ts gets mutant id 1 here and id 2 below, with the same source.
+      expect(statuses(nyorori(dir, '--exclude', 'src/a.ts').report!)).toEqual([expected[1]])
+      const { report, output } = nyorori(dir)
+      expect(statuses(report!), output).toEqual(expected)
+    })
+  })
 })

@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import picomatch from 'picomatch'
-import type { TestProject, TestSpecification, Vitest } from 'vitest/node'
+import type { Reporter, TestModule, TestProject, TestSpecification, Vitest } from 'vitest/node'
 import { PROVIDE, type ModuleResult, type Request, type Response, type SpecRef } from './protocol.ts'
 import type { FilePlan } from './types.ts'
 
@@ -26,6 +26,16 @@ afterAll(({}, suite) => {
 
 let vitest: Vitest | undefined
 const plans = new Map<string, FilePlan>()
+
+// runTestSpecifications() returns every module the instance has ever run, so
+// a file that failed for an earlier mutant would count as failing for later
+// ones too. The reporter receives only the modules of the run that just ended.
+let lastRun: { modules: readonly TestModule[]; errors: readonly unknown[] } | undefined
+const collector: Reporter = {
+  onTestRunEnd(modules, errors) {
+    lastRun = { modules, errors }
+  },
+}
 
 function send(message: Response): void {
   process.send!(message)
@@ -57,7 +67,10 @@ async function init(root: string, candidates: string[], exclude: string[]): Prom
     {
       root,
       watch: false,
-      reporters: [],
+      reporters: [collector],
+      // The on-disk transform cache is keyed by source, not by plan: a later
+      // run would reuse code instrumented with another run's mutant ids.
+      fsModuleCache: false,
       related: candidates,
       update: false,
       bail: 1,
@@ -113,9 +126,12 @@ async function run(active: number, limit: number, collect: boolean, refs: SpecRe
     project.provide(PROVIDE.collect, collect)
   }
   const started = performance.now()
-  const result = await vitest!.runTestSpecifications(refs.map(fromRef))
+  lastRun = undefined
+  await vitest!.runTestSpecifications(refs.map(fromRef))
+  if (!lastRun) throw new Error('Vitest finished a run without reporting it')
+  const result: { modules: readonly TestModule[]; errors: readonly unknown[] } = lastRun
   const wall = performance.now() - started
-  const modules: ModuleResult[] = result.testModules.map((module) => {
+  const modules: ModuleResult[] = result.modules.map((module) => {
     const meta = module.meta() as { nyororiHits?: Record<string, number>; nyororiExceeded?: boolean }
     const passed = module.ok()
     let error: string | undefined
@@ -132,7 +148,7 @@ async function run(active: number, limit: number, collect: boolean, refs: SpecRe
       error,
     }
   })
-  return { type: 'result', modules, unhandledErrors: result.unhandledErrors.map(String), wall }
+  return { type: 'result', modules, unhandledErrors: result.errors.map(String), wall }
 }
 
 process.on('message', async (request: Request) => {
