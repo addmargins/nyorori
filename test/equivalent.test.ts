@@ -40,10 +40,10 @@ describe('TCE drops mutants that minify to the original', () => {
 
   test('for calls and regular expressions too', () => {
     // The minifier drops a pure call whose value goes unused, so removing it changes nothing.
-    const code = ['export function f(x, s) {', '  Math.abs(x)', '  if (false) return /a/i.test(s)', '  return g(x)', '}'].join('\n')
+    const code = ['export function f(x, s) {', '  Math.abs(x)', '  if (false) return /a/i.test(s.trim())', '  return g(x)', '}'].join('\n')
     expect(split(code)).toEqual({
       kept: ['1 FunctionBody body → `return`', '3 BooleanLiteral `false` → `true`', '4 CallUnwrap `g(x)` → `x`'],
-      equivalent: ['2 CallStatement `Math.abs(x)` removed', '3 CallUnwrap `/a/i.test(s)` → `s`', '3 Regex `/…/i` → `/…/`'],
+      equivalent: ['2 CallStatement `Math.abs(x)` removed', '3 Regex `/…/i` → `/…/`', '3 CallUnwrap `s.trim()` → `s`'],
     })
   })
 

@@ -198,6 +198,14 @@ export function isEven(n: number): boolean {
   return values[0]
 }
 
+export function zeroed(values) {
+  return values
+}
+
+export function rounded(values) {
+  return values.map(Math.round)
+}
+
 export function unmatched(expected, actual) {
   const rest = new Set(expected)
   for (const key of actual) {
@@ -216,6 +224,9 @@ export function hasTodo(text) {
 `
     const head = base
       .replace('  return values[0]', '  return normalizeZero(values[0])')
+      // A transform added to the end of a call, as in es-toolkit PR 2049.
+      .replace('  return values\n', '  return values.map(normalizeZero)\n')
+      .replace('  return values.map(Math.round)', '  return values.map(Math.round).map(normalizeZero)')
       .replace('    if (!rest.has(key)) return null\n', '    if (!rest.has(key)) return null\n    rest.delete(key)\n')
       .replace('/<[^>]*>/,', '/<[^>]*>/g,')
       .replace('/todo/.test', '/todo/i.test')
@@ -225,9 +236,12 @@ export function hasTodo(text) {
     }, {
       'src/fix.js': `import { normalizeZero } from './zero.js'\n\n${head}`,
       'test/fix.test.js': `import { expect, test } from 'vitest'
-import { first, hasTodo, stripTags, unmatched } from '../src/fix.js'
+import { first, hasTodo, rounded, stripTags, unmatched, zeroed } from '../src/fix.js'
 
 test('first', () => { expect(Object.is(first([-0]), 0)).toBe(true) })
+test('zeroed', () => { expect(zeroed([-0, 1])).toEqual([0, 1]) })
+// No -0, so no test checks what normalizeZero is for here.
+test('rounded', () => { expect(rounded([1.4, 2.6])).toEqual([1, 3]) })
 test('unmatched', () => { expect(unmatched(['a', 'b'], ['a'])).toEqual(['b']) })
 test('stripTags', () => { expect(stripTags('<b>bold</b>')).toBe('bold') })
 // Lowercase only: no test checks what the \`i\` flag is for.
@@ -238,16 +252,20 @@ test('hasTodo', () => { expect(hasTodo('todo: x')).toBe(true); expect(hasTodo('d
     expect(status, output).toBe(1)
     expect(statuses(report!)).toEqual([
       'src/fix.js:4 CallUnwrap `normalizeZero(values[0])` → `values[0]`: Killed',
-      'src/fix.js:11 CallStatement `rest.delete(key)` removed: Killed',
-      "src/fix.js:17 CallUnwrap `html.replace(/<[^>]*>/g, '')` → `/<[^>]*>/g`: Killed",
-      'src/fix.js:17 Regex `[^>]` → `[>]`: Killed',
-      'src/fix.js:17 Regex `/…/g` → `/…/`: Killed',
-      'src/fix.js:21 CallUnwrap `/todo/i.test(text)` → `text`: Killed',
-      'src/fix.js:21 Regex `/…/i` → `/…/`: Survived',
+      // The transform not applied: only a test with -0 notices.
+      'src/fix.js:8 CallUnwrap `values.map(normalizeZero)` → `values`: Killed',
+      'src/fix.js:12 CallUnwrap `….map(normalizeZero)` → `…`: Survived',
+      'src/fix.js:19 CallStatement `rest.delete(key)` removed: Killed',
+      "src/fix.js:25 CallUnwrap `html.replace(/<[^>]*>/g, '')` → `html`: Killed",
+      'src/fix.js:25 Regex `[^>]` → `[>]`: Killed',
+      'src/fix.js:25 Regex `/…/g` → `/…/`: Killed',
+      // `/todo/i.test(text)` gets no CallUnwrap: `text` would only be killed for not being a boolean.
+      'src/fix.js:29 Regex `/…/i` → `/…/`: Survived',
     ])
     expect(report!.results.at(-1)).toMatchObject({ reason: 'every test still passes with this change' })
     expect(report!.results.at(-1)).not.toHaveProperty('predicted')
-    expect(output).toContain('Survived   src/fix.js:21:16  Regex  `/…/i` → `/…/`  (every test still passes with this change)')
+    expect(output).toContain('Survived   src/fix.js:12:33  CallUnwrap  `….map(normalizeZero)` → `…`  (every test still passes with this change)')
+    expect(output).toContain('Survived   src/fix.js:29:16  Regex  `/…/i` → `/…/`  (every test still passes with this change)')
   })
 
   test('a reasoned suppression turns a survivor into a reported, passing Ignored', () => {
@@ -455,9 +473,11 @@ afterAll(() => { appendFileSync(new URL('../runs.log', import.meta.url), (global
         'src/user.ts:11 FunctionBody body → `return`: Killed',
         // A suppression still decides: not listed, not run, and not a suppression that matches nothing.
         'src/user.ts:13 OptionalChaining `?.` → `.`: Ignored',
+        // The suppression names OptionalChaining only.
+        'src/user.ts:13 CallUnwrap `user?.name.toUpperCase()` → `user?.name`: Killed',
       ])
       expect(report!.results[1]).toMatchObject({ predicted: true, reason: 'no test makes `user` null or undefined here' })
-      expect(report!.results.at(-1)).toMatchObject({ predicted: true })
+      expect(report!.results.find((r) => r.status === 'Ignored')).toMatchObject({ predicted: true })
       expect(report!.problems).toEqual([])
       expect(output).toContain("1 mutant unnecessary by types: `?.` or `??` where the type can't be null or undefined and no test made it so")
       // Neither the unnecessary mutant nor the predicted survivor ran.

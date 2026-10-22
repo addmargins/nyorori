@@ -187,7 +187,7 @@ TCE로 버린 mutant와, 실행 시간에 문자열 연결로 확인되어 건�
 | `Condition` | `if`/삼항의 조건 → `true`, `false`. 루프 조건 → `false` (`true`는 무한 루프만 만듦) |
 | `FunctionBody` | 블록 본문 → 즉시 `return`. 화살표 함수의 식 본문 → `undefined` |
 | `OptionalChaining` | `a?.b`→`a.b`, `a?.[i]`→`a[i]`, `f?.()`→`f()` |
-| `CallUnwrap` | 인자가 있는 호출 → 첫 인자. `toInteger(x)`→`x`, `obj.get(key, d)`→`key` |
+| `CallUnwrap` | 함수 호출 → 첫 인자. `toInteger(x)`→`x`, `this.getValue(x)`→`x`, `Math.min(i, n)`→`i`. 문자열·배열을 바꾸는 메서드 → receiver. `s.trim()`→`s`, `xs.map(f)`→`xs`. 그 밖의 메서드 호출에는 만들지 않음 |
 | `CallStatement` | 값을 버리는 호출 문 → 호출 제거. `unmatched.delete(key)`→`undefined`, `await save(x)`→`await undefined` |
 | `Regex` | 정규식 리터럴: flag 하나 제거, 최상위 `^`·`$` 제거, 문자 클래스 부정(`[abc]`↔`[^abc]`), `\d`↔`\D`, `\w`↔`\W`, `\s`↔`\S` |
 
@@ -202,18 +202,59 @@ es-toolkit과 i18next의 upstream PR 13개를 다시 돌려 보니, 고친 코�
 
 그래서 세 연산자를 더했다. 셋 다 다른 연산자처럼 함수 안의 코드에만 만들고, 타입 위치는 들어가지 않는다.
 
-**`CallUnwrap`.** 인자가 하나 이상이고 첫 인자가 spread가 아닌 호출을 첫 인자로 바꾼다. 감싸는 호출을 지운 코드다.
-- 메서드 호출(`a.b(x)`)도 포함한다. 감싸는 함수는 import한 함수(`toInteger`)일 수도, 클래스 기반 코드의 메서드나 헬퍼 객체의 함수(`this.getValue(x)`, `Math.trunc(x)`, `path.resolve(p)`)일 수도 있다. 어느 메서드가 값을 감싸는 것인지는 타입 없이는 알 수 없다. 이 저장소의 `src`에서는 `CallUnwrap`의 절반쯤이 메서드 호출이다. `map.get(k)`→`k`나 `s.slice(0, n)`→`0`처럼 대개 결과를 확인하는 테스트가 바로 잡으므로, 거짓 실패보다는 실행 비용이 는다.
+**`CallUnwrap`.** 호출을, 그 호출이 하던 일을 하지 않은 코드로 바꾼다. 호출 하나에 많아야 하나를 만든다. 무엇으로 바꿀지는 callee의 모양으로 정한다.
+- 함수 호출은 첫 인자로 바꾼다. 감싸는 함수를 지운 코드다. 다음을 함수 호출로 본다.
+  - callee가 멤버 접근이 아닌 호출: `toInteger(x)`, `normalizeZero(v)`, `make()(x)`
+  - `this`나 `super`의 메서드: `this.getValue(x)`, `this.#parse(x)`, `super.m(x)`. 클래스 기반 코드에서 헬퍼 함수 노릇을 하는 클래스 자신의 메서드다.
+  - 가려지지 않은 전역 `Array`, `BigInt`, `Date`, `JSON`, `Math`, `Number`, `Object`, `Promise`, `Reflect`, `String`, `Symbol`의 정적 메서드: `Math.min(i, n)`→`i`, `Object.assign(parts, { raw: parts })`→`parts`. 이 내장 객체들의 정적 메서드는 다루는 값을 첫 인자로 받는다. 그 밖의 전역(`Buffer`, `process`, `document`, 전역 `$`·`_`)은 호스트나 라이브러리의 객체라서 메서드가 첫 인자의 함수라고 할 수 없고, `Buffer.concat(list)`, `_.map(xs, f)`처럼 아래의 변환과 이름이 같은 것도 있다. 그래서 만들지 않는다.
+  - `import * as ns`로 가져온 namespace의 함수: `ns.parse(x)`
+  - 첫 인자가 없거나, spread이거나, 함수 리터럴(콜백)이면 만들지 않는다. 결과가 그 함수인 API는 거의 없고, 있으면 같은 함수처럼 동작한다(`useCallback(fn, deps)`). 결과를 쓰는지만 확인하는 mutant가 된다.
+- 받는 값과 같은 종류의 값을 돌려주는 메서드는 receiver로 바꾼다. 변환을 적용하지 않은 코드다. `xs.map(normalizeZero)`→`xs`, `code?.replace(/_/g, '-')`→`code`.
+  - 문자열: `trim`, `trimStart`, `trimEnd`, `trimLeft`, `trimRight`, `toLowerCase`, `toUpperCase`, `toLocaleLowerCase`, `toLocaleUpperCase`, `normalize`, `padStart`, `padEnd`, `repeat`, `replace`, `replaceAll`, `substring`, `substr`, `toWellFormed`
+  - 배열: `map`, `filter`, `flat`, `flatMap`, `sort`, `reverse`, `toSorted`, `toReversed`. `sort`와 `reverse`는 receiver 자신을 돌려준다.
+  - 둘 다: `slice`, `concat`
+  - 바뀌는 것은 receiver이므로, 인자가 없거나(`s.trim()`) 콜백이나 spread를 받아도(`xs.filter((x) => x.ok)`, `[a].concat(...xs)`) 만든다.
+  - 결과가 문자열이나 배열이어도 receiver의 일부를 꺼내는 조회(`charAt`, `at`)와 다른 종류로 바꾸는 것(`split`, `join`)은 넣지 않았다.
+- 그 밖의 메서드 호출에는 만들지 않는다. 조건과 조회(`set.has(v)`, `xs.includes(x)`, `s.indexOf('(')`, `map.get(k)`, `xs.join('')`, `re.test(s)`), 그리고 사용자 메서드다. 첫 인자도 receiver도 결과와 다른 종류의 값이어서, 테스트가 타입만 보고 잡는다. 그 호출이 조건이면 Condition과 Negation이, 값을 버리는 문이면 CallStatement가 변형한다.
+- receiver가 다음 이름이면 메서드 이름과 상관없이 만들지 않는다. 모듈이나 클래스는 문자열이나 배열이 아니다. `path.normalize(p)`가 `path`가 되지 않는다.
+  - `import * as` 말고 import한 이름. 기본 import는 모듈(`import path from 'node:path'`)일 수도, 인스턴스(`i18next.t(key)`→`key`는 없는 키에 대한 i18next의 fallback과 같은 값이다)일 수도 있어서 첫 인자로도 바꾸지 않는다.
+  - `require(…)`나 `await import(…)`로 받은 이름과, 거기서 구조 분해한 이름
+  - 클래스, enum, TS namespace
+  - 위 목록에 없는 전역
+- 메서드 이름으로 정하므로 receiver가 정말 문자열이나 배열인지는 모른다. `map`이라는 메서드가 있는 사용자 객체도 receiver로 바뀐다. 받아들인 이유는 이렇다.
+  - 이 이름들은 대개 같은 뜻으로 쓰인다. iterator helper, typed array, RxJS, Immutable.js, lodash wrapper, Option/Result 타입의 `map`, `filter`, `concat`, `slice`도 같은 종류의 값을 돌려준다. 그러면 mutant는 내장 메서드에서와 같은 뜻이다.
+  - 뜻이 다른 메서드(`router.replace(path)`)라도 mutant는 그 호출을 하지 않은 코드다. 테스트는 CallStatement의 mutant처럼 그 효과로 잡거나, 이전의 첫 인자 mutant처럼 다른 종류의 값으로 잡는다. 이전보다 나빠지지 않는다.
+  - 조회나 조건인 메서드 이름(`get`, `has`, `test`)은 목록에 없으므로, 이름이 같아도 잘못된 종류의 receiver를 만들지 않는다.
 - 앵커(보고하는 위치)는 callee의 이름이다(`a.b(x)`의 `b`, `f(x)`의 `f`). 체인의 다음 줄에 더한 `.b(x)`는 그 줄로 보고된다.
-- optional chain의 끝인 호출(`a?.b(x)`)은 체인 전체를 지점으로 삼는다. 둘은 범위가 같다. 체인 안에서 `?.` 뒤에 오는 호출(`a?.b(x).c`의 `a?.b(x)`)은 만들지 않는다. 괄호로 감싸면 체인이 거기서 끊겨, `a`가 null일 때 원본 분기도 `.c`에서 throw하게 된다. `?.` 앞의 호출(`f(x)?.y`의 `f(x)`)은 감싸도 같다.
+- optional chain의 끝인 호출(`a?.b(x)`)은 체인 전체를 지점으로 삼는다. 둘은 범위가 같다. receiver로 바꿀 때 그 receiver(`a`, `a?.list`)도 그대로 온전한 식이다. 체인 안에서 `?.` 뒤에 오는 호출(`a?.b(x).c`의 `a?.b(x)`)은 만들지 않는다. 괄호로 감싸면 체인이 거기서 끊겨, `a`가 null일 때 원본 분기도 `.c`에서 throw하게 된다. `?.` 앞의 호출(`f(x)?.y`의 `f(x)`)은 감싸도 같다.
+- 지점은 호출 전체이고 바꾸는 텍스트는 그 안의 receiver이므로, 바깥 호출의 `this`는 그대로다. `xs.map(f).join(',')`에서 `join`의 `this`는 감싼 식의 값(원본이면 `xs.map(f)`의 결과, mutant면 `xs`)이다. `test/instrument.test.ts`가 `map` 메서드가 있는 사용자 클래스와 세미콜론 없는 문으로 확인한다.
 - 만들지 않는 것
   - `super(x)`: `this`가 초기화되지 않는다. `import(x)`는 호출 노드가 아니다. `require('x')`→`'x'`는 아무것도 확인하지 않는다.
   - 전역 `console` 호출과 그 인자(console 필터와 같다)
   - 다른 호출, `new`, tagged template의 callee이거나 `delete`의 대상인 호출: `f(x)(y)`→`x(y)`는 `x`가 함수가 아니라는 것만 확인한다. `delete (x)`는 strict mode에서 문법 오류다.
-  - 첫 인자가 함수 리터럴인 호출(`xs.map((v) => …)`, `useCallback(() => …, deps)`): 결과가 그 함수인 API는 거의 없고, 있으면 같은 함수처럼 동작한다. 결과를 쓰는지만 확인하는 mutant가 된다.
   - `f.call(that, x)`, `.apply`, `.bind`: 첫 인자는 넘기는 값이 아니라 `this`다.
   - 식 문이 값을 버리는 호출: `CallStatement`가 맡는다. 첫 인자를 평가한다는 것 말고는 같은 mutant다.
 - 같은 지점의 다른 mutant와 대체 텍스트가 같으면 만들지 않는다. `if (check(true))`의 `→ true`는 Condition이 이미 만든다.
+- 이전에는 인자가 있는 모든 호출을 첫 인자로 바꿨다. upstream PR 13개를 다시 돌렸을 때 그 `CallUnwrap` 29개를 보고 지금 규칙으로 바꿨다.
+  - 함수 호출과 정적 호출은 잘 들었다. `toInteger(fromIndex)`→`fromIndex`, `normalizeZero(value)`→`value`, `getValue(element)`→`element`, `Number.isNaN(value)`→`value`, `this.formatLanguageCode(fc)`→`fc`가 모두 잡혔고, `Object.assign(parts, { raw: parts })`→`parts`는 실제로 빠진 테스트를 드러냈다.
+  - 13개는 메서드 호출을 첫 인자로 바꾼 것이었다(`.has(v)`→`v`, `.includes(x)`→`x`, `.indexOf('(')`→`'('`, `.join('')`→`''`, `.replace(re, s)`→`re`, `.map(fn)`→`fn` 등). 값의 종류가 달라 모두 바로 잡혔고, 코드가 하는 일은 확인하지 않았다. 둘은 무한 루프로 Timeout이 됐다. i18next 2399의 `code?.replace(/_/g, '-')`→`/_/g`(20초)와 es-toolkit 2099의 `while (joinedParts.includes(placeholder))` 안의 `→ placeholder`다. es-toolkit 2049의 `differenceToolkit(…).map(normalizeZero)`→`normalizeZero`는 그 PR이 더한 `-0` 처리를 테스트가 확인하는지 말하지 않았다.
+  - 지금 규칙으로 13개를 로컬에서 다시 돌렸다(실제 실행, 이전 규칙도 같은 기계에서). `CallUnwrap`은 29개에서 19개, 전체 mutant는 108개에서 98개, Timeout은 7개에서 5개가 됐다. Survived 10개는 그대로다. wall time 합은 165초에서 137초가 됐다.
+
+| PR | 이전 | 지금 | 바뀐 것 |
+|---|---|---|---|
+| es-toolkit 2049 | 9K 1T | 8K 1T | `….map(normalizeZero)`→`…`를 PR의 `-0` 테스트(`differenceWith([-0, 1], [1])`)가 잡음. `valuesSet.has(value)`→`value` 없음 |
+| es-toolkit 2099 | 11K 1T 3S | 8K 3S | `joinedParts.includes(placeholder)`의 Timeout과 `join`·`split`의 3개 없음. 9.1초 → 7.5초 |
+| es-toolkit 2146 | 9K | 8K | `unmatched.has(…)` 없음 |
+| i18next 2399 | 3K 1T | 4K | `code?.replace(/_/g, '-')`→`code`가 잡힘. 32초 → 14초 |
+| i18next 2437 | 10K 2T 3S | 8K 2T 3S | `indexOf`·`includes`의 2개 없음 |
+| i18next 2440 | 4K | 3K | `/{.*}/s.test(…)` 없음 |
+| i18next 2450 | 6K | 5K | `codes.includes(…)` 없음 |
+| 나머지 6개 | | 같음 | es-toolkit 2122의 `Object.hasOwn(result, key)`→`result`는 정적 호출이라 남음 |
+
+**설명.** 호출 mutant의 설명은 호출을 callee 중심으로 짧게 보인다. `` `toInteger(fromIndex)` → `fromIndex` ``, `` `code?.replace(/_/g, '-')` → `code` ``. 40자를 넘으면 20자보다 긴 receiver는 `…`로 줄이고, 인자는 뒤를 자른다. `` `….map(normalizeZero)` → `…` ``.
+- 이전에는 지점의 앞에서부터 40자를 잘랐다. 그래서 `` `differenceToolkit(Array.from(array), ...` → `normalizeZero` ``처럼 바뀌는 메서드가 보이지 않았다.
+- CallStatement(`` `unescapedValues.push([match.index, mat…)` removed ``)와 `a ?? b`→`a`(`` `… ?? options.escapeValue` → `…` ``)도 같은 방식이다. `??`는 연산자가 가운데에 있어서, 왼쪽이 길면 바꾸는 부분이 잘렸다.
+- 바꾸는 부분이 맨 앞에 있는 Condition, Negation, UnaryMinus, FunctionBody의 식 본문은 이전처럼 앞에서부터 40자로 자른다. 자른 곳은 `...` 대신 `…`로 표시한다.
 
 **`CallStatement`.** 식 문의 식이 호출이면(괄호와 TS 단언은 벗긴다) 그 호출을 `undefined`로 바꾼다. 부수 효과가 일어나지 않는다.
 - `await f(x)`는 호출만 바꿔 `await undefined`가 된다. 문이 한 틱 기다리는 것은 그대로다.
@@ -243,6 +284,7 @@ es-toolkit과 i18next의 upstream PR 13개를 다시 돌려 보니, 고친 코�
 - mutant가 1404개에서 2096개로 692개(49%) 늘었다. `CallUnwrap` 477개, `CallStatement` 196개, `Regex` 19개다.
 - `generate()` 전체는 중앙값 1.7~1.8초에서 2.4~2.5초가 됐다. 늘어난 mutant 하나에 약 1ms로, 대부분 TCE가 mutant마다 파일을 압축하는 비용이다.
 - 실제 PR에서는 바뀐 범위를 담은 호출 수에 비례한다. 늘어나는 비용의 대부분은 mutant 실행이다.
+- 메서드 규칙을 바꾼 뒤 지금의 `src`(16개 파일, 3876줄)로 같은 측정을 하면 `CallUnwrap`은 664개에서 510개가 된다. 첫 인자가 395개, receiver가 115개다. 빠진 것은 대부분 조회와 조건(`get`, `has`, `charCodeAt`, `startsWith`, `test`, `join`)이고, 기본 import한 `path`의 함수(`path.dirname(f)` 등 14개)도 빠졌다.
 
 ## 구현 구조
 
@@ -534,7 +576,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 - `x.length >= 0` 같은 항상 참인 조건은 `true`로 바꾸지 않는다.
 - 조건이 이미 `true`/`false` 리터럴이면 Condition mutant를 만들지 않는다. BooleanLiteral mutant와 겹치기 때문이다.
 - 같은 지점의 mutant끼리 대체 텍스트가 같으면 하나만 만든다. `if (check(true))`의 CallUnwrap `→ true`는 Condition `→ true`와 같다.
-- `CallUnwrap`은 콜백을 받는 호출, `.call`/`.apply`/`.bind`, 다른 호출의 callee인 호출, 값을 버리는 호출 문은 만들지 않는다. `CallStatement`는 `super(…)`를 지우지 않는다("호출과 정규식" 참고).
+- `CallUnwrap`은 첫 인자가 콜백인 함수 호출, 변환이 아닌 메서드 호출, `.call`/`.apply`/`.bind`, 다른 호출의 callee인 호출, 값을 버리는 호출 문은 만들지 않는다. `CallStatement`는 `super(…)`를 지우지 않는다("호출과 정규식" 참고).
 - `Regex`는 `^`·`$`가 없는 패턴의 `m`, `.`가 없는 패턴의 `s`를 빼지 않는다. 빼도 같은 정규식이다. 컴파일되지 않는 mutant도 만들지 않는다.
 - `x * 1`, `x / 1`, `x * 1n`, `x / 1n`은 `*`↔`/` 변형을 만들지 않는다.
   - bigint에서도 `x * 1n`과 `x / 1n`은 같은 값이다. `x`가 bigint가 아니면 둘 다 같은 메시지의 TypeError를 던진다(Symbol이면 `Cannot convert a Symbol value to a number`, 그 밖에는 `Cannot mix BigInt and other types, use explicit conversions`). 0n, 음수, 2^100 크기의 bigint, 수, `-0`, NaN, 문자열, null, undefined, boolean, 객체, bigint를 주는 `valueOf`, Symbol, `Object(3n)`의 21가지로 확인했다. `valueOf`도 양쪽에서 한 번씩 불린다.
@@ -796,7 +838,10 @@ return age >= 18
   - 좁혀진 타입을 쓴다. 함수 호출이 속성을 바꿔도 TypeScript는 좁히기를 유지한다(TypeScript #9998).
   - mapped type, 여러 선언을 합친 속성, 단언을 거친 값, 원소 접근은 보수적으로 뺀다. 그 안의 정말 불필요한 `?.`는 이전처럼 예측한 Survived로 실패한다.
 - **호출과 정규식 연산자.**
-  - `CallUnwrap`은 타입을 보지 않는다. 결과의 종류가 바뀌는 mutant(`xs.join(',')`→`','`)는 테스트가 바로 잡으므로 실행 비용만 든다. 값을 그대로 돌려주는 호출(`Object.freeze(x)`, Vue의 `markRaw(x)`, 정체성만 다른 메모이즈)은 살아남아 억제 주석이 필요할 수 있다.
+  - `CallUnwrap`은 타입을 보지 않는다. 메서드 이름으로 receiver를 고르므로, 이름이 같은 다른 객체의 메서드도 receiver로 바뀐다("호출과 정규식" 참고). 지역 변수에 담은 모듈(`const { posix } = path`의 `posix.normalize(p)`)은 알아보지 못해 `posix`로 바꾼다.
+  - 전역 내장 객체의 정적 조건(`Object.hasOwn(o, k)`→`o`, `Array.isArray(x)`→`x`)은 함수 호출처럼 첫 인자로 바꾸므로, 결과가 다른 종류의 값이 된다. 조건에서는 그 값의 truthiness를 보는 mutant라서 Condition과 겹칠 수 있다.
+  - 값을 그대로 돌려주는 호출(`Object.freeze(x)`, Vue의 `markRaw(x)`, 정체성만 다른 메모이즈)과, 사본을 고치지 않는 곳의 사본(`xs.slice()`)은 살아남아 억제 주석이 필요할 수 있다.
+  - 기본 import한 모듈의 함수(`path.dirname(f)`)에는 만들지 않으므로, 그런 함수를 더한 수정은 놓친다.
   - 정규식 mutant는 CLI를 돌리는 Node가 컴파일하는지로 거른다. 세션은 같은 Node로 뜨므로 테스트도 같은 엔진에서 돈다.
 - **브라우저 모드.** 지원하지 않는다.
 - **실행 시간.**

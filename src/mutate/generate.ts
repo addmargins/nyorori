@@ -345,7 +345,8 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
         const at = findToken(code, left.end, right.start, node.operator)
         if (at < 0) break
         if (node.operator === '??') {
-          const planned = add(node, 'expression', at, 'Logical', text(left), `\`${snippet(text(node))}\` → \`${snippet(text(left))}\``)
+          const shown = keeping(oneLine(text(left)), ` ?? ${oneLine(text(right))}`)
+          const planned = add(node, 'expression', at, 'Logical', text(left), `\`${shown.whole}\` → \`${shown.kept}\``)
           if (planned) planned.profile = { probe: valueProbe(left), rule: { kind: 'nonNullish', subject: snippet(text(left)), type: nonNullableType(left) } }
         } else {
           const other = node.operator === '&&' ? '||' : '&&'
@@ -419,12 +420,10 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
         discarded.add(call.site)
         // Without `super()` a derived constructor throws; a global console call only logs.
         if (call.node.callee.type === 'Super' || isGlobalConsoleCall(call.node)) break
-        add(call.site, 'expression', calleeAnchor(call.node), 'CallStatement', 'undefined', `\`${snippet(text(call.node))}\` removed`)
+        add(call.site, 'expression', calleeAnchor(call.node), 'CallStatement', 'undefined', `\`${showCall(call.node).call}\` removed`)
         break
       }
       case 'CallExpression': {
-        const [first] = node.arguments
-        if (!first || first.type === 'SpreadElement') break
         // A call that ends an optional chain stands for the whole chain, which has the same span.
         const site = parent?.type === 'ChainExpression' ? parent : node
         // A call a statement drops is CallStatement's. One that is called, constructed, tagged
@@ -434,12 +433,13 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
         if (node.callee.type === 'Super' || isName(node.callee, 'require') || isGlobalConsoleCall(node)) break
         // The first argument of `f.call(that, x)`, `.apply` and `.bind` is the receiver, not a value the call passes on.
         if (isReceiverCall(node)) break
-        // The result of a call that takes a callback is hardly ever that function, or acts the
-        // same as it (`useCallback(fn, deps)`): the mutant would only check that the result is used.
-        if (first.type === 'FunctionExpression' || first.type === 'ArrowFunctionExpression') break
         // Inside a chain, a `?.` before the call skips the links after it; parentheses around the call would cut them off.
         if (site === node && optionalLinks(node).length > 0) break
-        add(site, 'expression', calleeAnchor(node), 'CallUnwrap', text(first), `\`${snippet(text(node))}\` → \`${snippet(text(first))}\``)
+        const kept = unwrapped(node)
+        if (!kept) break
+        const shown = showCall(node)
+        const to = kept.receiver ? shown.receiver : snippet(text(kept.node))
+        add(site, 'expression', calleeAnchor(node), 'CallUnwrap', text(kept.node), `\`${shown.call}\` → \`${to}\``)
         break
       }
       case 'FunctionDeclaration':
@@ -464,6 +464,54 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
         break
       }
     }
+  }
+
+  /**
+   * What CallUnwrap puts in place of a call so that it no longer does its work:
+   * the value a function passes on (`toInteger(x)` → `x`), or the receiver of a
+   * method that transforms it (`s.trim()` → `s`, `xs.map(f)` → `xs`). Any other
+   * method gives a different kind of value than its argument or receiver
+   * (`set.has(v)`, `xs.join(',')`, `re.test(s)`): either would only be killed
+   * for its type, so such a call gets none. Condition, Negation and
+   * CallStatement still mutate where it is used.
+   */
+  function unwrapped(call: CallExpression): { node: Node; receiver: boolean } | undefined {
+    const callee = unwrapReference(call.callee)
+    if (callee.type !== 'MemberExpression') return firstArgument(call)
+    const { object } = callee
+    // Parentheses and type assertions do not change what the receiver is.
+    const receiver = unwrapReference(object)
+    // The class's own methods, which wrap values like plain functions do: `this.getValue(x)`.
+    if (receiver.type === 'ThisExpression' || receiver.type === 'Super') return firstArgument(call)
+    if (receiver.type === 'Identifier') {
+      const declaration = scopes.getDeclaration(receiver.name)
+      if (!declaration) return NAMESPACES.has(receiver.name) ? firstArgument(call) : undefined
+      if (declaration.type === 'Import' && declaration.node.type === 'ImportNamespaceSpecifier') return firstArgument(call)
+      // A module or a class is never a string or an array, whatever its methods are called.
+      if (declaration.type === 'Import' || declaration.type === 'Identifier' || isModule(declaration)) return undefined
+    }
+    const method = !callee.computed && callee.property.type === 'Identifier' ? callee.property.name : undefined
+    return method !== undefined && TRANSFORMS.has(method) ? { node: object, receiver: true } : undefined
+  }
+
+  /**
+   * A call as descriptions show it, from the callee to the `)`: `toInteger(x)`,
+   * `code?.replace(/_/g, '-')`. Past LONG characters, a receiver longer than
+   * SHORT becomes `…` and the arguments are cut, so the method stays in view:
+   * `….map(normalizeZero)`. `receiver` is the receiver as shown there.
+   */
+  function showCall(call: CallExpression): { call: string; receiver: string } {
+    const callee = unwrapReference(call.callee)
+    const open = findToken(code, call.typeArguments?.end ?? call.callee.end, call.end, '(')
+    const args = `(${call.arguments.map((arg) => oneLine(text(arg))).join(', ')})`
+    if (callee.type !== 'MemberExpression') {
+      const shown = keeping('', `${snippet(code.slice(call.start, open), SHORT)}${args}`, true)
+      return { call: shown.whole, receiver: '' }
+    }
+    const { object } = callee
+    // A method on the next line reads `.b`, not ` .b`. Before the receiver is what wraps the callee: `(o.f as F)(x)`.
+    const shown = keeping(oneLine(text(object)), `${oneLine(code.slice(object.end, open))}${args}`, true)
+    return { call: oneLine(code.slice(call.start, object.start)) + shown.whole, receiver: shown.kept }
   }
 
   const scopes = new Scopes()
@@ -676,6 +724,67 @@ function isName(node: Node, name: string): boolean {
   return node.type === 'Identifier' && node.name === name
 }
 
+/**
+ * Built-in objects whose static methods take the value they work on first:
+ * `Math.trunc(x)`, `Number.isNaN(x)`, `Object.assign(target, …)`,
+ * `JSON.stringify(x)`, `Array.from(x)`. Unshadowed, their calls unwrap to that
+ * argument like plain function calls. Other globals (`Buffer`, `process`,
+ * `document`, a global `$` or `_`) are host or library objects: their methods
+ * are not all functions of the first argument, and the names of some are
+ * TRANSFORMS (`Buffer.concat(list)`, `_.map(xs, f)`), so their calls get none.
+ */
+const NAMESPACES = new Set(['Array', 'BigInt', 'Date', 'JSON', 'Math', 'Number', 'Object', 'Promise', 'Reflect', 'String', 'Symbol'])
+
+/**
+ * Methods of strings and arrays that give back a value of the same kind as
+ * their receiver: a string from a string, an array from an array, or the
+ * receiver itself, sorted or reversed. Unwrapped to the receiver, the call
+ * reads "the transform was not applied". A lookup (`charAt`, `at`) or a
+ * conversion (`split`, `join`) is not a transform of the receiver.
+ *
+ * The receiver's type is not known, so any object with a method of one of these
+ * names gets the same mutant. Elsewhere the names mostly keep that meaning:
+ * iterator helpers, typed arrays, RxJS, Immutable.js, lodash wrappers and
+ * Option or Result types return a value of the same kind from `map`, `filter`,
+ * `concat` or `slice`. A method that means something else (`router.replace(p)`)
+ * is still not called, and its tests notice that by its effect, as with
+ * CallStatement, or by the value, as with the first argument before. A
+ * receiver named by an import, a `require`, a class or a global outside
+ * NAMESPACES is a module or a class, never a string or an array: those calls
+ * (`path.normalize(p)`) get none (see unwrapped).
+ */
+const TRANSFORMS = new Set([
+  // String.prototype
+  'normalize', 'padEnd', 'padStart', 'repeat', 'replace', 'replaceAll', 'substr', 'substring', 'toLocaleLowerCase', 'toLocaleUpperCase',
+  'toLowerCase', 'toUpperCase', 'toWellFormed', 'trim', 'trimEnd', 'trimLeft', 'trimRight', 'trimStart',
+  // Both
+  'concat', 'slice',
+  // Array.prototype
+  'filter', 'flat', 'flatMap', 'map', 'reverse', 'sort', 'toReversed', 'toSorted',
+])
+
+/**
+ * The argument a call passes on, which CallUnwrap puts in its place. None when
+ * it is spread, or a callback: the result of a call that takes a callback is
+ * hardly ever that function, or acts the same as it (`useCallback(fn, deps)`),
+ * so the mutant would only check that the result is used.
+ */
+function firstArgument(call: CallExpression): { node: Node; receiver: boolean } | undefined {
+  const [first] = call.arguments
+  if (!first || first.type === 'SpreadElement' || first.type === 'FunctionExpression' || first.type === 'ArrowFunctionExpression') return undefined
+  return { node: first, receiver: false }
+}
+
+/** `const path = require('path')`, a name destructured from it, or the same with `await import('path')`: a module, like an import. */
+function isModule(declaration: ScopeTrackerNode): boolean {
+  if (declaration.type !== 'Variable') return false
+  const { node } = declaration
+  const declarator = declaration.variableNode.declarations.find(({ id }) => id.start <= node.start && node.end <= id.end)
+  let init = declarator?.init ? unwrapReference(declarator.init) : undefined
+  if (init?.type === 'AwaitExpression') init = unwrapReference(init.argument)
+  return init?.type === 'ImportExpression' || (init?.type === 'CallExpression' && isName(init.callee, 'require'))
+}
+
 const RECEIVER_METHODS = new Set(['call', 'apply', 'bind'])
 
 function isReceiverCall(call: CallExpression): boolean {
@@ -763,7 +872,32 @@ export function toPosition(starts: number[], offset: number): { line: number; co
   return { line: lo + 1, column: offset - starts[lo]! + 1 }
 }
 
-function snippet(source: string): string {
-  const flat = source.replace(/\s+/g, ' ').trim()
-  return flat.length > 40 ? `${flat.slice(0, 37)}...` : flat
+// The most characters of code a description shows, and of a part it may hide behind `…` to keep the rest in view.
+const LONG = 40
+const SHORT = 20
+
+function oneLine(source: string): string {
+  return source.replace(/\s+/g, ' ').trim()
+}
+
+/** `source` on one line, cut to `max` characters at the end. */
+function snippet(source: string, max = LONG): string {
+  return cut(oneLine(source), max)
+}
+
+function cut(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, Math.max(max - 1, 0))}…` : text
+}
+
+/**
+ * `kept` followed by `rest`, for the description of a mutant that keeps only
+ * `kept`. Past LONG characters, a `kept` longer than SHORT becomes `…` and
+ * `rest` is cut at the end (before its closing `)` for a call), so what the
+ * mutant removes stays in view: `… ?? fallback`, `….map(normalizeZero)`.
+ */
+function keeping(kept: string, rest: string, call = false): { whole: string; kept: string } {
+  if (kept.length + rest.length <= LONG) return { whole: kept + rest, kept }
+  const shown = kept.length > SHORT ? '…' : kept
+  const close = call ? ')' : ''
+  return { whole: shown + cut(call ? rest.slice(0, -1) : rest, LONG - shown.length - close.length) + close, kept: shown }
 }

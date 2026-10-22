@@ -182,13 +182,20 @@ Vite에 영향을 주지 않는 `test` 옵션(`name`, `include`, `environment` �
 | `Condition` | `if`/삼항의 조건 → `true`, `false`. 루프 조건 → `false` |
 | `FunctionBody` | 함수 본문 → 즉시 `return` |
 | `OptionalChaining` | `a?.b`→`a.b` |
-| `CallUnwrap` | 인자가 있는 호출 → 첫 인자. `toInteger(x)`→`x`, `obj.get(key, d)`→`key` |
+| `CallUnwrap` | 함수 호출 → 첫 인자. `toInteger(x)`→`x`, `this.getValue(x)`→`x`, `Math.min(i, n)`→`i`. 문자열·배열을 바꾸는 메서드 → receiver. `s.trim()`→`s`, `xs.map(f)`→`xs` |
 | `CallStatement` | 값을 버리는 호출 문 → 호출 제거. `unmatched.delete(key)`, `await save(x)`→`await undefined` |
 | `Regex` | 정규식 리터럴: flag 하나 제거(`/a/gi`→`/a/i`), 그룹 밖의 `^`·`$` 제거, `[abc]`↔`[^abc]`, `\d`↔`\D`, `\w`↔`\W`, `\s`↔`\S` |
 
-호출과 정규식 연산자는 값을 감싸는 함수를 더하거나(`normalizeZero(x)`), 호출 문을 더하거나(`set.delete(key)`), 정규식 flag를 더한 수정에도 mutant가 생기게 합니다.
+호출과 정규식 연산자는 값을 감싸는 함수나 변환을 더하거나(`normalizeZero(x)`, `.map(normalizeZero)`), 호출 문을 더하거나(`set.delete(key)`), 정규식 flag를 더한 수정에도 mutant가 생기게 합니다.
 
-- `CallUnwrap`은 함수 호출과 메서드 호출 모두에 만듭니다. 다음은 만들지 않습니다: `super(…)`, `require(…)`, 전역 `console` 호출, 첫 인자가 spread이거나 함수 리터럴(콜백)인 호출, `.call`/`.apply`/`.bind`, 다른 호출이나 `new`의 callee인 호출, optional chain 안에서 `?.` 뒤에 오는 호출(`a?.b(x).c`), 값을 버리는 호출 문(`CallStatement`가 맡음)
+- `CallUnwrap`은 호출 하나에 많아야 하나를 만들고, 그 호출이 하던 일을 하지 않은 코드로 바꿉니다.
+  - 함수 호출은 첫 인자로 바꿉니다. 감싸는 함수를 지운 코드입니다. 멤버 접근이 아닌 callee(`toInteger(x)`), `this`와 `super`의 메서드(`this.getValue(x)`), 가려지지 않은 내장 객체 `Array`, `BigInt`, `Date`, `JSON`, `Math`, `Number`, `Object`, `Promise`, `Reflect`, `String`, `Symbol`의 정적 메서드(`Object.assign(a, b)`→`a`), `import * as ns`로 가져온 함수(`ns.parse(x)`)가 해당합니다. 첫 인자가 없거나, spread이거나, 함수 리터럴(콜백)이면 만들지 않습니다.
+  - 받는 값과 같은 종류의 값을 돌려주는 메서드는 receiver로 바꿉니다. 변환을 적용하지 않은 코드입니다. 문자열의 `trim`·`trimStart`·`trimEnd`·`trimLeft`·`trimRight`, `toLowerCase`·`toUpperCase`·`toLocaleLowerCase`·`toLocaleUpperCase`, `normalize`, `padStart`·`padEnd`, `repeat`, `replace`·`replaceAll`, `substring`·`substr`, `toWellFormed`, 배열의 `map`, `filter`, `flat`, `flatMap`, `sort`, `reverse`, `toSorted`, `toReversed`, 둘 다의 `slice`, `concat`입니다. 인자가 없거나 콜백을 받아도 만듭니다(`s.trim()`→`s`, `xs.filter((x) => x.ok)`→`xs`). optional chain의 끝이면 체인 전체를 바꿉니다(`code?.replace(/_/g, '-')`→`code`).
+  - 그 밖의 메서드 호출에는 만들지 않습니다. `set.has(v)`, `xs.includes(x)`, `s.indexOf('(')`, `map.get(k)`, `xs.join('')`, `re.test(s)`, 사용자 메서드 등은 첫 인자나 receiver가 결과와 다른 종류의 값이라서, 테스트가 타입만 보고 잡는 mutant가 됩니다. 이 호출이 쓰이는 조건은 `Condition`과 `Negation`이, 값을 버리는 호출 문은 `CallStatement`가 변형합니다.
+  - receiver가 import(`import * as` 제외)나 `require`로 받은 이름, 클래스, 위 목록에 없는 전역(`Buffer`, `$` 등)이면 메서드 이름과 상관없이 만들지 않습니다. 모듈이나 클래스는 문자열이나 배열이 아니기 때문입니다(`path.normalize(p)`).
+  - receiver가 정말 문자열이나 배열인지는 보지 않고 메서드 이름으로 정합니다. 그래서 `map` 같은 이름의 메서드가 있는 사용자 객체도 receiver로 바뀝니다.
+  - 다음도 만들지 않습니다: `super(…)`, `require(…)`, 전역 `console` 호출, `.call`/`.apply`/`.bind`, 다른 호출이나 `new`의 callee인 호출, optional chain 안에서 `?.` 뒤에 오는 호출(`a?.b(x).c`), 값을 버리는 호출 문(`CallStatement`가 맡음)
+- 호출 mutant의 설명은 호출을 callee 중심으로 짧게 보여 줍니다. 40자를 넘으면 20자보다 긴 receiver는 `…`로, 인자는 뒤를 잘라 표시합니다. 예: `` `….map(normalizeZero)` → `…` ``, `` `code?.replace(/_/g, '-')` → `code` ``
 - `CallStatement`는 `super(…)`와 전역 `console` 호출을 지우지 않습니다.
 - 정규식 mutant는 모두 `new RegExp`로 컴파일되는지 확인하고, 되지 않으면 버립니다. `^`·`$`가 없는 패턴의 `m`, `.`가 없는 패턴의 `s`는 빼도 같으므로 빼지 않습니다.
 - 이 셋은 [기준 실행의 프로파일](#기준-실행의-프로파일)로 예측하지 않고 실제로 실행합니다. 호출은 인자를 그대로 돌려주어도 부수 효과가 있을 수 있기 때문입니다.

@@ -356,3 +356,73 @@ async function main() {
     )
   })
 })
+
+describe('calls unwrapped to their receiver', () => {
+  // No semicolons: the statements that start with a transform follow a line a `(` would continue.
+  const source = `class Box { constructor(v) { this.v = v } map(f) { return new Box(f(this.v)) } get() { return this instanceof Box ? this.v : 'lost' } }
+class List {
+  constructor(items) { this.items = items }
+  evens() { return this.items.filter((x) => x % 2 === 0).map(String) }
+}
+function strings(s, code, o) {
+  const out = [s]
+  s.trim().split(',').forEach((x) => out.push(x))
+  s.slice(1).length > 1 && out.push('long')
+  out.push(code?.replace(/_/g, '-'), o?.name?.trim(), o?.list.filter(Boolean).map(String), o?.list?.slice?.(1))
+  if (s.toUpperCase() === s) out.push(s.toLowerCase().padStart(4, '.'))
+  return out
+}
+function boxes(b) {
+  // The receiver is the \`this\` of the call after it.
+  return b.map((v) => v + 1).get()
+}
+function main() {
+  const out = []
+  for (const call of [() => strings(' A,b ', 'en_US', { name: ' x ', list: [0, 1, 2] }), () => strings('ab', undefined, null), () => strings('XY', 'a_b_c', { name: null, list: [] }), () => strings('', '', { name: '  ', list: ['', 'a'] }), () => boxes(new Box(1)), () => new List([1, 2, 3, 4]).evens()]) {
+    try { out.push(call()) } catch (e) { out.push('throws ' + e.constructor.name) }
+  }
+  return JSON.stringify(out)
+}
+// Keeps the code alive for TCE, which would otherwise drop its mutants as dead code.
+globalThis.main = main`
+  const lines = source.split('\n')
+  const changed = new Set(lines.map((_, i) => i + 1).filter((line) => line < lines.indexOf('function main() {') + 1))
+  const { sites, mutants } = generate('file.js', source, addedLines(source, changed), 1)
+  const plain = instrument('file.js', source, sites).code
+  const profiled = instrument('file.js', source, sites, { profile: true }).code
+  const state = (active: number) => ({ active, limit: 0, hits: null, count: 0, exceeded: false, prof: new Float64Array((mutants.length + 1) * SLOTS) })
+  const cases = sites.flatMap((site) => site.mutants.map((planned) => ({ site, planned, label: `${planned.mutant.id} ${planned.mutant.line}:${planned.mutant.column} ${planned.mutant.operator} ${planned.mutant.description}` })))
+
+  test('has receiver mutants in chains, on statement starts and before another call', () => {
+    expect(mutants.filter((m) => m.operator === 'CallUnwrap').map((m) => `${m.line}:${m.column} ${m.description}`)).toEqual([
+      '1:67 `f(this.v)` → `this.v`',
+      '4:58 `….map(String)` → `…`',
+      '4:31 `this.items.filter((x) => x % 2 === 0)` → `this.items`',
+      '8:5 `s.trim()` → `s`',
+      '9:5 `s.slice(1)` → `s`',
+      "10:18 `code?.replace(/_/g, '-')` → `code`",
+      '10:47 `o?.name?.trim()` → `o?.name`',
+      '10:79 `o?.list.filter(Boolean).map(String)` → `o?.list.filter(Boolean)`',
+      '10:101 `o?.list?.slice?.(1)` → `o?.list`',
+      '11:9 `s.toUpperCase()` → `s`',
+      "11:55 `s.toLowerCase().padStart(4, '.')` → `s.toLowerCase()`",
+      '11:41 `s.toLowerCase()` → `s`',
+      '16:12 `b.map((v) => v + 1)` → `b`',
+    ])
+    // Wrapped in a block, so the `(` does not call the line before.
+    for (const statement of ['(s.trim())', '(s.slice(1))']) expect(plain.split('\n').find((line) => line.includes(statement))).toMatch(/^  \{ \(__nyorori_h\(/)
+  })
+
+  test('with no active mutant, behaves like the original', () => {
+    const original = evaluate(source, state(0))
+    expect(original).not.toContain('throws')
+    expect(evaluate(plain, state(0))).toBe(original)
+    expect(evaluate(profiled, state(0))).toBe(original)
+  })
+
+  test.each(cases)('mutant $label behaves like the source with only that change', ({ site, planned }) => {
+    const expected = evaluate(applyMutant(source, site, planned), state(0))
+    expect(evaluate(plain, state(planned.mutant.id))).toBe(expected)
+    expect(evaluate(profiled, state(planned.mutant.id))).toBe(expected)
+  })
+})

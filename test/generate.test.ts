@@ -50,32 +50,91 @@ describe('calls', () => {
   const only = (operator: string, code: string, changed?: Set<number>) =>
     mutants(code, changed, 'file.js').filter((m) => m.includes(` ${operator} `))
 
-  test('CallUnwrap replaces a call with its first argument, function and method calls alike', () => {
+  test('CallUnwrap replaces a function call with the argument it passes on', () => {
     const code = [
-      'export function f(a, x, key, o, s) {',
-      '  const i = toInteger(x) + o.get(key, 1)',
-      '  const n = o?.size(x) ?? normalize(x)?.n',
-      '  const t = o',
-      '    .trim(s)',
-      '  if (check(true)) return [a(x, 1), i, n, t]',
+      "import * as ns from './ns'",
+      'export function f(a, x, key, o) {',
+      '  const i = toInteger(x) + this.getValue(key, 1)',
+      '  const n = Math.min(x, 1) + Number.parseInt(key, 10) + ns.parse(x)',
+      '  const t = JSON.stringify(o) ?? normalize(x)?.n',
+      '  if (check(true)) return [a(x, 1), i, n, t, Object.assign(o, { a }), make()(x)]',
       '}',
-      'export class A extends B { m(x) { return super.m(x) } }',
+      'export class A extends B { m(x) { return super.m(x) + this.#parse(x) } #parse(x) { return x } }',
     ].join('\n')
     expect(only('CallUnwrap', code)).toEqual([
-      '2:13 CallUnwrap `toInteger(x)` → `x`',
-      '2:30 CallUnwrap `o.get(key, 1)` → `key`',
-      // The call ends the chain, so it stands for the whole chain.
-      '3:16 CallUnwrap `o?.size(x)` → `x`',
+      '3:13 CallUnwrap `toInteger(x)` → `x`',
+      // A method of the code's own class, like a plain function.
+      '3:33 CallUnwrap `this.getValue(key, 1)` → `key`',
+      // Static calls on a built-in or an imported namespace.
+      '4:18 CallUnwrap `Math.min(x, 1)` → `x`',
+      '4:37 CallUnwrap `Number.parseInt(key, 10)` → `key`',
+      '4:60 CallUnwrap `ns.parse(x)` → `x`',
+      '5:18 CallUnwrap `JSON.stringify(o)` → `o`',
       // Before the `?.`, cutting the chain there changes nothing.
-      '3:27 CallUnwrap `normalize(x)` → `x`',
-      // Anchored at the name, so a call added on its own line counts.
-      '5:6 CallUnwrap `o .trim(s)` → `s`',
+      '5:34 CallUnwrap `normalize(x)` → `x`',
       '6:28 CallUnwrap `a(x, 1)` → `x`',
+      '6:53 CallUnwrap `Object.assign(o, { a })` → `o`',
+      // A function that a call returns is still a function.
+      '6:71 CallUnwrap `make()(x)` → `x`',
       '8:48 CallUnwrap `super.m(x)` → `x`',
+      '8:60 CallUnwrap `this.#parse(x)` → `x`',
     ])
     // `check(true)` → `true` is the Condition mutant already.
-    expect(mutants(code, undefined, 'file.js').filter((m) => m.startsWith('6:7'))).toEqual(['6:7 Condition `check(true)` → `true`', '6:7 Condition `check(true)` → `false`'])
-    expect(only('CallUnwrap', code, new Set([5]))).toEqual(['5:6 CallUnwrap `o .trim(s)` → `s`'])
+    expect(mutants(code, undefined, 'file.js').filter((m) => m.startsWith('6:7 '))).toEqual(['6:7 Condition `check(true)` → `true`', '6:7 Condition `check(true)` → `false`'])
+  })
+
+  test('CallUnwrap replaces a transform of a string or an array with its receiver', () => {
+    const code = [
+      'export function f(s, xs, o, re) {',
+      "  const a = [s.trim(), s.toLowerCase(), s.replace(re, '-'), s.slice(1).padStart(4)]",
+      '  const b = [xs.map(String), xs.filter((x) => x.ok), xs.toSorted(), [s].concat(...xs), this.items.flat()]',
+      '  const c = [o?.map(f), o?.list.filter(Boolean), o.name?.trim(), o.list.slice?.(1)]',
+      '  const t = o',
+      '    .trim()',
+      '  return [a, b, c, t]',
+      '}',
+    ].join('\n')
+    expect(only('CallUnwrap', code)).toEqual([
+      // The transform was not applied; calls without arguments too.
+      '2:16 CallUnwrap `s.trim()` → `s`',
+      '2:26 CallUnwrap `s.toLowerCase()` → `s`',
+      "2:43 CallUnwrap `s.replace(re, '-')` → `s`",
+      '2:72 CallUnwrap `s.slice(1).padStart(4)` → `s.slice(1)`',
+      '2:63 CallUnwrap `s.slice(1)` → `s`',
+      // With a callback or a spread too: only first arguments must be plain values.
+      '3:17 CallUnwrap `xs.map(String)` → `xs`',
+      '3:33 CallUnwrap `xs.filter((x) => x.ok)` → `xs`',
+      '3:57 CallUnwrap `xs.toSorted()` → `xs`',
+      '3:73 CallUnwrap `[s].concat(...xs)` → `[s]`',
+      '3:99 CallUnwrap `this.items.flat()` → `this.items`',
+      // The call ends the chain, so it stands for the whole chain, and the receiver is a chain of its own.
+      '4:17 CallUnwrap `o?.map(f)` → `o`',
+      '4:33 CallUnwrap `o?.list.filter(Boolean)` → `o?.list`',
+      '4:58 CallUnwrap `o.name?.trim()` → `o.name`',
+      '4:73 CallUnwrap `o.list.slice?.(1)` → `o.list`',
+      // Anchored at the name, so a call added on its own line counts.
+      '6:6 CallUnwrap `o.trim()` → `o`',
+    ])
+    expect(only('CallUnwrap', code, new Set([6]))).toEqual(['6:6 CallUnwrap `o.trim()` → `o`'])
+  })
+
+  test('CallUnwrap leaves predicates, lookups and other methods alone: either value would only have the wrong type', () => {
+    const code = [
+      "import path from 'node:path'",
+      "import { posix } from 'node:path'",
+      "const url = require('node:url')",
+      'class Text { static trim(s) { return s } }',
+      'export function f(set, xs, s, map, re, o) {',
+      "  const a = [set.has(s), xs.includes(s), s.indexOf('('), map.get(s), xs.join(''), re.test(s), o.custom(s), s.split(','), xs[0](s)]",
+      // Modules, classes and globals other than the built-in namespaces, whatever their methods are called.
+      '  const b = [path.normalize(s), posix.normalize(s), url.format(s), Text.trim(s), Buffer.concat(xs), $.map(xs, String)]',
+      '  return [a, b, Object.keys(o)]',
+      '}',
+      'export function g(Math, x) {',
+      '  return Math.min(x, 1)',
+      '}',
+    ].join('\n')
+    expect(only('CallUnwrap', code)).toEqual(['8:24 CallUnwrap `Object.keys(o)` → `o`'])
   })
 
   test('CallUnwrap leaves calls whose unwrapping says nothing or breaks the code', () => {
@@ -87,22 +146,47 @@ describe('calls', () => {
       '}',
       'export async function f(x, xs, o) {',
       // No argument to unwrap to, or not a plain one; and what console logs.
-      '  const r = [g(), g(...xs), require("x"), import("x"), console.log(g(x))]',
-      // Callbacks, and receivers.
-      '  const c = [xs.map((v) => v + 1), xs.find(function (v) { return v }), o.f.call(o, x), o.f.apply(o, xs), o.f.bind(o)]',
+      '  const r = [g(), g(...xs), Math.max(...xs), require("x"), import("x"), console.log(g(x))]',
+      // Callbacks for the first argument, and receivers.
+      '  const c = [useMemo(() => x, [x]), this.on(function (v) { return v }), o.f.call(o, x), o.f.apply(o, xs), o.f.bind(o), xs.map.call(o, g)]',
       // Called, constructed, tagged, deleted.
-      '  const s = [g(x)(), new (g(x))(), g(x)`t`, delete g(x)]',
+      '  const s = [g(x)(), new (g(x))(), g(x)`t`, delete g(x), xs.map(g)()]',
       // After a `?.` inside a chain: parentheses would cut the rest of the chain off.
-      '  const t = [o?.a(x).b, o.a?.(x)?.b(x).c]',
+      '  const t = [g?.(x).b, o?.list.map(g).length, o.a?.(x)?.trim().c]',
       // Values dropped: CallStatement removes these.
       '  g(x)',
       '  await g(x)',
       '  o?.a(x)',
+      '  xs.sort()',
       '  return [r, c, s, t]',
       '}',
       'export const z = g(1)',
     ].join('\n')
     expect(only('CallUnwrap', code)).toEqual([])
+  })
+
+  test('call descriptions show the call around its callee, hiding a long receiver behind `…`', () => {
+    const code = [
+      'export function f(array, values, code, items, unescapedValues, match, options) {',
+      '  const a = differenceToolkit(Array.from(array), values).map(normalizeZero)',
+      "  const b = [toInteger(fromIndex), code?.replace(/_/g, '-'), items.map((item) => transform(item, options))]",
+      '  unescapedValues.push([match.index, match[0].length, options.escapeValue])',
+      '  return options.interpolation.escapeValue ?? options.escapeValue',
+      '}',
+    ].join('\n')
+    expect(mutants(code, undefined, 'file.js').filter((m) => / Call| Logical `.* \?\? /.test(m))).toEqual([
+      '2:58 CallUnwrap `….map(normalizeZero)` → `…`',
+      '2:13 CallUnwrap `differenceToolkit(Array.from(array), v…)` → `Array.from(array)`',
+      '2:37 CallUnwrap `Array.from(array)` → `array`',
+      '3:14 CallUnwrap `toInteger(fromIndex)` → `fromIndex`',
+      "3:42 CallUnwrap `code?.replace(/_/g, '-')` → `code`",
+      // A short receiver stays, and the arguments are cut instead.
+      '3:68 CallUnwrap `items.map((item) => transform(item, op…)` → `items`',
+      '3:82 CallUnwrap `transform(item, options)` → `item`',
+      '4:19 CallStatement `unescapedValues.push([match.index, mat…)` removed',
+      // `??` likewise keeps the operator in view.
+      '5:44 Logical `… ?? options.escapeValue` → `…`',
+    ])
   })
 
   test('CallStatement removes a call whose value the statement drops', () => {
