@@ -14,7 +14,7 @@ function mutated(lines: string[], file = 'f.ts', types?: TypeOracle): string[] {
     .map((m) => lines[m.line - 1]!.trim())
 }
 
-const oracle = (answer: PlusKind): TypeOracle => ({ plus: vi.fn(() => answer) })
+const oracle = (answer: PlusKind): TypeOracle => ({ plus: vi.fn(() => answer), nonNullableType: () => undefined })
 
 describe('without types, the syntax leaves a `+` alone when an operand is certainly a string', () => {
   test.each([

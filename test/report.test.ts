@@ -13,6 +13,7 @@ test('equivalent mutants are counted, but neither annotated nor failing', () => 
       { file: '/repo/src/a.ts', line: 3, column: 17, operator: 'Update', description: '`++` → `--`' },
     ],
     skipped: [],
+    unnecessary: [],
     suppressions: [],
     problems: [],
     types: { backend: 'typescript', files: 1, untyped: [] },
@@ -33,6 +34,7 @@ test('TypeScript files judged without types get one line of text, and nothing el
     results: [{ id: 1, file: '/repo/src/a.ts', line: 2, column: 15, operator: 'Arithmetic', description: '`+` → `-`', status: 'Killed', tests: ['test/a.test.ts'] }],
     equivalent: [],
     skipped: [],
+    unnecessary: [],
     suppressions: [],
     problems: [],
     types: { backend: 'none', reason, untyped: [{ file: '/repo/src/a.ts', reason }, { file: '/repo/src/b.ts', reason }] },
@@ -62,6 +64,7 @@ test('a predicted survivor shows why no test can notice it; skipped string `+` i
       { id: 3, file: '/repo/src/a.js', line: 8, column: 17, operator: 'Arithmetic', description: '`+` → `-`', reason: 'string concatenation in every observed evaluation' },
       { id: 4, file: '/repo/src/a.js', line: 9, column: 17, operator: 'Arithmetic', description: '`+` → `-`', reason: 'string concatenation in every observed evaluation' },
     ],
+    unnecessary: [],
     suppressions: [],
     problems: [],
     types: { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
@@ -94,6 +97,7 @@ test('with --no-predict, a survivor the profile got wrong is reported, without f
     ],
     equivalent: [],
     skipped: [],
+    unnecessary: [],
     suppressions: [],
     problems: [],
     types: { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
@@ -105,4 +109,46 @@ test('with --no-predict, a survivor the profile got wrong is reported, without f
   expect(formatSummary(report)).toContain('- `src/a.js:3:9` ComparisonBoundary `<` → `<=`: Killed, predicted to survive (no test has `x === lo`)')
   expect(formatAnnotations(report)).toEqual([])
   expect(exitCode(report)).toBe(0)
+})
+
+test('`?.` and `??` unnecessary by types are counted and listed in the summary, but neither annotated nor failing', () => {
+  const reason = "`user` is `User` by its type, which can't be null or undefined, and no test passed null or undefined"
+  const report: Report = {
+    gitRoot: '/repo',
+    base: 'abc',
+    files: ['src/a.ts'],
+    results: [{ id: 1, file: '/repo/src/a.ts', line: 2, column: 3, operator: 'FunctionBody', description: 'body → `return`', status: 'Killed', tests: ['test/a.test.ts'] }],
+    equivalent: [],
+    skipped: [],
+    unnecessary: [{ id: 2, file: '/repo/src/a.ts', line: 3, column: 14, operator: 'OptionalChaining', description: '`?.` → `.`', reason, tests: ['test/a.test.ts'] }],
+    suppressions: [],
+    problems: [],
+    types: { backend: 'typescript', files: 1, untyped: [] },
+    dryRun: false,
+  }
+  expect(formatText(report)).toBe(`nyorori: 1 mutant in 1 changed file: 1 Killed
+  1 mutant unnecessary by types: \`?.\` or \`??\` where the type can't be null or undefined and no test made it so`)
+  expect(formatSummary(report)).toBe(`## nyorori
+
+All 1 mutants in the changed code are detected by tests (1 Killed).
+
+### Unnecessary by types
+
+These \`?.\` and \`??\` guard values whose types say they can't be null or undefined, and no test passed null or undefined. \
+They are probably redundant defensive code: consider removing the \`?.\` or \`??\`. \
+If the value really can be null or undefined (data from outside, \`as\`, \`!\`), add a test that passes it. They do not fail the check.
+
+| Location | Operator | Change | Why |
+|---|---|---|---|
+| \`src/a.ts:3:14\` | OptionalChaining | \`?.\` → \`.\` | ${reason} |
+`)
+  expect(formatAnnotations(report)).toEqual([])
+  expect(exitCode(report)).toBe(0)
+
+  // With --no-predict they run; one that did not survive is a wrong prediction, and still does not fail the run.
+  const wrong: Report = { ...report, unnecessary: [{ ...report.unnecessary[0]!, mispredicted: 'Killed' }] }
+  expect(formatText(wrong)).toContain(`  MISPREDICT src/a.ts:3:14  OptionalChaining  \`?.\` → \`.\`  (unnecessary by types: ${reason}; Killed when run)`)
+  expect(formatSummary(wrong)).toContain(`- \`src/a.ts:3:14\` OptionalChaining \`?.\` → \`.\`: Killed, unnecessary by types (${reason})`)
+  expect(formatAnnotations(wrong)).toEqual([])
+  expect(exitCode(wrong)).toBe(0)
 })

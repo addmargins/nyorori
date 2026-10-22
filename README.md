@@ -30,7 +30,7 @@ jobs:
         #   exclude: |
         #     scripts/**
         #   max-mutants: 300
-        #   types: false # TypeScript 없이 문법으로만 문자열 `+`를 가림
+        #   types: false # TypeScript 없이: 문자열 `+`는 문법으로만, 타입으로 불필요한 `?.`·`??`는 가리지 않음
         #   predict: false # 살아남을 것으로 예측한 mutant도 실제로 실행
 ```
 
@@ -52,7 +52,7 @@ npx nyorori run --base origin/main
 | `--max-mutants <n>` | mutant가 n개를 넘으면 실행하지 않고 에러로 끝냄 |
 | `--json <file>` | 전체 결과를 JSON으로 저장 |
 | `--dry-run` | 테스트를 돌리지 않고 mutant 목록만 출력 |
-| `--no-types` | 문자열 `+`를 타입 정보 없이 문법으로만 가림(TypeScript를 띄우지 않음). [문자열 `+`](#문자열-) 참고 |
+| `--no-types` | TypeScript를 띄우지 않음. 문자열 `+`를 문법으로만 가리고, [타입으로 불필요한 방어 코드](#타입으로-불필요한-방어-코드)도 가리지 않음. [문자열 `+`](#문자열-) 참고 |
 | `--no-predict` | 기준 실행의 프로파일로 살아남는 것이 확실한 mutant도 실행하고, 예측이 틀린 mutant를 알림. [기준 실행의 프로파일](#기준-실행의-프로파일) 참고 |
 
 종료 코드는 세 가지입니다.
@@ -94,16 +94,47 @@ mutant 없이 테스트를 돌리는 기준 실행에서, 바뀐 코드의 각 �
 
 | mutant | 실행하지 않는 경우 |
 |---|---|
-| `a?.b`→`a.b`, `f?.()`→`f()`, `a ?? b`→`a` | 어떤 테스트에서도 `a`나 `f`가 null이나 undefined가 아님 |
+| `a?.b`→`a.b`, `f?.()`→`f()`, `a ?? b`→`a` | 어떤 테스트에서도 `a`나 `f`가 null이나 undefined가 아님. 타입도 그렇다고 하면 [따로 보고](#타입으로-불필요한-방어-코드) |
 | `ComparisonBoundary` | 어떤 테스트에서도 두 피연산자가 같지 않음 |
 | `Arithmetic` | 바꾼 연산자가 어떤 테스트에서도 같은 값을 냄. 예: `x + fee`에서 `fee`가 늘 0 |
 | `Condition` | 조건에 호출, 대입 같은 부수 효과가 없고, 늘 그 값(`true`나 `false`)이었음 |
 
 - 이것은 "그런 값이 올 수 없다"는 뜻이 아니라 "테스트가 그런 경우를 확인하지 않는다"는 뜻입니다. 그래서 CI는 실패합니다. 정말 올 수 없는 값이라면 [억제 주석](#equivalent-mutant-억제)에 그 이유를 적으세요.
+  - TypeScript 타입도 null이 될 수 없다고 하는 `?.`와 `??`는 예외입니다. [타입으로 불필요한 방어 코드](#타입으로-불필요한-방어-코드)를 보세요.
 - 테스트가 결정적이라고 가정합니다. 시간이나 난수에 따라 다르게 도는 테스트에서는 예측이 틀릴 수 있습니다. `--no-predict`로 실행하면 이런 mutant도 실제로 돌려 보고, 예측과 다르게 살아남지 않은 mutant를 `MISPREDICT` 줄로 알립니다.
 - getter와 Proxy는 부수 효과가 없다고 봅니다.
 - mutant 실행에는 기록 코드가 들어가지 않은 계측을 씁니다. 그래서 기록 비용은 기준 실행에만 듭니다. 보통의 테스트에서는 수 % 이내였고, 바뀐 코드를 아주 많이 반복해서 부르는 테스트에서는 더 큽니다.
 - `--json`의 결과에는 이유가 `reason`으로, 실행하지 않은 것은 `predicted: true`로 남습니다.
+
+### 타입으로 불필요한 방어 코드
+
+TypeScript 파일에서는 `a?.b`, `f?.()`, `a ?? b`가 지키는 값(`a`, `f`)이 타입으로 null이나 undefined가 될 수 있는지도 TypeScript에 묻습니다.
+될 수 없고, 기준 실행에서 어떤 테스트도 그 값을 null이나 undefined로 만들지 않았다면, 그 mutant는 실행하지 않고 **unnecessary by types**로 따로 보고합니다. CI는 실패하지 않습니다.
+
+```
+  1 mutant unnecessary by types: `?.` or `??` where the type can't be null or undefined and no test made it so
+```
+
+| 값의 타입 | 기준 실행 | 결과 |
+|---|---|---|
+| null이나 undefined가 될 수 없음 | 실행됐고, null이나 undefined였던 적이 없음 | unnecessary by types. 실행하지 않고, CI를 실패시키지 않음 |
+| null이나 undefined가 될 수 없음 | null이나 undefined였던 적이 있음(`null as any` 등) | 타입이 틀린 곳이므로 그대로 실행 |
+| 될 수 있음, 알 수 없음(`any` 등), JavaScript, 타입 정보 없음 | 실행됐고, null이나 undefined였던 적이 없음 | 이전처럼 이유와 함께 Survived |
+| 상관없음 | 실행되지 않음 | NoCoverage |
+
+- 대개 지워도 되는 방어 코드라는 뜻입니다. `?.`나 `??`를 지우거나, 그 값이 정말 null이 될 수 있다면(외부 데이터, `as`, `!` 등) 그 값을 넘기는 테스트를 추가하세요. 그러면 mutant가 실행되어 판정됩니다.
+- job summary에는 "Unnecessary by types" 표로, `--json`에는 `unnecessary`로 남습니다. 위치, 연산자, 변경, 이유(``"`user` is `User` by its type, which can't be null or undefined, and no test passed null or undefined"``), 그 지점을 실행한 테스트 파일이 들어갑니다.
+- 어노테이션은 만들지 않습니다. 고칠 것을 요구하지 않는 정보인데, PR이 건드린 방어적인 `?.`마다 표시하면 정말 고쳐야 할 오류 어노테이션이 묻히기 때문입니다.
+- 억제 주석이 가리키는 mutant는 다른 예측한 mutant처럼 Ignored가 됩니다.
+- 다음은 타입을 믿지 않고 이전처럼 판정합니다.
+  - tsconfig가 `strict`나 `strictNullChecks`를 켜지 않은 프로젝트. TypeScript 7은 기본으로 켜지만, 프로젝트가 쓰는 TypeScript는 더 오래되어 꺼져 있을 수 있습니다.
+  - `any`, `unknown`, 타입 매개변수, `Readonly<T>` 같은 mapped type, null·undefined·void가 들어 있는 union
+  - 인덱스 접근: `xs[i]`, `record[key]`, index signature로 찾는 `record.key`. `noUncheckedIndexedAccess`를 켜면 TypeScript가 `| undefined`를 붙이므로 그 타입을 씁니다.
+  - spread처럼 여러 선언을 합친 속성. `{ tags: [], ...options }`의 `tags`는 `options.tags`가 명시적으로 undefined여도 `string[]` 타입입니다.
+  - `x!`, `x as T`처럼 단언한 값, 그리고 `(x as T).y`처럼 단언을 거친 값
+  - JavaScript 파일
+- 타입은 검사된 만큼만 맞습니다. 다른 곳의 `as`나 `!`, `JSON.parse` 결과를 타입 있는 변수에 넣는 것, `user!: User` 같은 확정 할당, 실제 코드와 다른 `.d.ts` 등은 타입 검사를 통과하면서도 null을 넣을 수 있습니다. 그래서 이런 mutant를 버리지 않고 목록에 남기고, 테스트가 null을 넣는 지점은 그대로 실행합니다.
+- `--no-types`면 TypeScript에 묻지 않으므로 모두 "타입 정보 없음"으로 판정합니다. `--no-predict`면 이 mutant도 실행해서, 살아남지 않은 것을 `MISPREDICT` 줄로 알립니다. 이때도 CI 결과는 바꾸지 않습니다.
 
 ## 지원하지 않는 Vitest 설정
 

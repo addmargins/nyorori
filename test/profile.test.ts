@@ -2,7 +2,7 @@ import vm from 'node:vm'
 import { describe, expect, test } from 'vitest'
 import { generate } from '../src/mutate/generate.ts'
 import { instrument } from '../src/mutate/instrument.ts'
-import { mergeProfile, predict, SLOTS, type Prediction, type ProbeRecord } from '../src/mutate/profile.ts'
+import { CLASS, mergeProfile, predict, SLOTS, type Prediction, type ProbeRecord, type Rule } from '../src/mutate/profile.ts'
 
 /**
  * Profiles `code` (every line mutated) in a baseline that calls each of
@@ -96,6 +96,35 @@ describe('Logical `??`', () => {
 
   test('runs once a test makes it null or undefined', () => {
     expect(predictions(code, '() => count(1), () => count(undefined)')).toEqual(['Logical `x ?? 0` → `x`: run'])
+  })
+})
+
+describe('a value whose type cannot be null, by what the tests did', () => {
+  const unnecessary = (subject: string, type: string): Prediction =>
+    ({ verdict: 'unnecessary', reason: `\`${subject}\` is \`${type}\` by its type, which can't be null or undefined, and no test passed null or undefined` })
+  const survives: Prediction = { verdict: 'survives', reason: 'no test makes `user` null or undefined here' }
+
+  // [its type, what the baseline recorded over 2 evaluations, the verdict]
+  test.for<[string | undefined, ProbeRecord | undefined, Prediction | undefined]>([
+    // Probably redundant defensive code: listed, not run, not failing.
+    ['User', [CLASS.object, 0, 0, 2], unnecessary('user', 'User')],
+    // The types are wrong in the tests (`null as any`): run like any other.
+    ['User', [CLASS.object | CLASS.null, 0, 0, 2], undefined],
+    // The type may be null, or says nothing (`any`, JavaScript, no types): today's predicted survivor.
+    [undefined, [CLASS.object, 0, 0, 2], survives],
+    [undefined, [CLASS.undefined | CLASS.object, 0, 0, 2], undefined],
+    // No test runs it: NoCoverage, whatever the type.
+    ['User', undefined, undefined],
+  ])('`user?.name` with type %s and record %j', ([type, record, verdict]) => {
+    expect(predict({ kind: 'nonNullish', subject: 'user', type }, record, 2)).toEqual(verdict)
+  })
+
+  test('an optional call counts calls', () => {
+    const rule = (type?: string): Rule => ({ kind: 'called', subject: 'handlers.onMessage', type })
+    expect(predict(rule('() => void'), [0, 0, 0, 2], 2)).toEqual(unnecessary('handlers.onMessage', '() => void'))
+    // One evaluation did not call it: the callee was nullish there.
+    expect(predict(rule('() => void'), [0, 0, 0, 1], 2)).toBeUndefined()
+    expect(predict(rule(), [0, 0, 0, 2], 2)).toEqual({ verdict: 'survives', reason: 'no test makes `handlers.onMessage` null or undefined here' })
   })
 })
 

@@ -128,6 +128,13 @@ describe('equivalent-mutant filters', () => {
   })
 })
 
+describe('arithmetic identities', () => {
+  test('`x * 1n` and `x / 1n` are left alone like `x * 1`: the same bigint, or the same TypeError', () => {
+    const code = ['function f(x) {', '  return [x * 1n, x / 0x1n, x * 2n, x / 1]', '}'].join('\n')
+    expect(mutants(code).filter((m) => m.includes('Arithmetic'))).toEqual(['2:31 Arithmetic `*` → `/`'])
+  })
+})
+
 describe('suppressions', () => {
   test('parses operators and reason, and marks comments on changed lines as new', () => {
     const code = [

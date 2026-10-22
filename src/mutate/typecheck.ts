@@ -10,10 +10,20 @@ import type { TypesUsage, UntypedFile } from '../types.ts'
 /** What a `+` does: join strings, add numbers or bigints, or unknown without types. */
 export type PlusKind = 'string' | 'numeric' | 'unknown'
 
-/** Tells string concatenation apart from arithmetic where the syntax cannot. generate() asks it synchronously. */
+/**
+ * Tells string concatenation apart from arithmetic where the syntax cannot, and
+ * which values that a `?.` or `??` guards cannot be null. generate() asks it
+ * synchronously. Spans are oxc-parser's (UTF-16 offsets).
+ */
 export interface TypeOracle {
-  /** `left` and `right` are the operands of one `+` in `file`, as oxc-parser spans (UTF-16 offsets). */
+  /** `left` and `right` are the operands of one `+` in `file`. */
   plus(file: string, left: Span, right: Span): PlusKind
+  /**
+   * The type of `value`, the object or callee of a `?.` or the left side of a
+   * `??`, as text, when that type cannot be null or undefined. Undefined when
+   * it can, or when the types do not settle it.
+   */
+  nonNullableType(file: string, value: Span): string | undefined
 }
 
 /**
@@ -24,6 +34,8 @@ export interface FileQuestions {
   file: string
   /** The operands of each `+` that the syntax cannot tell. */
   plus: Array<{ left: Span; right: Span }>
+  /** The value each `?.` and `??` guards, where the profile may settle its mutant. Only TypeScript files are asked. */
+  guarded: Span[]
 }
 
 /** The two entry points of the TypeScript API that this module uses. Tests inject loaders that fail or never answer. */
@@ -54,7 +66,7 @@ const LIMITS: Limits = { start: 30_000, open: 30_000, ask: 5_000, close: 2_000 }
 const TYPESCRIPT = /\.[cm]?tsx?$/
 const JAVASCRIPT = /\.[cm]?jsx?$/
 
-const NOT_ASKED = 'no `+` on a changed line needed types'
+const NOT_ASKED = 'no `+`, `?.` or `??` on a changed line needed types'
 const NO_PROJECT = 'not in any tsconfig.json project'
 const UNCHECKED = 'TypeScript does not check this JavaScript (it needs checkJs and noImplicitAny or strict in a tsconfig.json or jsconfig.json)'
 
@@ -67,19 +79,26 @@ export function typesNotAsked(): TypesUsage {
 export class TypeAnswers implements TypeOracle {
   readonly usage: TypesUsage
   private readonly plusKinds: ReadonlyMap<string, PlusKind>
+  private readonly nonNullable: ReadonlyMap<string, string>
 
-  constructor(plusKinds: ReadonlyMap<string, PlusKind>, usage: TypesUsage) {
+  constructor(plusKinds: ReadonlyMap<string, PlusKind>, nonNullable: ReadonlyMap<string, string>, usage: TypesUsage) {
     this.plusKinds = plusKinds
+    this.nonNullable = nonNullable
     this.usage = usage
   }
 
   plus(file: string, left: Span, right: Span): PlusKind {
-    return this.plusKinds.get(plusKey(file, left, right)) ?? 'unknown'
+    return this.plusKinds.get(spanKey(file, left, right)) ?? 'unknown'
+  }
+
+  nonNullableType(file: string, value: Span): string | undefined {
+    return this.nonNullable.get(spanKey(file, value, value))
   }
 }
 
-function plusKey(file: string, left: Span, right: Span): string {
-  return `${file}:${left.start}:${right.end}`
+/** Where a question sits: from the start of `first` to the end of `last`. */
+function spanKey(file: string, first: Span, last: Span): string {
+  return `${file}:${first.start}:${last.end}`
 }
 
 /**
@@ -93,21 +112,30 @@ function plusKey(file: string, left: Span, right: Span): string {
  * a JavaScript file only where its project checks JavaScript as strictly as
  * TypeScript: elsewhere a JavaScript value can break the type TypeScript infers
  * for it (a `let` initialised with a string and later given a number) without
- * any error.
+ * any error. Whether a value can be null is asked of TypeScript files only.
  */
 export async function askTypes(root: string, questions: FileQuestions[], options: { load?: () => Promise<TypeScript>; limits?: Limits } = {}): Promise<TypeAnswers> {
   const plusKinds = new Map<string, PlusKind>()
+  const nonNullable = new Map<string, string>()
+  // TypeScript files with a `+` that went without types; one asked only about `?.` and `??` keeps
+  // today's verdicts without them, so it is not listed, but its reason still explains the usage.
   const untyped: UntypedFile[] = []
+  let reason: string | undefined
+  const without = (q: FileQuestions, why: string) => {
+    if (q.plus.length > 0) untyped.push({ file: q.file, reason: why })
+    reason ??= why
+  }
   let typed = 0
   let unchecked = false
   let failure: string | undefined
   const asked: FileQuestions[] = []
   for (const q of questions) {
     const typescript = TYPESCRIPT.test(q.file)
-    if (q.plus.length === 0 || (!typescript && !JAVASCRIPT.test(q.file))) continue
+    const guarded = typescript ? q.guarded : []
+    if ((q.plus.length === 0 && guarded.length === 0) || (!typescript && !JAVASCRIPT.test(q.file))) continue
     // TypeScript would put the file in an inferred project with default options; no need to start it for that.
-    if (hasConfig(q.file)) asked.push(q)
-    else if (typescript) untyped.push({ file: q.file, reason: NO_PROJECT })
+    if (hasConfig(q.file)) asked.push({ ...q, guarded })
+    else if (typescript) without(q, NO_PROJECT)
     else unchecked = true
   }
   if (asked.length > 0) {
@@ -117,9 +145,13 @@ export async function askTypes(root: string, questions: FileQuestions[], options
         const answer = await server.answer(q)
         if (typeof answer !== 'string') {
           typed++
-          q.plus.forEach(({ left, right }, i) => plusKinds.set(plusKey(q.file, left, right), answer.plus[i]!))
+          q.plus.forEach(({ left, right }, i) => plusKinds.set(spanKey(q.file, left, right), answer.plus[i]!))
+          q.guarded.forEach((value, i) => {
+            const type = answer.guarded[i]
+            if (type !== undefined) nonNullable.set(spanKey(q.file, value, value), type)
+          })
         } else if (TYPESCRIPT.test(q.file)) {
-          untyped.push({ file: q.file, reason: answer })
+          without(q, answer)
         } else {
           // JavaScript is normally judged by syntax alone, so it is not listed.
           unchecked = true
@@ -132,8 +164,8 @@ export async function askTypes(root: string, questions: FileQuestions[], options
   }
   const usage: TypesUsage = typed > 0
     ? { backend: 'typescript', files: typed, untyped }
-    : { backend: 'none', reason: failure ?? untyped[0]?.reason ?? (unchecked ? UNCHECKED : NOT_ASKED), untyped }
-  return new TypeAnswers(plusKinds, usage)
+    : { backend: 'none', reason: failure ?? reason ?? (unchecked ? UNCHECKED : NOT_ASKED), untyped }
+  return new TypeAnswers(plusKinds, nonNullable, usage)
 }
 
 function hasConfig(file: string): boolean {
@@ -153,12 +185,27 @@ function checksJavaScript(options: Api.CompilerOptions): boolean {
   return options.checkJs === true && (options.noImplicitAny ?? options.strict ?? false)
 }
 
+/**
+ * Without strictNullChecks no type includes null or undefined, so no type
+ * rules them out. TypeScript 7 turns it on by default (through `strict`), but
+ * the options are as written in the config and the project's own checker may
+ * be older, where it is off: only a config that turns it on counts.
+ */
+function checksNulls(options: Api.CompilerOptions): boolean {
+  return options.strictNullChecks ?? options.strict ?? false
+}
+
 interface Opened {
   checker: Api.Checker
   source: Ast.SourceFile
+  /** strictNullChecks is on (see checksNulls). */
+  nulls: boolean
+  /** noUncheckedIndexedAccess is on: an index access then has `| undefined` in its type. */
+  uncheckedIndex: boolean
 }
 
-type Answer = { plus: PlusKind[] }
+/** In the order asked: what each `+` does, and the type of each guarded value that cannot be null or undefined. */
+type Answer = { plus: PlusKind[]; guarded: Array<string | undefined> }
 
 /** Requests that fail to reach an exited process; see `ignoreWriteFailures`. */
 const WRITE_FAILURES = new Set(['EPIPE', 'ERR_STREAM_DESTROYED', 'ERR_STREAM_WRITE_AFTER_END'])
@@ -202,7 +249,7 @@ class Server {
       const opened = await this.open(q.file)
       if (typeof opened === 'string') return opened
       step = `asking about ${path.relative(this.root, q.file)}`
-      return { plus: await this.plus(opened, q.plus) }
+      return await this.ask(opened, q)
     } catch (error) {
       const reason = error instanceof Timeout
         ? `TypeScript did not answer within ${error.ms / 1000} s (${step})`
@@ -259,16 +306,22 @@ class Server {
     const project = await this.within(this.limits.ask, this.snapshot.getDefaultProjectForFile(file))
     // A file outside every tsconfig.json lands in an inferred project with default options.
     if (!project?.configFileName) return JAVASCRIPT.test(file) ? UNCHECKED : NO_PROJECT
-    if (JAVASCRIPT.test(file) && !checksJavaScript(project.program.getCompilerOptions())) return UNCHECKED
+    const options = project.program.getCompilerOptions()
+    if (JAVASCRIPT.test(file) && !checksJavaScript(options)) return UNCHECKED
     const source = await this.within(this.limits.ask, project.program.getSourceFile(file))
     if (!source) return NO_PROJECT
-    return { checker: project.checker, source }
+    return { checker: project.checker, source, nulls: checksNulls(options), uncheckedIndex: options.noUncheckedIndexedAccess === true }
   }
 
-  private async plus({ checker, source }: Opened, questions: FileQuestions['plus']): Promise<PlusKind[]> {
+  /**
+   * Asks about every `+` and every guarded value of a file at once: one batch
+   * for their types (and the symbols of property names), one for union members
+   * and type names.
+   */
+  private async ask({ checker, source, nulls, uncheckedIndex }: Opened, q: FileQuestions): Promise<Answer> {
     const { ast, api } = this.ts!
     const nodes: Ast.Node[] = []
-    const located = questions.map(({ left, right }) => {
+    const plus = q.plus.map(({ left, right }) => {
       // The left operand ends where the `+` token's leading trivia starts.
       const binary = ast.getTokenAtPosition(source, left.end).parent
       // Offsets disagree when TypeScript reads the text differently, e.g. without a byte order mark.
@@ -277,11 +330,43 @@ class Server {
       nodes.push(binary, binary.left, binary.right)
       return nodes.length - 3
     })
-    if (nodes.length === 0) return located.map(() => 'unknown')
-    const types = await this.within(this.limits.ask, checker.getTypeAtLocation(nodes))
-    // Union members come in one more round trip, batched by the client.
-    return this.within(this.limits.ask, Promise.all(located.map((i) =>
-      i < 0 ? 'unknown' : classify(api.TypeFlags, types[i]!, types[i + 1]!, types[i + 2]!))))
+    // Their symbols tell a declared property from one found through an index signature or put together by a spread.
+    const names: Ast.Node[] = []
+    const guarded = q.guarded.map((value) => {
+      const found = nulls ? guardedValue(ast, source, value) : undefined
+      if (!found) return undefined
+      // Without noUncheckedIndexedAccess, `xs[i]` has the element type even past the end.
+      if (!uncheckedIndex && ast.isElementAccessExpression(found.inner)) return undefined
+      nodes.push(found.node)
+      const name = ast.isPropertyAccessExpression(found.inner) ? names.push(found.inner.name) - 1 : -1
+      return { node: found.node, at: nodes.length - 1, name }
+    })
+    if (nodes.length === 0) return { plus: plus.map(() => 'unknown'), guarded: guarded.map(() => undefined) }
+    // Requests made together go to the process as one batch.
+    const [types, symbols] = await this.within(this.limits.ask, Promise.all([
+      checker.getTypeAtLocation(nodes),
+      names.length > 0 ? checker.getSymbolAtLocation(names) : [],
+    ]))
+    // Union members and type names come in one more round trip.
+    const [kinds, nonNullable] = await this.within(this.limits.ask, Promise.all([
+      Promise.all(plus.map((i): PlusKind | Promise<PlusKind> =>
+        i < 0 ? 'unknown' : classify(api.TypeFlags, types[i]!, types[i + 1]!, types[i + 2]!))),
+      Promise.all(guarded.map(async (g) => {
+        if (!g) return undefined
+        if (g.name >= 0) {
+          const symbol = symbols[g.name]
+          // Through an index signature: no symbol of its own (`Record<string, T>`), or the signature's.
+          if (!uncheckedIndex && (!symbol || (symbol.checkFlags & api.CheckFlags.IndexSymbol) !== 0)) return undefined
+          // Put together from several declarations, as by a spread: `{ tags: [], ...options }` has
+          // `tags: string[]` even where `options.tags` is optional and explicitly undefined.
+          if (symbol && symbol.declarations.length > 1) return undefined
+        }
+        const type = types[g.at]!
+        const [never, text] = await Promise.all([cannotBeNullish(api, type), checker.typeToString(type, g.node)])
+        return never ? text : undefined
+      })),
+    ]))
+    return { plus: kinds, guarded: nonNullable }
   }
 
   /** Settles as `promise` does, unless `ms` pass or the process exits first. */
@@ -347,6 +432,54 @@ async function classify(flags: typeof Api.TypeFlags, whole: Api.Type, left: Api.
   const mayBeString = async (type: Api.Type) =>
     (type.flags & flags.StringLike) !== 0 || (type.isUnionType() && (await type.getTypes()).some((t) => (t.flags & flags.StringLike) !== 0))
   return (await mayBeString(left)) || (await mayBeString(right)) ? 'string' : 'unknown'
+}
+
+/**
+ * The node of a value that a `?.` or `??` guards, found from the token right
+ * after it, and the value inside its parentheses. Undefined where the offsets
+ * disagree, or where an assertion states the type instead of the checker
+ * finding it: `x!`, `x as T` or `<T>x` itself, or an `as` further down the
+ * chain, as in `(r as T).isEscaped`, which has T's type even where `r` is a
+ * string. A `!` further down is harmless: in `x!.y?.z` a null `x` makes the
+ * chain throw before the `?.`, mutated or not.
+ */
+function guardedValue(ast: typeof Ast, source: Ast.SourceFile, value: Span): { node: Ast.Expression; inner: Ast.Expression } | undefined {
+  // The value ends where the leading trivia of its `?.` or `??` starts.
+  const token = ast.getTokenAtPosition(source, value.end)
+  const parent = token.parent
+  let node: Ast.Expression | undefined
+  if (token.kind === ast.SyntaxKind.QuestionDotToken &&
+    (ast.isPropertyAccessExpression(parent) || ast.isElementAccessExpression(parent) || ast.isCallExpression(parent))) {
+    node = parent.expression
+  } else if (token.kind === ast.SyntaxKind.QuestionQuestionToken && ast.isBinaryExpression(parent)) {
+    node = parent.left
+  }
+  if (!node || node.end !== value.end) return undefined
+  let inner = node
+  while (ast.isParenthesizedExpression(inner)) inner = inner.expression
+  if (ast.isNonNullExpression(inner)) return undefined
+  for (let n: Ast.Node = inner; ;) {
+    if (ast.isAsExpression(n) || ast.isTypeAssertion(n)) return undefined
+    if (ast.isParenthesizedExpression(n) || ast.isNonNullExpression(n) || ast.isPropertyAccessExpression(n) ||
+      ast.isElementAccessExpression(n) || ast.isCallExpression(n)) n = n.expression
+    else return { node, inner }
+  }
+}
+
+/**
+ * Whether no value of `type` is null or undefined: a string, number, bigint,
+ * boolean, enum, symbol, object or function type, or a union of only those.
+ * `any`, `unknown`, `void`, a type parameter and other generic types (`T[K]`,
+ * conditional types) may be null, and so may a mapped type: `Readonly<T>` and
+ * `Partial<T>` are null when `T` is. An intersection cannot be null when one
+ * of its members cannot, as in `T & {}`.
+ */
+async function cannotBeNullish(api: typeof Api, type: Api.Type): Promise<boolean> {
+  const one = (t: Api.Type) => (t.flags & api.TypeFlags.DefinitelyNonNullable) !== 0 &&
+    !(t.isObjectType() && (t.objectFlags & (api.ObjectFlags.Mapped | api.ObjectFlags.ReverseMapped)) !== 0)
+  if (type.isUnionType()) return (await type.getTypes()).every(one)
+  if (type.isIntersectionType()) return (await type.getTypes()).some(one)
+  return one(type)
 }
 
 /**

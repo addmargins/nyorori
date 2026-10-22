@@ -21,7 +21,7 @@ inputs:
     description: Extra milliseconds a mutant run may take beyond twice the baseline before it counts as a timeout.
     default: '10000'
   types:
-    description: Set to 'false' to tell string `+` from numeric `+` by syntax only, without starting TypeScript.
+    description: Set to 'false' to start no TypeScript, telling string `+` from numeric `+` by syntax only and listing no `?.` or `??` as unnecessary by types.
     default: 'true'
   predict:
     description: Set to 'false' to run mutants that the baseline profile predicts to survive, instead of reporting them without running.

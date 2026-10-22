@@ -24,6 +24,7 @@ PR이 **추가하거나 바꾼 코드**에만 mutation을 넣고, 그 PR 시점�
 | NoCoverage | Survived와 똑같이 CI 실패 |
 | 실행 시간 프로파일링 | 기준 실행에만 probe를 넣은 계측을 쓴다. mutant 실행은 probe 없는 계측을 쓴다 |
 | 프로파일로 살아남는 것이 확실한 mutant | 실행하지 않고 이유와 함께 Survived로 보고한다. `--no-predict`면 실행해서 예측을 검증한다 |
+| 타입도 프로파일도 null이 아니라고 하는 `?.`, `??` | 실행하지 않고 unnecessary by types로 따로 보고한다. CI를 실패시키지 않는다. TS 파일에서, config가 `strictNullChecks`를 켠 프로젝트만 본다 |
 
 ## 전체 흐름
 
@@ -33,8 +34,8 @@ nyorori run --base <ref>
   2. 세션 시작     Vitest를 띄운 별도 프로세스(session)를 시작한다
                   세션이 Vitest 설정으로 대상 파일을 거른다
                   (테스트 파일, coverage.exclude, --exclude 제외)
-  3. mutant 생성   먼저 문법 규칙이 모르는 바뀐 줄의 `+`를 모아 TypeScript에 한꺼번에 묻는다
-                  TypeScript 프로세스는 이때만 떠 있다
+  3. mutant 생성   먼저 문법 규칙이 모르는 바뀐 줄의 `+`와, TS 파일에서 `?.`·`??`가 지키는 값을 모아
+                  TypeScript에 한꺼번에 묻는다. TypeScript 프로세스는 이때만 떠 있다
                   oxc-parser로 파싱 → 바뀐 줄에 앵커가 걸린 노드에만 mutant를 만든다
                   → 정적 equivalent 필터 (L1: 휴리스틱, TCE). `+`는 문법 규칙, 그다음 TypeScript의 답으로 판단한다
                   → 억제 주석 읽기 (L2)
@@ -47,9 +48,10 @@ nyorori run --base <ref>
                   - probe가 지점을 지나간 값의 종류를 기록한다 (실행 시간 프로파일링)
   6. 프로파일 판정  모든 실행에서 문자열을 이어 붙인 `+`의 mutant는 건너뛴다
                   모든 실행에서 원본과 같게 동작한 mutant는 살아남는 것이 확실하다고 표시한다
+                  그중 타입으로도 null이 될 수 없는 값을 지키는 `?.`·`??`는 unnecessary로 따로 둔다
   7. mutant 실행   세션이 plain 계측으로 바꾸고 계측한 파일을 무효화한다
                   mutant마다 provide(id) → 그 지점을 실행한 테스트 파일만, bail: 1로 실행
-                  살아남는 것이 확실한 mutant는 실행하지 않는다 (--no-predict면 실행한다)
+                  살아남는 것이 확실한 mutant와 unnecessary는 실행하지 않는다 (--no-predict면 실행한다)
   8. 보고          stdout, ::error 어노테이션, $GITHUB_STEP_SUMMARY, --json
                   Survived, NoCoverage, 억제 주석 문제가 있으면 exit 1
 ```
@@ -113,6 +115,7 @@ profiled 계측은 원본 분기 안에 probe를 더 넣는다("실행 시간 �
 NoCoverage는 테스트를 돌리지 않고 판정하므로 비용이 들지 않는다.
 프로파일로 살아남는 것이 확실한 mutant도 실행하지 않는다.
 TCE로 버린 mutant와, 실행 시간에 문자열 연결로 확인되어 건너뛴 `+`의 mutant는 판정 대상이 아니다. 실행하지 않고, 개수만 보고한다(L1과 "실행 시간 프로파일링" 참고).
+타입도 프로파일도 null이 아니라고 하는 `?.`·`??`의 mutant(unnecessary by types)도 판정 대상이 아니다. 실행하지 않고, 목록으로 보고하고, CI를 실패시키지 않는다("타입으로 불필요한 방어 코드" 참고).
 
 ### 범위 규칙
 
@@ -169,10 +172,10 @@ src/
 ├─ git.ts                merge-base, git diff → 바뀐 줄
 ├─ mutate/generate.ts    oxc-parser AST 순회(visitorKeys, ScopeTracker) → 지점과 mutant, L1 휴리스틱, L2 억제 주석, 타입에 물을 것(typeQuestions)
 ├─ mutate/equivalent.ts  L1 TCE: oxc-transform + oxc-minify 결과가 원본과 같은 mutant를 버림
-├─ mutate/typecheck.ts   TypeScript 7 API 어댑터: 생성 전에 `+`가 문자열 연결인지 숫자 덧셈인지 타입으로 미리 답함
+├─ mutate/typecheck.ts   TypeScript 7 API 어댑터: 생성 전에 `+`가 문자열 연결인지, `?.`·`??`가 지키는 값이 null이 될 수 없는지 타입으로 미리 답함
 ├─ mutate/infer.ts       문자열 `+`의 문법 규칙: 식이 문자열인 것이 확실한지 AST와 스코프로 답함
 ├─ mutate/instrument.ts  schemata 삽입, probe 삽입(profiled), 소스맵, 계측 결과 파싱 확인
-├─ mutate/profile.ts     probe 기록의 형식과 판정 규칙: 살아남는 것이 확실한 mutant, 문자열 `+`
+├─ mutate/profile.ts     probe 기록의 형식과 판정 규칙: 살아남는 것이 확실한 mutant, 문자열 `+`, 타입으로 불필요한 `?.`·`??`
 ├─ run.ts                오케스트레이션: 세션 관리, 타입 미리 묻기, 기준 실행, mutant별 실행, 판정
 ├─ session.ts            별도 프로세스에서 Vitest Node API 실행 (플러그인, setup 파일, provide)
 ├─ vitest.ts             프로젝트가 쓰는 Vitest 찾기 (Vite+ 포함)
@@ -197,6 +200,7 @@ merge-base를 구하려면 `actions/checkout`에 `fetch-depth: 0`이 필요하�
 ### 타입 정보 (TypeScript 7 API)
 
 `a.name + b.title`처럼 멤버나 반환값끼리 잇는 `+`가 문자열 연결인지는 문법만으로 알 수 없다. 그래서 문법 규칙이 모르는 `+`는 TypeScript에 타입을 묻는다(L1 참고).
+TS 파일에서는 `?.`와 `??`가 지키는 값이 null이나 undefined가 될 수 없는지도 같이 묻는다("타입으로 불필요한 방어 코드" 참고).
 TypeScript 7은 Go로 다시 쓴 컴파일러이고, 별도 프로세스와 IPC로 통신하는 API를 `typescript/async`와 `typescript/sync`로 제공한다. 7.1에서 `unstable/` 접두어가 빠졌다.
 nyorori는 비동기 API를 쓴다. 동기 API는 응답을 기다리는 동안 이벤트 루프를 막으므로 시간 제한을 걸 수 없다.
 
@@ -208,8 +212,9 @@ nyorori는 비동기 API를 쓴다. 동기 API는 응답을 기다리는 동안 
 - **미리 묻기.** mutant 생성(`generate()`)은 동기이고 API는 비동기다. 그래서 `run.ts`가 생성 전에 물을 것을 모아 한 번에 묻고, `generate()`는 답을 맵에서 찾기만 한다.
   - 물을 것은 `typeQuestions()`가 모은다. `generate()`의 계획 단계(파싱, 스코프 순회, 지점 수집)를 그대로 돌리면서 타입을 기록만 하는 오라클을 넘긴다. 그래서 묻는 `+`는 생성이 실제로 묻게 될 것과 정확히 같다. 바뀐 줄에 있고, 변형하는 코드(함수 안, 전역 `console` 호출의 인자 밖)에 있고, 문법 규칙이 문자열로 정하지 못한 `+`다.
   - 파싱과 순회를 한 번 더 하는 비용은 626줄 파일 전체를 바뀐 것으로 쳤을 때 25~40ms였다. TCE는 하지 않는다.
-  - 다음 단계에서 `a?.b`, `a ?? b`의 `a`가 null이 될 수 있는지도 같은 배치로 묻게 된다. 그때는 `FileQuestions`에 종류를 더하고, 파일마다 노드를 이어 붙여 한 번의 `getTypeAtLocation`으로 묻는다.
-- **지연 시작.** 물을 `+`가 있는 파일이 있을 때만 모듈을 읽고 프로세스를 띄운다.
+  - `?.`와 `??`는 `FileQuestions.guarded`로 같은 배치에 묻는다. 생성이 프로파일 규칙을 붙이는 mutant가 지키는 값이다. 멤버 `a?.b`의 `a`, 호출 probe를 넣을 수 있는 `f?.()`의 `f`, `a ?? b`의 `a`다. 이것도 mutant가 생기는 곳, 곧 바뀐 줄에서만 묻는다.
+  - JavaScript 파일의 `guarded`는 버린다. TypeScript가 JavaScript에서 추론한 타입은 null에 대해 믿을 수 없기 때문이다.
+- **지연 시작.** 물을 것(`+`, TS 파일의 `?.`·`??`)이 있는 파일이 있을 때만 모듈을 읽고 프로세스를 띄운다. 그래서 `+`가 없어도 `?.`가 바뀐 TS 파일이 있으면 TypeScript가 뜬다.
   - 파일 위쪽 디렉터리 어디에도 `tsconfig.json`이나 `jsconfig.json`이 없으면 TypeScript를 띄우지 않는다. 그런 파일은 inferred 프로젝트로 갈 수밖에 없어서 어차피 타입을 쓰지 않는다. express, undici, fastify에서는 그래서 TypeScript가 뜨지 않는다.
 - **프로젝트 찾기.** 파일마다 snapshot을 `openFiles: [file]`로 갱신하고 `getDefaultProjectForFile`로 프로젝트를 받는다.
   - 편집기가 파일을 열 때처럼 TypeScript가 위쪽 디렉터리에서 그 파일을 포함하는 `tsconfig.json`(없으면 `jsconfig.json`)을 찾고, `references`도 따라간다. Vite 템플릿처럼 루트 `tsconfig.json`이 `files: []`와 references만 가진 경우에도 `tsconfig.app.json`을 찾는다.
@@ -223,6 +228,13 @@ nyorori는 비동기 API를 쓴다. 동기 API는 응답을 기다리는 동안 
   - 그래서 `program.getSourceFile`로 받은 AST에서 `getTokenAtPosition(sourceFile, left.end)`로 `+` 토큰을 찾고, 그 부모인 `BinaryExpression` 노드 자체를 묻는다. 왼쪽 피연산자가 끝나는 곳에서 `+` 토큰의 leading trivia가 시작하기 때문이다.
   - 두 피연산자의 끝 위치가 oxc의 것과 다르면 묻지 않는다. 예를 들어 BOM이 있는 파일은 TypeScript가 BOM을 빼고 읽으므로 한 칸씩 어긋나고, 문법 규칙으로 돌아간다.
   - 파일 하나의 모든 `+`에 대해 식 전체와 두 피연산자의 타입을 `checker.getTypeAtLocation`으로 한 번에 묻는다. 결과가 `any`일 때만 union의 구성원을 한 번 더 묻는다. 이것도 클라이언트가 한 요청으로 묶는다.
+  - `?.`·`??`가 지키는 값도 `+`와 같은 방법으로 찾는다. 값이 끝나는 곳의 토큰이 `?.`(부모는 속성 접근, 원소 접근, 호출)나 `??`(부모는 `BinaryExpression`)이고, 부모의 `expression`이나 `left`가 그 값이다. 끝 위치가 oxc의 것과 다르면 묻지 않는다.
+  - 그 노드들을 `+`의 노드 뒤에 이어 붙여 같은 `getTypeAtLocation` 한 번으로 묻는다. 값이 속성 접근(`a.b`)이면 이름의 `getSymbolAtLocation`도 같은 틱에 보낸다. 클라이언트는 한 틱 안의 요청을 `batchRequests` 하나로 묶으므로 왕복은 한 번이다.
+  - 두 번째 왕복에서 union과 intersection의 구성원(`getTypes`)과 보고에 쓸 타입 이름(`typeToString`)을 같이 묻는다. `+`의 결과가 `any`일 때 묻는 피연산자의 구성원도 이때 묻는다. 그래서 파일 하나에 왕복은 많아야 두 번이다. 왼쪽 피연산자에 문자열이 없으면 오른쪽 피연산자를 한 번 더 묻는 것은 이전과 같다.
+  - `strictNullChecks`는 config에 쓰인 대로만 친다(`strictNullChecks ?? strict ?? false`). 꺼져 있으면 `?.`·`??`는 묻지 않는다.
+    - TypeScript 7.1은 둘 다 쓰지 않은 config를 `strictNullChecks`가 켜진 것으로 검사한다. `tsc`가 `string | undefined`인 값에 TS18048을 내고, API도 그 값의 타입을 `string | undefined`로 답했다. 그러나 `getCompilerOptions()`는 `{}`를 준다. `extends`로 받은 `strict: true`는 준다.
+    - `strict: false`나 `strictNullChecks: false`에서는 `string | undefined`라고 쓴 매개변수의 타입도 `string`이다. 타입이 null을 담지 않으므로 아무것도 배제하지 못한다.
+    - 프로젝트가 CI에서 쓰는 TypeScript는 더 오래되어 기본값이 꺼짐일 수 있다. 그런 프로젝트에서는 호출하는 쪽이 null을 넘겨도 아무 오류가 없다. 그래서 JavaScript의 `strict`처럼 기본값은 치지 않는다.
 - **시간 제한.** 모든 요청을 타이머와 경주시킨다. 플래그가 아니라 상수다.
   - 모듈 읽기, 프로세스 시작과 첫 snapshot: 30초. 파일 열기(프로젝트 읽기): 30초. 그 밖의 요청 하나(프로젝트 조회, AST, 타입 배치): 5초. 정상 종료: 2초.
   - 프로세스가 스스로 끝나도 진행 중인 요청을 바로 실패시킨다. JSON-RPC 계층은 연결이 끊겨도 대기 중인 요청을 거절하지 않기 때문이다.
@@ -240,7 +252,8 @@ nyorori는 비동기 API를 쓴다. 동기 API는 응답을 기다리는 동안 
   - 다른 rejection은 그대로 다시 던진다. 다른 리스너가 없을 때 Node가 하는 일과 같다.
   - Vitest는 자기 리스너를 달기 때문에 이것을 볼 수 없다. 그래서 테스트는 별도의 Node 프로세스에서 확인한다.
 - **보고.**
-  - `--json`의 `types`에 `{ backend: 'typescript', files, untyped }` 또는 `{ backend: 'none', reason, untyped }`를 남긴다. `files`는 타입으로 답한 파일 수이고, `untyped`는 바뀐 줄에 물을 `+`가 있는데 타입 없이 판단한 TS 파일과 그 이유다.
+  - `--json`의 `types`에 `{ backend: 'typescript', files, untyped }` 또는 `{ backend: 'none', reason, untyped }`를 남긴다. `files`는 타입으로 답한 파일 수(`?.`·`??`만 물은 파일 포함)이고, `untyped`는 바뀐 줄에 물을 `+`가 있는데 타입 없이 판단한 TS 파일과 그 이유다.
+  - `?.`·`??`만 물은 파일은 타입 없이 판단해도 `untyped`에 넣지 않는다. 그 판정은 이 기능 전과 같기 때문이다. 아무 파일도 타입을 쓰지 못했을 때의 `reason`에는 들어간다.
   - 그런 TS 파일이 있을 때만 텍스트 출력에 한 줄을 쓴다. 문법 규칙이 가리지 못한 문자열 `+`가 왜 변형됐는지 알 수 있게 하려는 것이다.
   - `--no-types`로 끄면 TypeScript를 읽지 않고, 이 줄도 쓰지 않는다.
   - step summary와 어노테이션은 바꾸지 않는다.
@@ -248,6 +261,7 @@ nyorori는 비동기 API를 쓴다. 동기 API는 응답을 기다리는 동안 
   - 물을 것 모으기 25~40ms, 모듈 읽기 약 90ms, 프로세스 시작과 첫 snapshot 약 30ms, 프로젝트 읽기 250~280ms, AST 받기 약 10ms, 타입 배치 한 번 17~29ms, 종료 4~10ms였다.
   - CLI `--dry-run` 전체로는 중앙값 1.62초에서 2.20초로, 실행 한 번에 약 0.55초가 늘었다. tsrs는 같은 측정(그때 467줄)에서 1.09초에서 1.36초로 0.2~0.3초가 늘었다. 차이는 대부분 프로젝트 읽기다. tsrs는 같은 프로젝트를 약 70ms에 읽었다. 그래도 mutant 실행 시간에 비하면 작다.
   - `tsconfig.json`이 있지만 JavaScript를 포함하지 않는 JavaScript 저장소(axios)에서는 TypeScript를 띄우고 나서야 inferred 프로젝트임을 안다. `lib/`의 72개 파일을 모두 바뀐 것으로 치면 0.5초가 들고 답은 하나도 쓰지 않는다.
+  - `?.`·`??`를 더 묻는 비용은 작다. 이 저장소의 `src/mutate/generate.ts`, `src/run.ts`, `src/report.ts`, `src/mutate/typecheck.ts`를 모두 바뀐 것으로 치면(`+` 22개, 지키는 값 29개) 묻기 전체가 중앙값 342ms에서 351ms가 됐다. 늘어나는 것은 `+`가 없는 TS 파일에서 TypeScript를 띄우는 비용(이 저장소에서 약 0.5초)이다.
 
 #### JavaScript에서의 타입
 
@@ -290,6 +304,7 @@ inferred 프로젝트(config가 없는 JavaScript)에서도 TypeScript 7은 `all
 - 프로파일은 테스트가 한 일만 알려 준다. "어떤 테스트도 `user`를 null로 만들지 않는다"는 "`user`는 null이 될 수 없다"와 다르다.
 - 그래서 프로파일로 mutant를 버리지 않는다. 살아남는다고 판정하고 CI를 실패시킨다. 테스트를 돌렸어도 결과는 같았을 것이고, 프로파일은 실행을 건너뛰고 이유를 알려 줄 뿐이다.
 - 코드가 그 값을 정말 받을 수 없어서 equivalent인지는 사람이 판단한다. 그렇다면 억제 주석을 쓴다.
+- 예외는 TypeScript 타입도 null이 될 수 없다고 하는 `?.`·`??`다. 그런 mutant는 실패시키지 않고 목록으로 보여 준다("타입으로 불필요한 방어 코드" 참고). 타입과 테스트가 같은 말을 하는 곳이라서, 사람이 볼 것은 "테스트가 빠졌는가"가 아니라 "이 방어 코드가 필요한가"다.
 - 예외는 문자열 `+`다. 문자열 변형은 2차로 미뤘다(L1). 그래서 기록된 모든 평가에서 문자열을 이은 `+`는 문법으로 알아본 문자열 `+`처럼 변형하지 않는다. 이것은 판정이 아니라 범위에서 빼는 것이다. 테스트가 숫자를 넣지 않았을 뿐인 숫자 `+`라면 mutant를 놓치는 쪽으로 틀린다.
 
 ### 결정적 테스트 가정
@@ -338,6 +353,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 | Condition → `true`/`false` | 조건에 부수 효과가 없고, 평가 횟수가 N이고, 늘 그 값의 truthiness였음 | `the condition was always true in tests` |
 
 - 기록이 없는 probe는 아무것도 정하지 않는다. 지점이 실행되지 않았으면 NoCoverage가 그대로 남는다.
+- OptionalChaining과 `??`의 규칙에는 TypeScript가 답한 값의 타입(`type`)이 붙을 수 있다. 그 값이 null이나 undefined가 될 수 없을 때다. 그러면 같은 조건에서 Survived 대신 unnecessary로 판정하고, 이유를 `` `user` is `User` by its type, which can't be null or undefined, and no test passed null or undefined``로 쓴다. 테스트가 null을 넣었으면 타입과 상관없이 실행한다(`predict()`의 `neverNullish`).
 - 호출 probe는 호출 횟수를 N과 비교한다. callee가 nullish였거나, 체인이 앞에서 멈췄거나, 그 전에 throw했으면 호출 횟수가 N보다 작으므로 예측하지 않는다.
 - 값 probe는 체인의 앞 링크가 멈춘 평가에서도 undefined를 기록한다. 그 평가에서는 mutant도 멈추므로 사실은 같지만, 예측하지 않는 쪽으로만 틀린다.
 - Arithmetic은 `-0`도 구분한다. `-0 + 0`은 `0`이고 `-0 - 0`은 `-0`이다. 이유는 오른쪽(`+`, `-`)이나 왼쪽(`*`, `/`, `%`) 피연산자가 늘 0이었으면 그렇게 쓰고, 아니면 `` `+` and `-` gave the same value in every test``라고 쓴다.
@@ -365,11 +381,12 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 
 - 예측한 Survived에는 `reason`과 `predicted: true`가 붙는다. 텍스트 출력, 어노테이션, step summary(`Why` 열)는 `every test still passes with this change` 대신 이 이유를 보여 준다.
 - 문자열 `+`로 건너뛴 mutant는 `--json`의 `skipped`에 이유와 함께 남는다. 텍스트와 step summary에는 `N mutants skipped: string concatenation in every observed evaluation` 한 줄만 쓴다. 어노테이션은 만들지 않고 exit code에도 영향이 없다.
+- unnecessary는 `--json`의 `unnecessary`에 남는다. 보고 방식은 "타입으로 불필요한 방어 코드"의 "보고"를 본다.
 - 억제 주석
   - 예측한 mutant를 억제하면 실행하지 않고 Ignored가 된다. 살아남는 것이 확실하므로 "불필요한 억제"가 아니다.
   - 이 PR이 추가한 억제가 건너뛴 `+`만 가리키면, TCE와 마찬가지로 해당 mutant가 없다는 문제로 보고된다.
-- `--no-predict`는 예측한 mutant도 실행한다. 이유(`reason`)는 그대로 남는다.
-  - 살아남지 않은 mutant에는 실제 판정을 `mispredicted`로 남기고, 텍스트에 `MISPREDICT` 줄을, step summary에 "Wrong predictions"를 쓴다. exit code는 바꾸지 않는다.
+- `--no-predict`는 예측한 mutant도 실행한다. 이유(`reason`)는 그대로 남는다. unnecessary도 실행한다.
+  - 살아남지 않은 mutant에는 실제 판정을 `mispredicted`로 남기고, 텍스트에 `MISPREDICT` 줄을, step summary에 "Wrong predictions"를 쓴다. exit code는 바꾸지 않는다. unnecessary는 `unnecessary` 목록에 그대로 두고 `(unnecessary by types: …; Killed when run)`처럼 쓴다.
   - 결정적 테스트에서는 생기지 않는다. nyorori의 테스트도 이 모드로 예측을 검증한다.
 
 ### 비용
@@ -408,7 +425,9 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 - `!!x`에서는 바깥 `!`만 변형한다. 안쪽을 빼도 결과가 같은 `!x`이기 때문이다.
 - `x.length >= 0` 같은 항상 참인 조건은 `true`로 바꾸지 않는다.
 - 조건이 이미 `true`/`false` 리터럴이면 Condition mutant를 만들지 않는다. BooleanLiteral mutant와 겹치기 때문이다.
-- `x * 1`, `x / 1`은 `*`↔`/` 변형을 만들지 않는다.
+- `x * 1`, `x / 1`, `x * 1n`, `x / 1n`은 `*`↔`/` 변형을 만들지 않는다.
+  - bigint에서도 `x * 1n`과 `x / 1n`은 같은 값이다. `x`가 bigint가 아니면 둘 다 같은 메시지의 TypeError를 던진다(Symbol이면 `Cannot convert a Symbol value to a number`, 그 밖에는 `Cannot mix BigInt and other types, use explicit conversions`). 0n, 음수, 2^100 크기의 bigint, 수, `-0`, NaN, 문자열, null, undefined, boolean, 객체, bigint를 주는 `valueOf`, Symbol, `Object(3n)`의 21가지로 확인했다. `valueOf`도 양쪽에서 한 번씩 불린다.
+  - 리터럴의 값으로 비교하므로 `0x1n`도 같다.
 - 문자열 연결 `+`는 변형하지 않는다. 문자열 변형은 2차로 미뤘다. 바뀐 줄의 `+`는 다음 순서로 판단한다.
   1. 문법 규칙(아래)이 피연산자 하나가 문자열인 것이 확실하다고 하면 문자열 연결이다. 리터럴(`"a" + x`)이 여기에 든다. 타입 검사기도 달리 답할 수 없으므로 TypeScript에 묻지 않는다.
      - 이전에는 tsrs가 먼저 답하고 문법 규칙은 그 뒤였다. 문법 규칙이 문자열이라고 한 `+`에 TypeScript가 다르게 답한 것은 측정한 저장소 어디에도 없었다(아래 "측정"). 그래서 순서를 바꿔 물을 것을 줄였다.
@@ -526,6 +545,61 @@ minifier 자체의 버그(아직 alpha)가 있어도 같은 방향으로만 틀�
 **비용.** mutant마다 파일 전체를 변환하고 압축하므로, 파일이 클수록 mutant 하나당 비용도 커진다.
 250~400줄 파일에서 mutant 76~88개에 45~125ms가 더 들었다. mutant 하나에 0.5~1.5ms로, 테스트를 한 번 실행하는 비용에 비하면 작다.
 
+### 타입으로 불필요한 방어 코드
+
+`a?.b`→`a.b`, `f?.()`→`f()`, `a ?? b`→`a`는 `a`가 null이나 undefined가 아니면 원본과 같다. 그래서 `a`의 타입이 null을 배제하고 **타입이 맞다면** equivalent다.
+그러나 strict에서 타입 검사를 통과하면서도 그 자리에 null을 넣는 흔한 방법이 적어도 열 가지 있다. `JSON.parse`와 `any`, `as`, `!`, `noUncheckedIndexedAccess` 없는 `xs[0]`, `Record`와 index signature 조회, `user!: User` 확정 할당, 실제와 다른 `.d.ts`, `catch (e: any)`, 배열 공변성, 메서드 매개변수 bivariance다.
+그래서 타입만으로 버리지 않고 기준 실행의 프로파일과 같이 본다(`src/mutate/profile.ts`의 `neverNullish`).
+
+| 정적 타입 | 기준 실행에서 null/undefined였던 적 | 결과 |
+|---|---|---|
+| null이 될 수 없음(아래 규칙) | 없음(실행됐고 늘 아님) | **unnecessary by types**: 실행하지 않고, CI를 실패시키지 않고, 목록으로 보고 |
+| null이 될 수 없음 | 있음 | 테스트에서 타입이 틀린 것이다(`null as any` 등). 그대로 실행 |
+| null이 될 수 있음, 모름, JavaScript, 타입 정보 없음 | 없음 | 그대로: 이유와 함께 예측한 Survived |
+| 상관없음 | 실행되지 않음 | 그대로 NoCoverage |
+
+- 첫 줄은 타입도 테스트도 null이 오지 않는다고 하는 방어 코드다. 대개 지워도 되지만 타입이 틀렸을 수도 있다(아래 "남은 구멍"). 그래서 Survived처럼 실패시키지도, TCE처럼 조용히 버리지도 않고, 이유와 함께 목록에 남겨 사람이 보게 한다.
+- 둘째 줄이 있으므로 `as any`로 null을 넣는 테스트가 있으면 보통의 mutant처럼 판정된다.
+
+**null이 될 수 없다고 보는 타입.** TS 파일이고 config가 `strictNullChecks`를 켰을 때만 본다("타입 정보 (TypeScript 7 API)" 참고). 값의 위치에서 체커가 준 타입(좁혀진 타입)이 다음이어야 한다.
+
+- 문자열, 수, bigint, boolean, enum, symbol, 객체, 함수 타입(TypeScript의 `TypeFlags.DefinitelyNonNullable`)이거나, 그것들만의 union
+- 또는 구성원 하나가 그런 타입인 intersection(`T & {}`, `string & Brand`). intersection의 값은 모든 구성원에 속해야 한다. `T & {}`에 null을 넘기는 호출은 tsc 7.1이 거부했다.
+- 제외하는 것
+  - `any`, `unknown`, `void`, `never`, 타입 매개변수, `T[K]`, conditional type
+  - null, undefined, void가 들어 있는 union
+  - mapped type. `Readonly<T>`와 `Partial<T>`는 `T`가 null이면 null이다. `function f<T>(x: Readonly<T>)`를 `f<null>(null)`로 부르는 코드가 tsc 7.1을 통과하고, 실행하면 `x`가 null인 것을 확인했다. 제네릭인지는 API로 싸게 알 수 없어서 `Partial<User>`처럼 구체적인 것도 뺀다.
+  - 인덱스 접근: 원소 접근(`xs[i]`, `pair[0]`, `byId[id]`)과 index signature로 찾는 속성 접근(`byId.admin`). `noUncheckedIndexedAccess`가 없으면 끝을 넘은 원소나 없는 키도 원소 타입이다. 이 옵션이 켜져 있으면 체커가 `| undefined`를 붙이므로 그 타입을 그대로 쓴다. 튜플의 `pair[0]`은 그때도 `User`다.
+    - index signature로 찾는 속성은 이름의 심볼로 안다. `Record<string, T>`에서는 심볼이 없고, `[key: string]: T`를 선언한 interface에서는 `CheckFlags.IndexSymbol`인 `__index` 심볼이 온다. `Record<'a' | 'b', T>`의 `a`는 보통 속성이다.
+  - 여러 선언을 합친 속성(심볼의 `declarations`가 둘 이상). spread가 이렇게 만든다. `{ tags: ['new'], ...options }`에서 `options.tags`가 optional이면, `exactOptionalPropertyTypes` 없이는 `{ tags: undefined }`를 넘길 수 있는데도 합친 `tags`의 타입은 `string[]`이다. tsc 7.1이 통과시키고 실행하면 undefined인 것을 확인했다. union 타입의 공통 속성, overload가 있는 메서드, 여러 lib에 선언된 전역(`globalThis.crypto`는 `lib.dom.d.ts`와 `@types/node`)도 여기에 걸린다. 보수적으로 빼는 것이다.
+  - 단언한 값: `x!`, `x as T`, `<T>x` 자체와, 받는 쪽 체인에 `as`가 있는 값(`(r as HtmlEscapedString).isEscaped`). hono의 `html.ts`에서 이 `??`의 왼쪽은 `r`이 문자열일 때 undefined다. 체인 안쪽의 `!`는 상관없다. `x!.y?.z`에서 `x`가 null이면 원본도 mutant도 `?.`에 닿기 전에 throw한다.
+  - JavaScript 파일. 조사에서 JavaScript에 대한 TypeScript의 답은 null에 대해 믿을 수 없었다.
+
+**실제 코드.** hono의 `src`(테스트와 `.d.ts`를 뺀 188개 파일)에서 생성이 묻는 값 272개를 모두 물었다. null이 될 수 없다고 한 것은 23개였다(`as` 체인과 여러 선언 규칙을 넣기 전에는 30개).
+- 손으로 확인하니 대부분은 정말 불필요했다. 바로 앞 줄에서 `?.` 없이 쓴 값의 `_fetchRes?.status`, 객체 리터럴로 만든 값의 `options?.removePoweredBy`, interface가 필수로 정한 `options?.recursive ?? false` 등이다.
+- 나머지는 아래 "남은 구멍"에 해당했다. `delete (node as any).vR`를 하는 함수의 `node.vR?.length`, Lambda 이벤트처럼 밖에서 오는 데이터, `const callbacks = (str as T).callbacks as U` 뒤의 `callbacks?.length`다. 이런 곳은 테스트가 그 경우를 지나면 실행되고, 아니면 목록에서 사람이 본다.
+- nyorori의 `src`(값 46개)에서는 0개였다. 모두 null이 될 수 있는 값이나 인덱스 접근을 지킨다.
+
+**남은 구멍.** 타입은 검사된 만큼만 맞다. 다음은 strict에서도 타입 검사를 통과하면서 null을 넣고, nyorori는 알아보지 못한다.
+- 다른 곳의 `as`, `!`, `any`(`const u: User = JSON.parse(s)`, `catch (e: any)`, `delete (x as any).p`), `user!: User` 확정 할당, 실제와 다른 `.d.ts`
+- 배열 공변성(`const ys: (User | null)[] = xs; ys.push(null)`), 메서드 매개변수 bivariance, 구멍 난 배열(`new Array<User>(3)`을 `for...of`로 돌 때)
+- 함수 호출을 넘어 유지되는 좁히기: `if (this.user) { this.logout(); return this.user?.name }`에서 `this.user`는 `User`로 좁혀진 채다(TypeScript #9998).
+- 실행 환경마다 다른 lib 타입. 한 곳에만 선언된 전역은 그 환경에 없어도 타입으로는 있다.
+- 이런 곳은 "테스트가 null을 넣으면 실행한다"가 잡거나, 목록에서 사람이 본다. 목록의 안내도 "지우는 것을 생각해 보고, 정말 null이 올 수 있으면 그 값을 넘기는 테스트를 추가하라"이다.
+
+**파일의 타입 오류는 보지 않는다.** 같은 파일 안에서 null을 넣는 코드는 타입 오류가 되므로, 오류가 있는 파일의 답을 버리는 방법도 생각했다. 그러나 TypeScript 7.1은 `types`의 기본값이 `[]`라서, 이전 TypeScript를 위해 쓴 config에서는 `Cannot find name 'process'` 같은 오류가 흔하게 난다(확인함). 그러면 이 기능이 관계없는 이유로 켜졌다 꺼졌다 한다. 파일 하나의 진단에 16~83ms도 든다. 그래서 하지 않았다.
+
+**보고.**
+- 텍스트: ``N mutants unnecessary by types: `?.` or `??` where the type can't be null or undefined and no test made it so`` 한 줄
+- step summary: "Unnecessary by types" 절. 대개 불필요한 방어 코드이니 `?.`나 `??`를 지우는 것을 생각해 보고, 정말 null이 올 수 있으면 그 값을 넘기는 테스트를 추가하라는 안내, CI는 실패하지 않는다는 말, 위치·연산자·변경·이유의 표
+- `--json`: `unnecessary`. 각 항목은 `id`, `file`, `line`, `column`, `operator`, `description`, `reason`, `tests`(그 지점을 실행한 테스트 파일), `--no-predict`일 때의 `mispredicted`다.
+- 어노테이션은 만들지 않는다. 할 일을 요구하지 않는 정보인데, PR이 건드린 방어적 `?.`마다 diff에 표시하면 정말 고쳐야 할 `::error`가 그 사이에 묻힌다. `::notice`도 diff 줄에 표시되므로 마찬가지다. 목록은 summary에 한 번에 있다.
+- 억제 주석이 가리키는 mutant는 목록에 넣지 않고, 다른 예측한 mutant처럼 실행하지 않고 Ignored로 둔다. 이미 있는 억제가 "해당 mutant 없음"으로 실패하지 않게 하려는 것이다.
+- `--no-types`면 묻지 않으므로 이전처럼 예측한 Survived가 된다.
+- `--no-predict`면 실행한다. 결정적 테스트에서는 살아남아야 한다. 살아남지 않으면 `mispredicted`와 `MISPREDICT` 줄, "Wrong predictions"로 알리고 exit code는 바꾸지 않는다. `test/e2e.test.ts`가 이 모드로도 확인한다.
+
+**Condition으로 넓히지 않은 이유.** `if (obj)`에서 `obj`가 null이 될 수 없는 객체 타입이면 `→ true` mutant도 같은 방식으로 볼 수 있을 것 같지만, 객체 타입이 truthy를 보장하지 않는다. 구조적 타입이라서 falsy인 원시값이 객체 타입에 들어간다. `{ length: number }`에 `''`, `{ toString(): string }`에 `0`, `{}`에 `false`, `Object`에 `0`을 넘기는 호출이 tsc 7.1을 통과했고, 실행하면 모두 falsy였다. 원시값을 받지 않는 것은 `object`뿐이었고, 거기에도 falsy 객체인 `document.all`이 있다. 건전하게 하려면 falsy 원시값마다 할당 가능성을 물어야 해서 하지 않았다.
+
 ### L2. 소스 주석 억제
 
 ```ts
@@ -585,12 +659,13 @@ return age >= 18
 - **TypeScript 7.1 beta API 의존.**
   - 7.1 정식판 전의 beta(`7.1.0-beta`, 2026-10-20)다. 정식판까지 API가 바뀔 수 있다. 7.0.2의 `unstable/` API와도 이미 다르다(`updateSnapshot`/`getProject` → `createSnapshot`/`Snapshot.update`/`getDefaultProjectForFile`).
   - 그래서 버전을 정확히 고정하고, 올릴 때는 `test/typecheck.test.ts`로 확인한다. 쓰는 것은 다음과 같다.
-    - `typescript/async`: `API`, `createSnapshot`, `Snapshot.update({ openFiles })`, `getDefaultProjectForFile`, `Project.configFileName`, `program.getCompilerOptions`, `program.getSourceFile`, `checker.getTypeAtLocation`, `Type.flags`/`isUnionType`/`getTypes`, `TypeFlags`, `API.close`
-    - `typescript/ast`: `getTokenAtPosition`, `isBinaryExpression`, `SyntaxKind`
+    - `typescript/async`: `API`, `createSnapshot`, `Snapshot.update({ openFiles })`, `getDefaultProjectForFile`, `Project.configFileName`, `program.getCompilerOptions`, `program.getSourceFile`, `checker.getTypeAtLocation`, `checker.getSymbolAtLocation`, `checker.typeToString`, `Type.flags`/`objectFlags`/`isUnionType`/`isIntersectionType`/`isObjectType`/`getTypes`, `Symbol.checkFlags`/`declarations`, `TypeFlags`, `ObjectFlags`, `CheckFlags`, `API.close`
+    - `typescript/ast`: `getTokenAtPosition`, `isBinaryExpression`, `isPropertyAccessExpression`, `isElementAccessExpression`, `isCallExpression`, `isParenthesizedExpression`, `isNonNullExpression`, `isAsExpression`, `isTypeAssertion`, `SyntaxKind`
+    - 같은 틱에 보낸 요청을 클라이언트가 `batchRequests` 하나로 묶는 동작. 바뀌면 왕복이 늘 뿐이다.
     - Node의 diagnostics channel `child_process`. Node 문서에서 기본 제공 채널은 experimental이다. 바뀌면 프로세스를 죽이는 보호만 빠진다.
     - 클라이언트 안의 `vscode-jsonrpc`가 쓰기 실패를 처리되지 않은 rejection으로 남기는 동작. 고쳐지면 그 리스너는 할 일이 없어진다.
   - `typescript`는 런타임 의존성이자 nyorori의 빌드 도구라서, 올리면 둘 다 바뀐다. nyorori의 코드는 7.1.0-beta로 타입 검사와 빌드가 된다.
-  - TypeScript 7은 `strict`의 기본값이 켜짐이고, `getCompilerOptions()`는 config에 쓰인 옵션만 준다. 다음 단계에서 `strictNullChecks`를 볼 때도 기본값을 어떻게 칠지 정해야 한다.
+  - TypeScript 7은 `strict`의 기본값이 켜짐이고, `getCompilerOptions()`는 config에 쓰인 옵션만 준다. `strictNullChecks`도 `checkJs`처럼 config가 켠 것만 친다("타입 정보 (TypeScript 7 API)" 참고). 프로젝트의 TypeScript가 7 이상이라도 config에 쓰지 않았으면 unnecessary를 가리지 않는다.
   - 바이너리는 21개 플랫폼용이 있다. 이 저장소에서 확인한 것은 Linux x64뿐이다. Windows와 macOS에서 실제로 도는지는 확인하지 않았다.
   - 프로젝트를 여는 비용은 프로그램 크기에 비례하고, tsrs보다 느렸다. 첫 프로젝트를 여는 데 이 저장소에서 약 3.5배, hono에서 약 7배가 걸렸다. 큰 monorepo에서는 references를 따라 여러 프로젝트를 읽을 수 있다. 파일 열기 하나가 30초를 넘으면 나머지는 문법 규칙으로 판단한다.
 - **프로파일 예측.**
@@ -600,6 +675,11 @@ return age >= 18
   - probe 함수 이름(`__nyorori_v`, `__nyorori_b0` 등)이 사용자 코드와 겹치지 않는다고 가정한다. `__nyorori_h`와 같다.
   - 호출 probe의 spread는 `Array.prototype[Symbol.iterator]`를 부른다. 이것을 바꾸는 코드는 기준 실행에서 그 호출을 더 보게 된다.
 - **문자열 `+`의 문법 규칙.** 타입 주석과 내장 객체를 믿는다(L1 참고). 주석과 다른 값이 들어오거나 내장 객체를 덮어쓴 코드에서는 숫자 `+`의 mutant를 놓친다.
+- **타입으로 불필요한 방어 코드.**
+  - TypeScript 7.1이 본 타입을 믿는다. 타입 검사를 통과하면서 null을 넣는 길("남은 구멍")로 null이 오는데 테스트가 그 경우를 지나지 않으면, 필요한 `?.`가 "아마 불필요"로 목록에 오르고 CI는 통과한다. 원래라면 테스트가 없다고 실패했을 곳이다. 목록의 이유가 타입을 밝히므로 사람이 볼 수 있다.
+  - 프로젝트가 타입 검사를 하지 않으면(Vitest는 하지 않는다) 타입이 틀린 채로 남을 수 있다. 프로젝트의 TypeScript와 7.1의 판단이 다를 수도 있다. 그 차이를 nyorori가 알아보지는 않는다.
+  - 좁혀진 타입을 쓴다. 함수 호출이 속성을 바꿔도 TypeScript는 좁히기를 유지한다(TypeScript #9998).
+  - mapped type, 여러 선언을 합친 속성, 단언을 거친 값, 원소 접근은 보수적으로 뺀다. 그 안의 정말 불필요한 `?.`는 이전처럼 예측한 Survived로 실패한다.
 - **브라우저 모드.** 지원하지 않는다.
 - **실행 시간.**
   - mutant 수 × 관련 테스트 시간만큼 걸린다.

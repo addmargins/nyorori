@@ -74,10 +74,13 @@ export type Probe =
 
 /** What a mutant needs from its probe to be certain to survive. */
 export type Rule =
-  /** OptionalChaining on a member access, `a ?? b` → `a`: `subject` is never nullish. */
-  | { kind: 'nonNullish'; subject: string }
+  /**
+   * OptionalChaining on a member access, `a ?? b` → `a`: `subject` is never nullish.
+   * `type` is its static type when that cannot be null or undefined (see typecheck.ts).
+   */
+  | { kind: 'nonNullish'; subject: string; type?: string }
   /** OptionalChaining on a call: the call happens in every evaluation of the site, so `subject` is never nullish. */
-  | { kind: 'called'; subject: string }
+  | { kind: 'called'; subject: string; type?: string }
   /** ComparisonBoundary, Arithmetic: `mutated` never gives another value than `operator`. */
   | { kind: 'binary'; operator: string; mutated: string; left: string; right: string }
   /** Condition → `value` on a test without side effects: the test always has that truthiness. */
@@ -88,6 +91,12 @@ export type Prediction =
   | { verdict: 'survives'; reason: string }
   /** A `+` that only ever joined strings; it is not mutated, like a `+` with a string literal. */
   | { verdict: 'concatenation'; reason: string }
+  /**
+   * A `?.` or `??` that guards a value whose type cannot be null or undefined,
+   * and that no test made null or undefined either: probably redundant. It
+   * survives like the above, but is listed without failing the run.
+   */
+  | { verdict: 'unnecessary'; reason: string }
 
 /** A probe's record, summed over test files. */
 export type ProbeRecord = [classes: number, right: number, flags: number, count: number]
@@ -123,10 +132,10 @@ export function predict(rule: Rule, record: ProbeRecord | undefined, evaluations
   switch (rule.kind) {
     case 'nonNullish':
       // An evaluation that threw before the probe recorded nothing, but the mutant throws the same way.
-      return (classes & NULLISH) === 0 ? survives(`no test makes \`${rule.subject}\` null or undefined here`) : undefined
+      return (classes & NULLISH) === 0 ? neverNullish(rule) : undefined
     case 'called':
       // Fewer calls than evaluations: the callee was nullish, or the chain stopped or threw before it.
-      return count === evaluations ? survives(`no test makes \`${rule.subject}\` null or undefined here`) : undefined
+      return count === evaluations ? neverNullish(rule) : undefined
     case 'binary': {
       if (rule.operator === '+' && (flags & FLAG.string) !== 0 && (flags & FLAG.noString) === 0) {
         return { verdict: 'concatenation', reason: 'string concatenation in every observed evaluation' }
@@ -143,6 +152,20 @@ export function predict(rule: Rule, record: ProbeRecord | undefined, evaluations
       const word = rule.value ? (classes === CLASS.true ? 'true' : 'truthy') : (classes === CLASS.false ? 'false' : 'falsy')
       return survives(`the condition was always ${word} in tests`)
     }
+  }
+}
+
+/**
+ * No test made the guarded value null or undefined. Where its type cannot be
+ * either, the guard is probably redundant; otherwise the tests never check the
+ * case it is for. A value that a test did make null runs either way, even where
+ * its type says it cannot be (`as any`): there the types are wrong.
+ */
+function neverNullish(rule: Extract<Rule, { kind: 'nonNullish' | 'called' }>): Prediction {
+  if (rule.type === undefined) return { verdict: 'survives', reason: `no test makes \`${rule.subject}\` null or undefined here` }
+  return {
+    verdict: 'unnecessary',
+    reason: `\`${rule.subject}\` is \`${rule.type}\` by its type, which can't be null or undefined, and no test passed null or undefined`,
   }
 }
 

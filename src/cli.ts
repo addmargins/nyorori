@@ -17,7 +17,7 @@ Options:
   --max-mutants <n>   Stop with an error instead of running more than n mutants
   --json <file>       Write the full report as JSON
   --dry-run           List the mutants without running tests
-  --no-types          Tell string \`+\` from numeric \`+\` by syntax only, without starting TypeScript
+  --no-types          Start no TypeScript: tell string \`+\` by syntax only, and list no \`?.\` or \`??\` as unnecessary
   --no-predict        Run the mutants the baseline profile shows to survive, and report wrong predictions
   -h, --help          Show this help
 

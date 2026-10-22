@@ -1,6 +1,6 @@
 import path from 'node:path'
 import type { Report } from './run.ts'
-import type { MutantResult, MutantStatus } from './types.ts'
+import type { Mutant, MutantResult, MutantStatus } from './types.ts'
 
 const FAILING: ReadonlySet<MutantStatus> = new Set(['Survived', 'NoCoverage'])
 
@@ -33,9 +33,29 @@ function skipped(report: Report): string[] {
   return [...byReason].map(([reason, n]) => `${plural(n, 'mutant')} skipped: ${reason}`)
 }
 
+/** One line for the `?.` and `??` that guard nothing, by their types and the tests; the step summary lists them. */
+function unnecessary(report: Report): string {
+  return `${plural(report.unnecessary.length, 'mutant')} unnecessary by types: \`?.\` or \`??\` where the type can't be null or undefined and no test made it so`
+}
+
+interface Misprediction {
+  mutant: Mutant
+  /** What the profile said, e.g. "predicted to survive". */
+  claim: string
+  reason: string
+  status: MutantStatus
+}
+
 /** Only with --no-predict: mutants the profile said would survive, but did not. */
-function mispredicted(report: Report): MutantResult[] {
-  return report.results.filter((r) => r.mispredicted !== undefined)
+function mispredicted(report: Report): Misprediction[] {
+  const wrong: Misprediction[] = []
+  for (const r of report.results) {
+    if (r.mispredicted) wrong.push({ mutant: r, claim: 'predicted to survive', reason: r.reason!, status: r.mispredicted })
+  }
+  for (const m of report.unnecessary) {
+    if (m.mispredicted) wrong.push({ mutant: m, claim: 'unnecessary by types', reason: m.reason, status: m.mispredicted })
+  }
+  return wrong
 }
 
 /** Only when TypeScript files needed types and went without: a string `+` there may have become a mutant. */
@@ -76,8 +96,9 @@ export function formatText(report: Report): string {
   }
   if (report.equivalent.length > 0) lines.push(`  ${droppedAsEquivalent(report)}`)
   for (const line of skipped(report)) lines.push(`  ${line}`)
-  for (const r of mispredicted(report)) {
-    lines.push(`  MISPREDICT ${where(report, r.file, r.line, r.column)}  ${r.operator}  ${r.description}  (predicted to survive: ${r.reason}; ${r.mispredicted} when run)`)
+  if (report.unnecessary.length > 0) lines.push(`  ${unnecessary(report)}`)
+  for (const { mutant: m, claim, reason, status } of mispredicted(report)) {
+    lines.push(`  MISPREDICT ${where(report, m.file, m.line, m.column)}  ${m.operator}  ${m.description}  (${claim}: ${reason}; ${status} when run)`)
   }
   const untyped = withoutTypes(report)
   if (untyped) lines.push(`  ${untyped}`)
@@ -103,7 +124,11 @@ function command(kind: 'error' | 'warning', report: Report, file: string, line: 
   return `::${kind} ${props.join(',')}::${escapeData(message)}`
 }
 
-/** GitHub workflow commands; they show up on the PR diff without any token. */
+/**
+ * GitHub workflow commands; they show up on the PR diff without any token.
+ * Unnecessary `?.` and `??` get none: they ask for nothing, and a mark on every
+ * defensive `?.` a PR touches would bury the errors that do. The step summary lists them.
+ */
 export function formatAnnotations(report: Report): string[] {
   if (report.dryRun) return []
   const out: string[] = []
@@ -152,11 +177,24 @@ export function formatSummary(report: Report): string {
   }
   if (report.equivalent.length > 0) lines.push('', `${droppedAsEquivalent(report)}.`)
   for (const line of skipped(report)) lines.push('', `${line}.`)
+  if (report.unnecessary.length > 0) {
+    lines.push('', '### Unnecessary by types', '')
+    lines.push(
+      "These `?.` and `??` guard values whose types say they can't be null or undefined, and no test passed null or undefined. " +
+        'They are probably redundant defensive code: consider removing the `?.` or `??`. ' +
+        'If the value really can be null or undefined (data from outside, `as`, `!`), add a test that passes it. They do not fail the check.',
+      '',
+    )
+    lines.push('| Location | Operator | Change | Why |', '|---|---|---|---|')
+    for (const m of report.unnecessary) {
+      lines.push(`| \`${where(report, m.file, m.line, m.column)}\` | ${m.operator} | ${cell(m.description)} | ${cell(m.reason)} |`)
+    }
+  }
   const wrong = mispredicted(report)
   if (wrong.length > 0) {
     lines.push('', '### Wrong predictions', '', 'These mutants were run with `--no-predict`. The baseline profile said they would survive; tests may not be deterministic.', '')
-    for (const r of wrong) {
-      lines.push(`- \`${where(report, r.file, r.line, r.column)}\` ${r.operator} ${r.description}: ${r.mispredicted}, predicted to survive (${r.reason})`)
+    for (const { mutant: m, claim, reason, status } of wrong) {
+      lines.push(`- \`${where(report, m.file, m.line, m.column)}\` ${m.operator} ${m.description}: ${status}, ${claim} (${reason})`)
     }
   }
   if (report.problems.length > 0) {

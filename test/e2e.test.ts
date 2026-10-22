@@ -269,6 +269,99 @@ export function total(a, b) {
       expect(arithmetic(report!)).toEqual([11])
     })
 
+    test('lists a `?.` whose type and tests never have null as unnecessary, without failing', ({ skip }) => {
+      const dir = project('unnecessary-types', { 'tsconfig.json': TSCONFIG, 'src/user.ts': 'export {}\n' }, {
+        'src/user.ts': `export interface User { name: string; manager?: User }
+
+export function greet(user: User): string {
+  return 'Hi ' + user?.name
+}
+
+export function managerName(user: User): string {
+  return user?.manager?.name ?? 'none'
+}
+
+export function shout(user: User): string {
+  // nyorori-ignore-next-line OptionalChaining -- callers always pass a user
+  return user?.name.toUpperCase()
+}
+`,
+        'src/title.ts': 'export function title(user: { name: string } | undefined): string | undefined {\n  return user?.name\n}\n',
+        'test/user.test.ts': `import { appendFileSync } from 'node:fs'
+import { afterAll, expect, test } from 'vitest'
+import { title } from '../src/title'
+import { greet, managerName, shout } from '../src/user'
+
+test('greet', () => { expect(greet({ name: 'Ada' })).toBe('Hi Ada') })
+test('shout', () => { expect(shout({ name: 'Ada' })).toBe('ADA') })
+test('managerName', () => {
+  expect(managerName({ name: 'Ada', manager: { name: 'Bob' } })).toBe('Bob')
+  expect(managerName({ name: 'Ada' })).toBe('none')
+  // Not what the type says: here the types are wrong.
+  expect(managerName(null as any)).toBe('none')
+})
+test('title', () => { expect(title({ name: 'Ada' })).toBe('Ada') })
+
+// For nyorori's own test: the mutant each run activated.
+afterAll(() => { appendFileSync(new URL('../runs.log', import.meta.url), (globalThis as any).__nyorori.active + '\\n') })
+`,
+      })
+      const ran = () => {
+        const log = path.join(dir, 'runs.log')
+        const active = readFileSync(log, 'utf8').trim().split('\n').map(Number)
+        rmSync(log)
+        return active.slice(1)
+      }
+      const listed = (report: Report) => report.unnecessary.map((m) => `${path.relative(report.gitRoot, m.file)}:${m.line}:${m.column} ${m.operator}: ${m.reason}`)
+      const greet = "src/user.ts:4:22 OptionalChaining: `user` is `User` by its type, which can't be null or undefined, and no test passed null or undefined"
+
+      const { status, report, output } = nyorori(dir)
+      const { types } = report!
+      if (types.backend === 'none') skip(types.reason.startsWith('TypeScript is unavailable'), `TypeScript cannot run here: ${types.reason}`)
+      expect(status, output).toBe(1)
+      expect(listed(report!)).toEqual([greet])
+      expect(report!.unnecessary[0]!.tests).toEqual(['test/user.test.ts'])
+      expect(statuses(report!)).toEqual([
+        'src/title.ts:1 FunctionBody body → `return`: Killed',
+        // Its type may be undefined: the tests just never check that.
+        'src/title.ts:2 OptionalChaining `?.` → `.`: Survived',
+        'src/user.ts:3 FunctionBody body → `return`: Killed',
+        'src/user.ts:7 FunctionBody body → `return`: Killed',
+        "src/user.ts:8 Logical `user?.manager?.name ?? 'none'` → `user?.manager?.name`: Killed",
+        'src/user.ts:8 OptionalChaining `?.` → `.`: Killed',
+        // `user` is a User by its type, but a test passes null: it runs.
+        'src/user.ts:8 OptionalChaining `?.` → `.`: Killed',
+        'src/user.ts:11 FunctionBody body → `return`: Killed',
+        // A suppression still decides: not listed, not run, and not a suppression that matches nothing.
+        'src/user.ts:13 OptionalChaining `?.` → `.`: Ignored',
+      ])
+      expect(report!.results[1]).toMatchObject({ predicted: true, reason: 'no test makes `user` null or undefined here' })
+      expect(report!.results.at(-1)).toMatchObject({ predicted: true })
+      expect(report!.problems).toEqual([])
+      expect(output).toContain("1 mutant unnecessary by types: `?.` or `??` where the type can't be null or undefined and no test made it so")
+      // Neither the unnecessary mutant nor the predicted survivor ran.
+      expect(ran()).not.toContain(report!.unnecessary[0]!.id)
+
+      const alone = nyorori(dir, '--exclude', 'src/title.ts')
+      expect(alone.status, alone.output).toBe(0)
+      expect(listed(alone.report!)).toEqual([greet])
+      ran()
+
+      // Run anyway with --no-predict, and it survives: no wrong prediction.
+      const checked = nyorori(dir, '--exclude', 'src/title.ts', '--no-predict')
+      expect(checked.status, checked.output).toBe(0)
+      expect(checked.report!.unnecessary).toMatchObject([{ id: alone.report!.unnecessary[0]!.id }])
+      expect(checked.report!.unnecessary[0]!.mispredicted).toBeUndefined()
+      expect(ran()).toContain(checked.report!.unnecessary[0]!.id)
+      expect(checked.output).not.toContain('MISPREDICT')
+
+      // Without types it is a predicted survivor again, and fails the run.
+      const untyped = nyorori(dir, '--exclude', 'src/title.ts', '--no-types')
+      expect(untyped.status, untyped.output).toBe(1)
+      expect(untyped.report!.unnecessary).toEqual([])
+      expect(untyped.report!.results.find((r) => r.line === 4)).toMatchObject({ status: 'Survived', predicted: true, reason: 'no test makes `user` null or undefined here' })
+    })
+
     test('falls back to the syntax, and still finishes, when TypeScript never answers', ({ skip }) => {
       skip(!('registerHooks' in module), 'needs module.registerHooks (Node 22.15)')
       // Outside the project, so they are not changed files themselves.

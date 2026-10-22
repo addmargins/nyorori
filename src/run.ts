@@ -18,6 +18,7 @@ import type {
   Suppression,
   SuppressionProblem,
   TypesUsage,
+  UnnecessaryMutant,
 } from './types.ts'
 
 const SOURCE = /\.(?:[cm]?[jt]sx?)$/
@@ -31,7 +32,7 @@ export interface RunOptions {
   timeout: number
   maxMutants?: number
   dryRun: boolean
-  /** Ask TypeScript for operand types to tell string `+` from numeric `+`. */
+  /** Ask TypeScript for operand types to tell string `+` from numeric `+`, and which `?.` and `??` guard values that cannot be null. */
   types: boolean
   /** Report mutants the baseline profile shows to survive without running them. Off, they run and wrong predictions are reported. */
   predict: boolean
@@ -47,9 +48,11 @@ export interface Report {
   equivalent: EquivalentMutant[]
   /** Mutants not judged because the baseline showed them out of scope, e.g. a `+` that only joined strings. They never fail the run. */
   skipped: SkippedMutant[]
+  /** `?.` and `??` mutants not judged because the types and the baseline agree the value is never null or undefined. They never fail the run. */
+  unnecessary: UnnecessaryMutant[]
   suppressions: Suppression[]
   problems: SuppressionProblem[]
-  /** Whether type information decided which `+` are string concatenation (and are not mutated). */
+  /** Whether type information decided which `+` are string concatenation (and are not mutated), and which `?.` and `??` are unnecessary. */
   types: TypesUsage
   dryRun: boolean
 }
@@ -80,6 +83,7 @@ export async function run(options: RunOptions): Promise<Report> {
     results: [],
     equivalent: [],
     skipped: [],
+    unnecessary: [],
     suppressions: [],
     problems: [],
     types: options.types ? typesNotAsked() : { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
@@ -183,11 +187,27 @@ export async function run(options: RunOptions): Promise<Report> {
         report.skipped.push({ ...mutant, reason: prediction.reason })
         return false
       }
+      // A suppression still decides the mutants it names: they stay Ignored.
+      if (prediction?.verdict === 'unnecessary' && !result.suppression) {
+        const tests = (coverage.get(result.id)?.specs ?? []).map((spec) => relative(spec.moduleId))
+        report.unnecessary.push({ ...mutant, reason: prediction.reason, tests })
+        return false
+      }
       if (prediction) survivors.set(result.id, prediction.reason)
       return true
     })
     report.results = results
     reportUnusedSuppressions(report)
+
+    const runMutant = async (id: number, covered: { specs: SpecRef[]; hits: number }): Promise<MutantStatus> => {
+      const request: Request = { type: 'run', active: id, limit: covered.hits * 100 + 10_000, collect: false, profile: 0, specs: covered.specs }
+      const outcome = await session!.run(request, baselineWall * 2 + options.timeout)
+      if (outcome !== 'timeout') return judge(outcome.modules, outcome.unhandledErrors)
+      session!.kill()
+      session = await start()
+      await session.plan(plans)
+      return 'Timeout'
+    }
 
     for (const result of results) {
       const covered = coverage.get(result.id)
@@ -200,16 +220,7 @@ export async function run(options: RunOptions): Promise<Report> {
           status = 'Survived'
           result.predicted = true
         } else {
-          const request: Request = { type: 'run', active: result.id, limit: covered.hits * 100 + 10_000, collect: false, profile: 0, specs: covered.specs }
-          const outcome = await session.run(request, baselineWall * 2 + options.timeout)
-          if (outcome === 'timeout') {
-            status = 'Timeout'
-            session.kill()
-            session = await start()
-            await session.plan(plans)
-          } else {
-            status = judge(outcome.modules, outcome.unhandledErrors)
-          }
+          status = await runMutant(result.id, covered)
           // A wrong prediction: flaky tests, or a nyorori bug.
           if (prediction !== undefined && status !== 'Survived') result.mispredicted = status
         }
@@ -225,6 +236,14 @@ export async function run(options: RunOptions): Promise<Report> {
         status = 'Ignored'
       }
       result.status = status
+    }
+    if (!options.predict) {
+      // Run too, to check the category: the profile says they survive, whatever the types say.
+      for (const mutant of report.unnecessary) {
+        const covered = coverage.get(mutant.id)
+        const status = covered ? await runMutant(mutant.id, covered) : 'NoCoverage'
+        if (status !== 'Survived') mutant.mispredicted = status
+      }
     }
     return report
   } finally {

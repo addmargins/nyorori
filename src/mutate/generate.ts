@@ -106,7 +106,7 @@ const BINARY: Record<string, [Operator, string]> = {
   '%': ['Arithmetic', '*'],
 }
 
-const NO_TYPES: TypeOracle = { plus: () => 'unknown' }
+const NO_TYPES: TypeOracle = { plus: () => 'unknown', nonNullableType: () => undefined }
 
 const SUPPRESS_PREFIX = 'nyorori-ignore'
 const SUPPRESS_RE = /^nyorori-ignore-next-line\s+([A-Za-z]+(?:\s*,\s*[A-Za-z]+)*)\s+--\s+(\S.*)$/
@@ -140,16 +140,21 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
 
 /**
  * What generate() will ask `types` about `file`: the `+` on changed lines of
- * mutated code where the syntax cannot tell. The type checker answers them all
- * in one pass before generation, which stays synchronous. A file that does not
- * parse has no questions; generate() reports it.
+ * mutated code where the syntax cannot tell, and the values that the `?.` and
+ * `??` mutants there guard. The type checker answers them all in one pass
+ * before generation, which stays synchronous. A file that does not parse has
+ * no questions; generate() reports it.
  */
 export function typeQuestions(file: string, code: string, changed: ReadonlySet<number>): FileQuestions {
-  const questions: FileQuestions = { file, plus: [] }
+  const questions: FileQuestions = { file, plus: [], guarded: [] }
   const recorder: TypeOracle = {
     plus: (_, left, right) => {
       questions.plus.push({ left: { start: left.start, end: left.end }, right: { start: right.start, end: right.end } })
       return 'unknown'
+    },
+    nonNullableType: (_, value) => {
+      questions.guarded.push({ start: value.start, end: value.end })
+      return undefined
     },
   }
   try {
@@ -222,6 +227,12 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
     return types.plus(file, left, right) === 'string'
   }
 
+  // Asked only for a mutant that exists and that the profile can settle, so it is on a changed line.
+  function nonNullableType(value: Node): string | undefined {
+    const type = types.nonNullableType(file, value)
+    return type === undefined ? undefined : snippet(type)
+  }
+
   function condition(test: Expression | null, values: string[]): void {
     if (!test) return
     const inner = unwrap(test)
@@ -251,7 +262,8 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
         if (!entry) break
         const [operator, replacementOp] = entry
         const { left, right } = node
-        if ((node.operator === '*' || node.operator === '/') && isNumber(right, 1)) break
+        // Same value either way; with `1n`, the same TypeError when `x` is not a bigint.
+        if ((node.operator === '*' || node.operator === '/') && (isNumber(right, 1) || isNumber(right, 1n))) break
         const at = findToken(code, left.end, right.start, node.operator)
         if (at < 0) break
         if (node.operator === '+' && isConcatenation(left, right, at)) break
@@ -272,7 +284,7 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
         if (at < 0) break
         if (node.operator === '??') {
           const planned = add(node, 'expression', at, 'Logical', text(left), `\`${snippet(text(node))}\` → \`${snippet(text(left))}\``)
-          if (planned) planned.profile = { probe: valueProbe(left), rule: { kind: 'nonNullish', subject: snippet(text(left)) } }
+          if (planned) planned.profile = { probe: valueProbe(left), rule: { kind: 'nonNullish', subject: snippet(text(left)), type: nonNullableType(left) } }
         } else {
           const other = node.operator === '&&' ? '||' : '&&'
           add(node, 'expression', at, 'Logical', edit(node, at, at + 2, other), `\`${node.operator}\` → \`${other}\``)
@@ -325,10 +337,10 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
           const subject = snippet(text(from))
           if (link.type === 'MemberExpression') {
             // Cutting the chain at the object of a `?.` is safe: if the part before stops early, the `?.` sees undefined and stops too.
-            planned.profile = { probe: valueProbe(link.object), rule: { kind: 'nonNullish', subject } }
+            planned.profile = { probe: valueProbe(link.object), rule: { kind: 'nonNullish', subject, type: nonNullableType(from) } }
           } else {
             const probe = callProbe(code, link)
-            if (probe) planned.profile = { probe, rule: { kind: 'called', subject } }
+            if (probe) planned.profile = { probe, rule: { kind: 'called', subject, type: nonNullableType(from) } }
           }
         }
         break
@@ -492,7 +504,7 @@ function isBooleanLiteral(node: Node): boolean {
   return node.type === 'Literal' && typeof node.value === 'boolean'
 }
 
-function isNumber(node: Node, value: number): boolean {
+function isNumber(node: Node, value: number | bigint): boolean {
   node = unwrap(node)
   return node.type === 'Literal' && node.value === value
 }

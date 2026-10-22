@@ -66,6 +66,20 @@ export interface SkippedMutant extends Mutant {
   reason: string
 }
 
+/**
+ * A `?.` or `??` mutant not run because the value it guards cannot be null or
+ * undefined by its type, and no test made it so: probably redundant defensive
+ * code. It never fails the run.
+ */
+export interface UnnecessaryMutant extends Mutant {
+  /** E.g. "`user` is `User` by its type, which can't be null or undefined, and no test passed null or undefined". */
+  reason: string
+  /** Test files that executed the mutant in the baseline run, relative to the root. */
+  tests: string[]
+  /** Run with --no-predict, the mutant was this instead of Survived. */
+  mispredicted?: MutantStatus
+}
+
 /** A finding about the suppression comments themselves. */
 export interface SuppressionProblem {
   file: string
@@ -81,9 +95,11 @@ export interface UntypedFile {
 }
 
 /**
- * Whether operand types told string concatenation apart from arithmetic.
- * `files` counts the files whose `+` on changed lines were answered from
- * types; `reason` says why no file was.
+ * Whether types were used: to tell string concatenation apart from arithmetic,
+ * and which `?.` and `??` guard values that cannot be null. `files` counts the
+ * files whose questions on changed lines were answered from types; `reason`
+ * says why no file was. `untyped` lists only files with a `+`: without types,
+ * a `?.` or `??` is judged as it always was.
  */
 export type TypesUsage =
   | { backend: 'typescript'; files: number; untyped: UntypedFile[] }
