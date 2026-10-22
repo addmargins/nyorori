@@ -521,6 +521,51 @@ describe('console filter', () => {
   })
 })
 
+describe('log filter', () => {
+  // Line 2 always holds the call.
+  const onCall = (call: string) => mutants(['export class C { #logger; async f(a) {', `  ${call}`, '} }'].join('\n')).filter((m) => m.startsWith('2:'))
+
+  test.each([
+    'logger.warn(a > 1)',
+    'this.logger.log(a > 1)',
+    'ctx.log.error(a > 1)',
+    'this._logger.debug(a > 1)',
+    'this.#logger.info(a > 1)',
+    'baseLogger.info(a > 1)',
+    'return logger.warn(a > 1)',
+    'await log.info(a > 1)',
+    // Metrics and tracing calls only where their value is dropped.
+    'metrics.increment(a > 1)',
+    'await this.statsd.timing(a > 1)',
+    'requestTracer.recordException(a > 1)',
+  ])('skips `%s` and its arguments', (call) => {
+    expect(onCall(call)).toEqual([])
+  })
+
+  test.each([
+    // The `?.` keeps a missing logger from throwing.
+    ['this.logger?.warn(a > 1)', ['2:14 OptionalChaining `?.` → `.`']],
+    // A logger's other methods do things, and so may a level on something else.
+    ['logger.create(a > 1)', ['2:10 CallStatement `logger.create(a > 1)` removed', '2:19 ComparisonBoundary `>` → `>=`']],
+    ['this.error(a > 1)', ['2:8 CallStatement `this.error(a > 1)` removed', '2:16 ComparisonBoundary `>` → `>=`']],
+    ['auditLog.info(a > 1)', ['2:12 CallStatement `auditLog.info(a > 1)` removed', '2:19 ComparisonBoundary `>` → `>=`']],
+    // A `log` that is not a logger.
+    ['this.entries.log.push(a > 1)', ['2:20 CallStatement `this.entries.log.push(a > 1)` removed', '2:27 ComparisonBoundary `>` → `>=`']],
+    // A recording whose value is used, and a `span` that may be a DOM element.
+    ['return metrics.increment(a > 1)', ['2:30 ComparisonBoundary `>` → `>=`']],
+    ['span.setAttribute(a > 1)', ['2:8 CallStatement `span.setAttribute(a > 1)` removed', '2:23 ComparisonBoundary `>` → `>=`']],
+    // A timer's callback is what the code does.
+    ['setTimeout(() => g(a > 1))', [
+      '2:3 CallStatement `setTimeout(() => g(a > 1))` removed',
+      '2:20 FunctionBody `=> g(a > 1)` → `=> undefined`',
+      '2:20 CallUnwrap `g(a > 1)` → `a > 1`',
+      '2:24 ComparisonBoundary `>` → `>=`',
+    ]],
+  ])('mutates `%s`', (call, expected) => {
+    expect(onCall(call)).toEqual(expected)
+  })
+})
+
 describe('equivalent-mutant filters', () => {
   test('skip known equivalents and noise', () => {
     const code = [

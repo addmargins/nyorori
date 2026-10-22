@@ -242,7 +242,7 @@ es-toolkit과 i18next의 upstream PR 13개를 다시 돌려 보니, 고친 코�
 - 지점은 호출 전체이고 바꾸는 텍스트는 그 안의 receiver이므로, 바깥 호출의 `this`는 그대로다. `xs.map(f).join(',')`에서 `join`의 `this`는 감싼 식의 값(원본이면 `xs.map(f)`의 결과, mutant면 `xs`)이다. `test/instrument.test.ts`가 `map` 메서드가 있는 사용자 클래스와 세미콜론 없는 문으로 확인한다.
 - 만들지 않는 것
   - `super(x)`: `this`가 초기화되지 않는다. `import(x)`는 호출 노드가 아니다. `require('x')`→`'x'`는 아무것도 확인하지 않는다.
-  - 전역 `console` 호출과 그 인자(console 필터와 같다)
+  - 로그 호출과 그 인자: 전역 `console` 호출과 로거의 로그 레벨 메서드(`logger.warn(…)`). L1의 로그 필터와 같다.
   - 다른 호출, `new`, tagged template의 callee이거나 `delete`의 대상인 호출: `f(x)(y)`→`x(y)`는 `x`가 함수가 아니라는 것만 확인한다. `delete (x)`는 strict mode에서 문법 오류다.
   - `f.call(that, x)`, `.apply`, `.bind`: 첫 인자는 넘기는 값이 아니라 `this`다.
   - 식 문이 값을 버리는 호출: `CallStatement`가 맡는다. 첫 인자를 평가한다는 것 말고는 같은 mutant다.
@@ -283,7 +283,7 @@ es-toolkit과 i18next의 upstream PR 13개를 다시 돌려 보니, 고친 코�
 **`CallStatement`.** 식 문의 식이 호출이면(괄호와 TS 단언은 벗긴다) 그 호출을 `undefined`로 바꾼다. 부수 효과가 일어나지 않는다.
 - `await f(x)`는 호출만 바꿔 `await undefined`가 된다. 문이 한 틱 기다리는 것은 그대로다.
 - `a?.b(x)`처럼 optional chain의 끝인 호출은 체인 전체를 바꾼다. 같은 범위의 OptionalChaining과 한 지점이 된다.
-- `super(x)`(파생 클래스의 생성자가 `this`에서 throw함)와 전역 `console` 호출은 만들지 않는다.
+- `super(x)`(파생 클래스의 생성자가 `this`에서 throw함), 로그 호출(전역 `console` 호출, `logger.warn(…)`), 메트릭 호출 문(`metrics.increment(…)`)은 만들지 않는다. L1의 로그 필터와 같다.
 - 지점이 문 맨 앞이므로 계측은 문을 블록으로 감싼다(`Site.statement`). 앞 줄에 세미콜론이 없어도 `(`가 앞 줄과 이어지지 않는다.
 - 결과를 쓰지 않는 순수한 호출(`Math.abs(x)`)은 minifier가 원본에서도 지우므로 TCE가 버린다.
 
@@ -382,7 +382,7 @@ nyorori는 비동기 API를 쓴다. 동기 API는 응답을 기다리는 동안 
   - 바이너리 패키지가 없으면(지원하지 않는 플랫폼, 다른 플랫폼에서 만든 `node_modules`) 첫 요청이 `Unable to resolve @typescript/typescript-linux-x64. …`로 실패하고 문법 규칙으로 돌아간다. 바이너리 패키지를 지운 `npm ci` 결과로 확인했다.
   - `npm ci --omit=optional`로는 nyorori를 쓸 수 없다. oxc의 바인딩이 optional이고, 빌드에 쓰는 `tsc`도 바로 그 네이티브 바이너리다. typescript@7.0.2를 쓰던 이전에도 같았다.
 - **미리 묻기.** mutant 생성(`generate()`)은 동기이고 API는 비동기다. 그래서 `run.ts`가 생성 전에 물을 것을 모아 한 번에 묻고, `generate()`는 답을 맵에서 찾기만 한다.
-  - 물을 것은 `typeQuestions()`가 모은다. `generate()`의 계획 단계(파싱, 스코프 순회, 지점 수집)를 그대로 돌리면서 타입을 기록만 하는 오라클을 넘긴다. 그래서 묻는 `+`는 생성이 실제로 묻게 될 것과 정확히 같다. 범위 안에 있고, 변형하는 코드(함수 안, 전역 `console` 호출의 인자 밖)에 있고, 문법 규칙이 문자열로 정하지 못한 `+`다.
+  - 물을 것은 `typeQuestions()`가 모은다. `generate()`의 계획 단계(파싱, 스코프 순회, 지점 수집)를 그대로 돌리면서 타입을 기록만 하는 오라클을 넘긴다. 그래서 묻는 `+`는 생성이 실제로 묻게 될 것과 정확히 같다. 범위 안에 있고, 변형하는 코드(함수 안, 로그 호출의 인자 밖)에 있고, 문법 규칙이 문자열로 정하지 못한 `+`다.
   - 파싱과 순회를 한 번 더 하는 비용은 626줄 파일 전체를 바뀐 것으로 쳤을 때 25~40ms였다. TCE는 하지 않는다.
   - `?.`와 `??`는 `FileQuestions.guarded`로 같은 배치에 묻는다. 생성이 프로파일 규칙을 붙이는 mutant가 지키는 값이다. 멤버 `a?.b`의 `a`, 호출 probe를 넣을 수 있는 `f?.()`의 `f`, `a ?? b`의 `a`다. 이것도 mutant가 생기는 곳, 곧 바뀐 범위를 담은 지점에서만 묻는다.
   - JavaScript 파일의 `guarded`는 버린다. TypeScript가 JavaScript에서 추론한 타입은 null에 대해 믿을 수 없기 때문이다.
@@ -591,11 +591,23 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 
 **휴리스틱.** mutant를 만들 때 적용한다.
 
-- 전역 `console`의 `console.*` 호출이면 인자 안쪽은 건너뛴다. 그 호출 자체에도 `CallUnwrap`과 `CallStatement`를 만들지 않는다.
-  - 둘러싼 스코프 어디에서든 `console`을 선언했으면 그것은 코드 자신의 객체이므로 건너뛰지 않는다. 매개변수, 지역 변수, `catch` 매개변수, `import console from './logger'` 등이 그렇다.
-  - `ScopeTracker`는 순회가 선언에 닿을 때 이름을 기록한다. 그래서 AST를 한 번 돌며 선언을 먼저 모으고, 두 번째 순회에서 mutant를 만든다. 이렇게 해야 쓰는 곳보다 아래에 있는 선언도 보인다. 호이스팅되는 `var`와 함수, 파일 아래쪽에서 정의한 모듈 상수가 그런 예다.
-  - `declare const console: …` 같은 ambient 선언은 런타임에 아무것도 만들지 않으므로 선언으로 치지 않는다. 그 `console`은 여전히 전역이다. `import type`도 마찬가지다.
-  - 이름으로만 판단하므로, sloppy mode 스크립트에서 블록 안의 함수 선언이 바깥으로 호이스팅되는 경우(Annex B)는 보지 못한다. 이때는 전역으로 보고 건너뛰므로 mutant를 놓치는 쪽으로만 틀린다.
+- 로그 호출이면 인자 안쪽은 건너뛴다. 그 호출 자체에도 `CallUnwrap`과 `CallStatement`를 만들지 않는다(로그 필터). 로그는 코드가 하는 일이 아니라 그 기록이어서, 살아남아도 테스트를 더할 일이 드물다. 근거는 아래 "로그 필터의 측정"에 있다.
+  - 전역 `console`의 `console.*` 호출
+    - 둘러싼 스코프 어디에서든 `console`을 선언했으면 그것은 코드 자신의 객체이므로 건너뛰지 않는다. 매개변수, 지역 변수, `catch` 매개변수, `import console from './logger'` 등이 그렇다.
+    - `ScopeTracker`는 순회가 선언에 닿을 때 이름을 기록한다. 그래서 AST를 한 번 돌며 선언을 먼저 모으고, 두 번째 순회에서 mutant를 만든다. 이렇게 해야 쓰는 곳보다 아래에 있는 선언도 보인다. 호이스팅되는 `var`와 함수, 파일 아래쪽에서 정의한 모듈 상수가 그런 예다.
+    - `declare const console: …` 같은 ambient 선언은 런타임에 아무것도 만들지 않으므로 선언으로 치지 않는다. 그 `console`은 여전히 전역이다. `import type`도 마찬가지다.
+    - 이름으로만 판단하므로, sloppy mode 스크립트에서 블록 안의 함수 선언이 바깥으로 호이스팅되는 경우(Annex B)는 보지 못한다. 이때는 전역으로 보고 건너뛰므로 mutant를 놓치는 쪽으로만 틀린다.
+  - 로거 이름에 부른 로그 레벨 메서드: `logger.warn(…)`, `this.logger.log(…)`, `ctx.log.error(…)`
+    - 로거 이름은 receiver의 마지막 이름(식별자, 또는 계산하지 않는 속성 이름)이다. `log`나 `logger`(앞에 `_`가 붙어도 된다)이거나 `Logger`로 끝나야 한다: `this._logger`, `this.#logger`, `baseLogger`. `auditLog`, `changelog`처럼 `log`로 끝나기만 하는 이름은 아니다. 그런 기록은 코드가 남기려는 것일 때가 많다.
+    - 메서드는 로그 레벨만이다: `trace`, `debug`, `verbose`, `silly`, `info`, `log`, `notice`, `warn`, `warning`, `deprecate`, `error`, `critical`, `fatal`. 로거의 다른 메서드는 일을 한다. i18next의 `baseLogger.create('translator')`(6곳)는 로거를 만들고, `baseLogger.init(…)`(2곳)는 설정하고, `clone.logger.clone(options)`는 복사한다.
+    - 레벨 이름만으로는 고르지 않는다. 다른 객체의 같은 이름 메서드는 일을 한다. Rollup 플러그인의 `this.error(…)`는 throw하고, PostCSS의 `result.warn(…)`은 결과에 경고를 더하고, Node의 `util.deprecate(f, msg)`는 `f`를 감싼 함수를 돌려준다.
+    - 스코프는 보지 않는다. 매개변수나 import로 받은 `logger`도 로거다. `log`라는 이름의 다른 값은 로그 레벨 메서드가 없어서 그대로 변형한다. i18next 테스트의 `this.entries.log.push(x)`가 그렇다(로그를 모으는 배열). 설치된 패키지에서 찾은 `log.<레벨>(…)` 호출(npmlog, ESLint, yaml, Octokit의 `log || console`)은 모두 로거였다.
+    - `console`처럼 값을 쓰는 호출(`return logger.warn(…)`)도 건너뛴다.
+    - `this.logger?.warn(x)`의 `?.`는 변형한다. 로거가 없을 때 throw하지 않게 하는, 코드가 하는 일이다.
+  - 값을 버리는 메트릭·트레이싱 호출 문: `metrics.increment('hits')`, `await this.statsd.timing('load', ms)`
+    - receiver의 마지막 이름이 `metrics`, `statsd`, `telemetry`, `tracer`(앞에 `_`가 붙어도 된다)이거나 `Metrics`, `Telemetry`, `Tracer`로 끝나고, 메서드가 `increment`, `decrement`, `gauge`, `histogram`, `timing`, `distribution`, `record`, `addEvent`, `setAttribute`, `setAttributes`, `setStatus`, `recordException`인 것이다.
+    - 값을 쓰는 호출(`return metrics.increment(x)`)은 변형한다. 그 값은 코드가 쓰는 것이다.
+    - 근거는 Google의 경험뿐이다. es-toolkit과 i18next에는 이런 호출이 없어서 여기서는 확인하지 못했다. 그래서 좁게 잡았다. `span`은 DOM 요소일 때도 많아서(`span.setAttribute('class', c)`) 넣지 않았다. `counter`, `stats`도 같은 이유로 뺐다.
 - `!!x`에서는 바깥 `!`만 변형한다. 안쪽을 빼도 결과가 같은 `!x`이기 때문이다.
 - `x.length >= 0` 같은 항상 참인 조건은 `true`로 바꾸지 않는다.
 - 조건이 이미 `true`/`false` 리터럴이면 Condition mutant를 만들지 않는다. BooleanLiteral mutant와 겹치기 때문이다.
@@ -626,7 +638,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
   - 두 갈래가 모두 문자열인 `c ? a : b`, `a || b`, `a && b`, `a ?? b`. 값은 둘 중 하나다.
   - 괄호, `x!`, `satisfies`, 타입 단언으로 감싼 문자열. 값은 그대로다.
   - 전역 `String(x)`, `encodeURIComponent`, `encodeURI`, `decodeURIComponent`, `decodeURI`, `escape`, `unescape`, 그리고 `String.fromCharCode`, `String.fromCodePoint`, `String.raw`
-    - 둘러싼 스코프에서 같은 이름을 선언했으면 전역이 아니므로 제외한다. 매개변수, import, 아래쪽의 함수 선언이 그런 예다. console 필터와 같은 `ScopeTracker`로 본다.
+    - 둘러싼 스코프에서 같은 이름을 선언했으면 전역이 아니므로 제외한다. 매개변수, import, 아래쪽의 함수 선언이 그런 예다. 로그 필터의 `console`과 같은 `ScopeTracker`로 본다.
   - 문자열에 부른 문자열 메서드: `trim`, `slice`, `toUpperCase`, `padStart`, `replace` 등. `at`(범위 밖이면 undefined)과 `match`(null)는 뺀다.
   - 배열에 부른 `join()`과 `toString()`. 배열로 보는 것은 다음과 같다.
     - 배열 리터럴, `Object.keys`/`values`/`entries`, `Array.from`/`of`, 문자열의 `split()`
@@ -647,7 +659,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 - 가정
   - 내장 객체를 덮어쓰지 않는다(TCE의 "minifier의 가정"과 같다). 사용자 객체의 `Symbol.replace`/`Symbol.split`은 TypeScript lib 타입대로 문자열/배열을 돌려준다고 본다.
   - 타입 주석을 믿는다. `any`로 바꾼 값이나 `strictNullChecks: false`에서의 null처럼 주석과 다른 값이 들어올 수 있다. 그래도 주석이 문자열이라고 밝힌 `+`이고, TypeScript도 같게 답한다.
-  - console 필터처럼, sloppy mode에서 블록 안 함수 선언이 바깥으로 호이스팅되는 경우(Annex B)는 보지 못한다.
+  - 로그 필터의 `console`처럼, sloppy mode에서 블록 안 함수 선언이 바깥으로 호이스팅되는 경우(Annex B)는 보지 못한다.
   - 어느 경우든 틀리는 방향은 mutant를 놓치는 쪽이다.
 
 **측정.** 공개 저장소 5곳의 모든 `+`를 TypeScript 7.1이 정한 타입과 비교했다. JS 저장소에서는 TypeScript가 JSDoc과 초기화 식으로 추론한 타입이다. 문법 규칙이 문자열이라고 답한 `+` 중 TypeScript가 숫자나 "모름"이라고 답한 것은 없었다. `strictNullChecks`를 켠 TypeScript 6의 답과 비교해도 같았다.
@@ -663,6 +675,22 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 - 늘어난 것은 대부분 `"a" + b + c`의 바깥 `+`이고, 그다음이 `const`와 타입 주석이다.
 - 놓친 것은 멤버(`url.pathname + url.search`), 함수 반환값, 구조 분해한 값, JSDoc에서 타입이 오는 `+`다.
 - 추론은 생성 단계의 두 번째 순회 안에서, 범위 안의 `+`에만 한다. 위 저장소의 644개 파일에 있는 `+`를 모두 물었을 때 합쳐서 15ms 미만이 들었다. 파싱과 순회(1.3초)는 원래 하던 일이다.
+
+**로그 필터의 측정.**
+
+- Google은 코드 리뷰에 보고하는 mutant를 "arid" 노드(로그, 모니터링 등 단위 테스트가 거의 확인하지 않는 코드와, 그것에만 쓰이는 코드)에서 만들지 않는다. 초기에 넣은 세 휴리스틱(로그, sleep·deadline·timeout 같은 시간 설정, 설정 플래그)이 쓸모 있다고 본 mutant의 비율을 약 15%에서 80%로 올렸고, 그 뒤 다듬어서 89%가 됐다고 한다("Practical Mutation Testing at Scale", TSE 2021). 로그 휴리스틱은 함수 이름이 `log`로 시작하거나 receiver 이름이 `logger`인 호출을 거르며, 표본 100개 중 99개가 맞았다. 모니터링 값의 증가는 "테스트하기 쉽지만 좋은 테스트 목표가 아닌" 예로 든다.
+- 모든 줄을 바뀐 것으로 쳤을 때 로거와 메트릭 규칙이 없애는 mutant는 i18next `src`에서 2604개 중 32개, es-toolkit `src`에서 0개다. es-toolkit `src`에는 로그 레벨 이름의 메서드 호출이 하나도 없다. i18next의 32개는 `this.logger.warn`(19곳), `.log`(4곳), `.error`(1곳)의 `CallStatement` 24개와, `this.logger.log(updateMissing ? … : …)` 인자 안의 Condition·Logical·Negation 8개다.
+- 32개를 하나씩 원본에 적용하고 `vitest related`로 돌렸다. 25개가 살아남고 7개가 잡혔다. 인자 안의 8개는 모두 살아남았고, `CallStatement`는 17개가 살아남고 7개가 잡혔다. 잡은 테스트는 모두 로거를 바꿔 끼우고 `warn`을 확인한다.
+  - `i18next.hasLoadedNamespace.test.js`: `type: 'logger'` 모듈이 `warn`의 첫 인자를 모으고, 테스트가 메시지와 개수를 확인한다. `i18next.js`의 175·491줄, `Translator.js`의 287·504줄, `BackendConnector.js`의 237줄
+  - `security.test.js`: `escapeValue: false`에서 위험한 nesting 옵션 문자열에 경고하는지 확인한다. `Interpolator.js`의 173줄
+  - `translator.translate.returnObject.test.js`: `vi.spyOn(logger, 'create')`로 넣은 `warn` spy가 불렸는지 확인한다. `Translator.js`의 206줄
+- 살아남는 25개는 CI를 실패시키는 잡음이고, 잡히는 7개는 잃는 검출이다. 살아남는 쪽이 많아서 로그 호출 전체를 거른다. `CallStatement`는 두고 인자 안쪽만 거르는 안도 봤다. 없애는 8개가 모두 살아남는 것이라 잃는 검출은 없지만, 살아남는 `CallStatement` 17개가 그대로 남는다.
+- upstream PR 13개의 계획은 그대로다. 로그 호출을 바꾼 PR이 없다.
+
+**타이머는 거르지 않는다.** `setTimeout(f, ms)`, `setInterval(f, ms)`과 그 인자는 변형한다.
+
+- Google이 거르는 시간 관련 코드는 sleep, deadline, timeout 같은 시간 설정이다. 단위 테스트가 시간을 거의 확인하지 않고, 확인할 때는 가짜 시계를 쓴다는 이유다. JavaScript의 타이머는 콜백 `f`가 코드가 하는 일이고, Vitest의 fake timer(`vi.useFakeTimers()`)로 흔히 테스트한다. i18next도 `init`이 `setTimeout(load, 0)`으로 미룬 로드와 `changeLanguage`의 순서를 fake timer로 확인한다.
+- 시간을 재는 코드(`Date.now() - start`)는 JavaScript에서 대개 로그나 메트릭으로 간다. 그 인자는 로그 필터가 이미 거른다(`metrics.timing('load', Date.now() - start)`).
 
 TCE가 잡지 못하는 경우가 있어서 휴리스틱도 그대로 둔다. 예를 들어 `x * 1`은 압축해도 `x*1`로 남는다.
 
@@ -870,6 +898,11 @@ return age >= 18
   - async 함수가 돌려주는 `Promise.resolve(x)`에도 만들지 않는다. `x`가 native promise가 아니면 `return x`와는 함수의 promise가 resolve되는 microtask 시점만 다르다. 그 순서에 기대는 테스트만 잡을 수 있으므로 받아들였다. `await Promise.resolve(x)`와 `await x`는 시점까지 같다.
   - 기본 import한 모듈의 함수(`path.dirname(f)`)에는 만들지 않으므로, 그런 함수를 더한 수정은 놓친다.
   - 정규식 mutant는 CLI를 돌리는 Node가 컴파일하는지로 거른다. 세션은 같은 Node로 뜨므로 테스트도 같은 엔진에서 돈다.
+- **로그 필터.**
+  - 이름으로 판단한다. 로거 이름에 로그 레벨 메서드가 있지만 로거가 아닌 객체의 호출은 변형하지 않아서, 그 mutant를 놓친다. 이름이 다른 로거(`out.warn(…)`, `debug('x')`나 `log('x')`처럼 함수로 부르는 로거, `logger.child({ id }).info(…)`)는 거르지 않아서, 그 mutant가 살아남으면 억제 주석이 필요하다.
+  - 경고를 테스트하는 라이브러리에서는 그 검출을 잃는다. i18next에서는 로그 호출 24곳 중 7곳을 테스트가 확인했다("로그 필터의 측정" 참고). 경고 호출을 더하거나 지우는 PR은 그 경고를 테스트하지 않아도 통과한다.
+  - 로그만 하는 `if`의 조건(`if (err) this.logger.warn(…)`의 `err`)은 변형한다. Google은 자식이 모두 arid인 노드도 arid로 보지만, 여기서는 하지 않았다. i18next `src`에는 그런 `if`가 8곳, 그 조건의 mutant가 30개 있다. 그중 몇 곳은 위의 테스트가 확인하는 경고를 지킨다.
+  - 메트릭·트레이싱 이름은 Google의 경험만 근거로 한다. 측정한 저장소에 그런 호출이 없었다.
 - **브라우저 모드.** 지원하지 않는다.
 - **실행 시간.**
   - mutant 수 × 관련 테스트 시간만큼 걸린다.

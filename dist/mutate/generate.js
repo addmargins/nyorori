@@ -241,7 +241,8 @@ function plan(file, code, changes, types) {
     // as `Boolean(x)`, a template expression as `String(x)`, an awaited value as
     // `Promise.resolve(x)`. That call there changes nothing (see convert).
     const converted = new Map();
-    const isGlobalConsoleCall = (node) => isConsoleCall(node) && !scopes.isDeclared('console');
+    // A `console` declared in an enclosing scope (a parameter, an import, ...) is the code's own object.
+    const isLogging = (node) => (isConsoleCall(node) && !scopes.isDeclared('console')) || isLogCall(node);
     function mutate(node, parent, context) {
         if (node.type === 'CallExpression') {
             const callee = unwrapReference(node.callee);
@@ -372,8 +373,8 @@ function plan(file, code, changes, types) {
                 if (!call)
                     break;
                 discarded.add(call.site);
-                // Without `super()` a derived constructor throws; a global console call only logs.
-                if (call.node.callee.type === 'Super' || isGlobalConsoleCall(call.node))
+                // Without `super()` a derived constructor throws; a log call only logs, and `metrics.increment()` only records.
+                if (call.node.callee.type === 'Super' || isLogging(call.node) || isRecordStatement(node))
                     break;
                 add(call.site, 'expression', calleeAnchor(call.node), 'CallStatement', 'undefined', `\`${showCall(call.node).call}\` removed`);
                 break;
@@ -385,8 +386,8 @@ function plan(file, code, changes, types) {
                 // or deleted is left alone: `f(x)(y)` → `x(y)` only tests that `x` is not a function.
                 if (discarded.has(site) || references.has(site) || constructed.has(site))
                     break;
-                // `super(x)` → `x` leaves `this` uninitialised; `require('x')` → `'x'` and a global console call say nothing.
-                if (node.callee.type === 'Super' || isName(node.callee, 'require') || isGlobalConsoleCall(node))
+                // `super(x)` → `x` leaves `this` uninitialised; `require('x')` → `'x'` and a log call say nothing.
+                if (node.callee.type === 'Super' || isName(node.callee, 'require') || isLogging(node))
                     break;
                 // Where the code converts the value anyway, the call changes nothing:
                 // `if (Boolean(x))`, `` `${String(x)}` ``, `await Promise.resolve(x)`.
@@ -563,13 +564,12 @@ function plan(file, code, changes, types) {
     walk(parsed.program, null, 'module', scopes, (node, parent, context) => {
         if (node.type === 'ExpressionStatement')
             statements.set(node.start, node);
-        if (context === 'console')
+        if (context === 'log')
             return context;
         const inner = 'async' in node && node.async ? 'async' : FUNCTIONS.has(node.type) ? 'function' : context;
         if (inner !== 'module')
             mutate(node, parent, context);
-        // A `console` declared in an enclosing scope (a parameter, an import, ...) is the code's own object.
-        return isGlobalConsoleCall(node) ? 'console' : inner;
+        return isLogging(node) || isRecordStatement(node) ? 'log' : inner;
     });
     for (const site of sites.values()) {
         const statement = site.kind === 'expression' ? statements.get(site.start) : undefined;
@@ -742,6 +742,57 @@ function isAlwaysTrue(node) {
 function isConsoleCall(node) {
     return node.type === 'CallExpression' && node.callee.type === 'MemberExpression' &&
         node.callee.object.type === 'Identifier' && node.callee.object.name === 'console';
+}
+/**
+ * Names of a logger, as the receiver's last segment shows it: `logger`,
+ * `this.logger`, `ctx.log`, `this._logger`, `baseLogger`. Not a name that
+ * only ends in `log` (`auditLog`, `changelog`): such a log is often what the
+ * code keeps. A `log` that is something else, like the array in
+ * `this.entries.log.push(x)`, has no log levels (see LEVELS).
+ */
+const LOGGERS = /^_*log(?:ger)?$|Logger$/;
+/**
+ * Log levels. Only these: a logger's other methods do things
+ * (`baseLogger.create('x')` makes a logger, `logger.clone(options)` copies it),
+ * and on anything else a level may too: `this.error(…)` throws in a Rollup
+ * plugin, `result.warn(…)` adds a PostCSS warning, `util.deprecate(f, …)` wraps `f`.
+ */
+const LEVELS = new Set([
+    'trace', 'debug', 'verbose', 'silly', 'info', 'log', 'notice', 'warn', 'warning', 'deprecate', 'error', 'critical', 'fatal',
+]);
+/**
+ * Metrics and tracing objects and the methods that record to them:
+ * `metrics.increment('hits')`, `this.statsd.timing('load', ms)`,
+ * `requestTracer.recordException(e)`. Only for calls whose value is dropped
+ * (see isRecordStatement). Not `span`, which is as often a DOM element
+ * (`span.setAttribute('class', c)`), nor `counter` or `stats`.
+ */
+const RECORDERS = /^_*(?:metrics|statsd|telemetry|tracer)$|(?:Metrics|Telemetry|Tracer)$/;
+const RECORDINGS = new Set([
+    'increment', 'decrement', 'gauge', 'histogram', 'timing', 'distribution', 'record',
+    'addEvent', 'setAttribute', 'setAttributes', 'setStatus', 'recordException',
+]);
+/** `logger.warn(…)`: a log level called on something named like a logger (see LOGGERS). */
+function isLogCall(node) {
+    return isCallOn(node, LOGGERS, LEVELS);
+}
+/** `metrics.increment(…)` as a statement: a recording whose value is dropped (see RECORDERS). */
+function isRecordStatement(node) {
+    if (node.type !== 'ExpressionStatement')
+        return false;
+    const call = statementCall(node.expression);
+    return call !== undefined && isCallOn(call.node, RECORDERS, RECORDINGS);
+}
+/** `receiver.method(…)` with a method in `methods` and a receiver whose own name matches `receivers`. */
+function isCallOn(node, receivers, methods) {
+    if (node.type !== 'CallExpression' || !methods.has(methodName(node) ?? ''))
+        return false;
+    const callee = unwrapReference(node.callee);
+    if (callee.type !== 'MemberExpression')
+        return false;
+    const receiver = unwrapReference(callee.object);
+    const name = receiver.type === 'Identifier' ? receiver.name : receiver.type === 'MemberExpression' && !receiver.computed ? receiver.property.name : '';
+    return receivers.test(name);
 }
 function isName(node, name) {
     return node.type === 'Identifier' && node.name === name;
