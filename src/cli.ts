@@ -18,6 +18,7 @@ Options:
   --json <file>       Write the full report as JSON
   --dry-run           List the mutants without running tests
   --no-types          Tell string \`+\` from numeric \`+\` by syntax only, without starting tsrs
+  --no-predict        Run the mutants the baseline profile shows to survive, and report wrong predictions
   -h, --help          Show this help
 
 Exit codes: 0 all mutants detected, 1 findings, 2 the run could not judge the change.`
@@ -35,6 +36,7 @@ async function main(argv: string[]): Promise<number> {
       json: { type: 'string' },
       'dry-run': { type: 'boolean', default: false },
       types: { type: 'boolean', default: true },
+      predict: { type: 'boolean', default: true },
       help: { type: 'boolean', short: 'h', default: false },
     },
     allowNegative: true,
@@ -57,6 +59,7 @@ async function main(argv: string[]): Promise<number> {
     maxMutants: values['max-mutants'] === undefined ? undefined : Number(values['max-mutants']),
     dryRun: values['dry-run'],
     types: values.types,
+    predict: values.predict,
   })
 
   console.log(formatText(report))

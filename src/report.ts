@@ -26,6 +26,18 @@ function droppedAsEquivalent(report: Report): string {
   return `${plural(report.equivalent.length, 'mutant')} dropped as equivalent (TCE)`
 }
 
+/** One line per reason, e.g. "2 mutants skipped: string concatenation in every observed evaluation". */
+function skipped(report: Report): string[] {
+  const byReason = new Map<string, number>()
+  for (const m of report.skipped) byReason.set(m.reason, (byReason.get(m.reason) ?? 0) + 1)
+  return [...byReason].map(([reason, n]) => `${plural(n, 'mutant')} skipped: ${reason}`)
+}
+
+/** Only with --no-predict: mutants the profile said would survive, but did not. */
+function mispredicted(report: Report): MutantResult[] {
+  return report.results.filter((r) => r.mispredicted !== undefined)
+}
+
 /** Only when TypeScript files needed types and went without: a string `+` there may have become a mutant. */
 function withoutTypes(report: Report): string | undefined {
   const { untyped } = report.types
@@ -43,6 +55,11 @@ const EXPLAIN: Record<string, string> = {
   NoCoverage: 'no test runs this code',
 }
 
+/** The profile's reason when it has one: it says what the tests never do. */
+function explain(r: MutantResult): string {
+  return r.reason ?? EXPLAIN[r.status]!
+}
+
 export function formatText(report: Report): string {
   const lines: string[] = []
   const n = report.results.length
@@ -54,10 +71,14 @@ export function formatText(report: Report): string {
   } else {
     lines.push(`nyorori: ${plural(n, 'mutant')} in ${plural(report.files.length, 'changed file')}: ${counts(report)}`)
     for (const r of failures(report)) {
-      lines.push(`  ${r.status.padEnd(10)} ${where(report, r.file, r.line, r.column)}  ${r.operator}  ${r.description}  (${EXPLAIN[r.status]})`)
+      lines.push(`  ${r.status.padEnd(10)} ${where(report, r.file, r.line, r.column)}  ${r.operator}  ${r.description}  (${explain(r)})`)
     }
   }
   if (report.equivalent.length > 0) lines.push(`  ${droppedAsEquivalent(report)}`)
+  for (const line of skipped(report)) lines.push(`  ${line}`)
+  for (const r of mispredicted(report)) {
+    lines.push(`  MISPREDICT ${where(report, r.file, r.line, r.column)}  ${r.operator}  ${r.description}  (predicted to survive: ${r.reason}; ${r.mispredicted} when run)`)
+  }
   const untyped = withoutTypes(report)
   if (untyped) lines.push(`  ${untyped}`)
   for (const s of report.suppressions.filter((s) => s.isNew)) {
@@ -88,9 +109,11 @@ export function formatAnnotations(report: Report): string[] {
   const out: string[] = []
   for (const r of failures(report)) {
     const title = r.status === 'Survived' ? 'nyorori: mutant survived' : 'nyorori: changed code is not tested'
-    const advice = r.status === 'Survived'
-      ? `No test fails when ${r.operator} changes this code (${r.description}). Add or strengthen a test that checks this behavior.`
-      : `No test runs this code, so the ${r.operator} mutant (${r.description}) goes unnoticed. Add a test that exercises it.`
+    const advice = r.status === 'NoCoverage'
+      ? `No test runs this code, so the ${r.operator} mutant (${r.description}) goes unnoticed. Add a test that exercises it.`
+      : r.reason
+        ? `No test fails when ${r.operator} changes this code (${r.description}): ${r.reason}. Add a test that checks this behavior.`
+        : `No test fails when ${r.operator} changes this code (${r.description}). Add or strengthen a test that checks this behavior.`
     out.push(command('error', report, r.file, r.line, r.column, title, advice))
   }
   for (const s of report.suppressions.filter((s) => s.isNew)) {
@@ -122,12 +145,20 @@ export function formatSummary(report: Report): string {
     lines.push(`All ${report.results.length} mutants in the changed code are detected by tests (${counts(report)}).`)
   } else {
     lines.push(`**${failed.length} of ${report.results.length} mutants in the changed code go unnoticed by tests** (${counts(report)}).`, '')
-    lines.push('| Status | Location | Operator | Change |', '|---|---|---|---|')
+    lines.push('| Status | Location | Operator | Change | Why |', '|---|---|---|---|---|')
     for (const r of failed) {
-      lines.push(`| ${r.status} | \`${where(report, r.file, r.line, r.column)}\` | ${r.operator} | ${cell(r.description)} |`)
+      lines.push(`| ${r.status} | \`${where(report, r.file, r.line, r.column)}\` | ${r.operator} | ${cell(r.description)} | ${cell(explain(r))} |`)
     }
   }
   if (report.equivalent.length > 0) lines.push('', `${droppedAsEquivalent(report)}.`)
+  for (const line of skipped(report)) lines.push('', `${line}.`)
+  const wrong = mispredicted(report)
+  if (wrong.length > 0) {
+    lines.push('', '### Wrong predictions', '', 'These mutants were run with `--no-predict`. The baseline profile said they would survive; tests may not be deterministic.', '')
+    for (const r of wrong) {
+      lines.push(`- \`${where(report, r.file, r.line, r.column)}\` ${r.operator} ${r.description}: ${r.mispredicted}, predicted to survive (${r.reason})`)
+    }
+  }
   if (report.problems.length > 0) {
     lines.push('', '### Suppression problems', '')
     for (const p of report.problems) lines.push(`- \`${where(report, p.file, p.line)}\`: ${p.message}`)

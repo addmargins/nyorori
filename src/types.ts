@@ -53,6 +53,17 @@ export interface MutantResult extends Mutant {
   suppression?: Suppression
   /** Test files that executed the mutant in the baseline run, relative to the root. */
   tests: string[]
+  /** Why no test can notice the mutant, when the baseline profile shows it, e.g. "no test makes `user` null or undefined here". */
+  reason?: string
+  /** The status comes from the profile alone: the mutant was not run. */
+  predicted?: boolean
+  /** Run with --no-predict, the mutant was this instead of Survived, as the profile said it would be. */
+  mispredicted?: MutantStatus
+}
+
+/** A mutant that was instrumented but not judged, because the baseline run showed it is out of scope. */
+export interface SkippedMutant extends Mutant {
+  reason: string
 }
 
 /** A finding about the suppression comments themselves. */
@@ -84,4 +95,6 @@ export interface FilePlan {
   original: string
   instrumented: string
   map: string
+  /** The same with value probes, for the baseline run only (see mutate/profile.ts). */
+  profiled: { code: string; map: string }
 }

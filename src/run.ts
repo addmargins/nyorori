@@ -3,11 +3,22 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { changedLines, gitRoot, mergeBase } from './git.ts'
-import { generate, ParseError } from './mutate/generate.ts'
+import { generate, ParseError, type PlannedMutant } from './mutate/generate.ts'
 import { instrument, InstrumentError } from './mutate/instrument.ts'
+import { mergeProfile, predict, type ProbeRecord } from './mutate/profile.ts'
 import { TsrsTypes } from './mutate/typecheck.ts'
 import type { ModuleResult, Request, Response, SpecRef } from './protocol.ts'
-import type { EquivalentMutant, FilePlan, Mutant, MutantResult, MutantStatus, Suppression, SuppressionProblem, TypesUsage } from './types.ts'
+import type {
+  EquivalentMutant,
+  FilePlan,
+  Mutant,
+  MutantResult,
+  MutantStatus,
+  SkippedMutant,
+  Suppression,
+  SuppressionProblem,
+  TypesUsage,
+} from './types.ts'
 
 const SOURCE = /\.(?:[cm]?[jt]sx?)$/
 const DECLARATION = /\.d\.[cm]?ts$/
@@ -22,6 +33,8 @@ export interface RunOptions {
   dryRun: boolean
   /** Ask tsrs for operand types to tell string `+` from numeric `+`. */
   types: boolean
+  /** Report mutants the baseline profile shows to survive without running them. Off, they run and wrong predictions are reported. */
+  predict: boolean
 }
 
 export interface Report {
@@ -32,6 +45,8 @@ export interface Report {
   results: MutantResult[]
   /** Mutants dropped before running because they minify to the original code (TCE). They never fail the run. */
   equivalent: EquivalentMutant[]
+  /** Mutants not judged because the baseline showed them out of scope, e.g. a `+` that only joined strings. They never fail the run. */
+  skipped: SkippedMutant[]
   suppressions: Suppression[]
   problems: SuppressionProblem[]
   /** Whether type information decided which `+` are string concatenation (and are not mutated). */
@@ -65,6 +80,7 @@ export async function run(options: RunOptions): Promise<Report> {
     files: [],
     results: [],
     equivalent: [],
+    skipped: [],
     suppressions: [],
     problems: [],
     types: types?.usage() ?? { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
@@ -80,6 +96,7 @@ export async function run(options: RunOptions): Promise<Report> {
     session = await start()
     const plans: FilePlan[] = []
     const mutants: Mutant[] = []
+    const planned = new Map<number, PlannedMutant>()
     for (const file of session.eligible) {
       const code = readFileSync(file, 'utf8')
       let generated: ReturnType<typeof generate>
@@ -94,15 +111,18 @@ export async function run(options: RunOptions): Promise<Report> {
       report.problems.push(...generated.problems)
       if (generated.mutants.length === 0) continue
       mutants.push(...generated.mutants)
+      for (const site of generated.sites) for (const p of site.mutants) planned.set(p.mutant.id, p)
       report.files.push(relative(file))
       let instrumented: ReturnType<typeof instrument>
+      let profiled: ReturnType<typeof instrument>
       try {
         instrumented = instrument(file, code, generated.sites)
+        profiled = instrument(file, code, generated.sites, { profile: true })
       } catch (error) {
         if (error instanceof InstrumentError) throw new RunError(`nyorori bug: ${error.message}`)
         throw error
       }
-      plans.push({ file, original: code, instrumented: instrumented.code, map: instrumented.map })
+      plans.push({ file, original: code, instrumented: instrumented.code, map: instrumented.map, profiled })
     }
     if (types) {
       // Mutants exist now; the type checker's process should not sit beside the test runs.
@@ -115,29 +135,24 @@ export async function run(options: RunOptions): Promise<Report> {
 
     const suppressionOf = (mutant: Mutant) =>
       report.suppressions.find((s) => s.file === mutant.file && s.targetLine === mutant.line && s.operators.includes(mutant.operator))
-    const used = new Set<Suppression>()
-    const results: MutantResult[] = mutants.map((mutant) => {
-      const suppression = suppressionOf(mutant)
-      if (suppression) used.add(suppression)
-      return { ...mutant, status: 'NoCoverage', suppression, tests: [] }
-    })
-    for (const suppression of report.suppressions) {
-      if (suppression.isNew && !used.has(suppression)) {
-        report.problems.push({
-          file: suppression.file,
-          line: suppression.line,
-          message: `Suppression matches no mutant of ${suppression.operators.join(', ')} on line ${suppression.targetLine}. Remove it.`,
-        })
-      }
-    }
+    let results: MutantResult[] = mutants.map((mutant) => ({ ...mutant, status: 'NoCoverage', suppression: suppressionOf(mutant), tests: [] }))
     report.results = results
-    if (options.dryRun || results.length === 0) return report
+    if (options.dryRun || results.length === 0) {
+      reportUnusedSuppressions(report)
+      return report
+    }
 
     const specs = await session.plan(plans)
     const coverage = new Map<number, { specs: SpecRef[]; hits: number }>()
+    // How often the baseline evaluated each mutant's site, over all test files.
+    const evaluations = new Map<number, number>()
+    // What the probes recorded, by probe key, over all test files.
+    const records = new Map<number, ProbeRecord>()
     let baselineWall = 0
     if (specs.length > 0) {
-      const baseline = await session.run({ type: 'run', active: 0, limit: 0, collect: true, specs })
+      // Ids run from 1, and probe keys are ids.
+      const probes = mutants.length + 1
+      const baseline = await session.run({ type: 'run', active: 0, limit: 0, collect: true, profile: probes, specs })
       if (baseline === 'timeout') throw new RunError('Baseline run timed out')
       const failed = baseline.modules.filter((m) => !m.passed)
       if (failed.length > 0 || baseline.unhandledErrors.length > 0) {
@@ -151,24 +166,51 @@ export async function run(options: RunOptions): Promise<Report> {
           entry.specs.push(module.spec)
           entry.hits = Math.max(entry.hits, hits)
           coverage.set(Number(id), entry)
+          evaluations.set(Number(id), (evaluations.get(Number(id)) ?? 0) + hits)
         }
+        mergeProfile(records, module.profile)
       }
     }
 
+    // What the profile settles before anything runs: mutants certain to survive, by id, with the reason.
+    const survivors = new Map<number, string>()
+    results = results.filter((result) => {
+      const { mutant, profile: probed } = planned.get(result.id)!
+      const prediction = probed && predict(probed.rule, records.get(probed.probe.key), evaluations.get(result.id) ?? 0)
+      if (prediction?.verdict === 'concatenation') {
+        // A `+` that only ever joined strings is left alone, like one with a string literal.
+        report.skipped.push({ ...mutant, reason: prediction.reason })
+        return false
+      }
+      if (prediction) survivors.set(result.id, prediction.reason)
+      return true
+    })
+    report.results = results
+    reportUnusedSuppressions(report)
+
     for (const result of results) {
       const covered = coverage.get(result.id)
+      const prediction = survivors.get(result.id)
       let status: MutantStatus = 'NoCoverage'
       if (covered) {
         result.tests = covered.specs.map((spec) => relative(spec.moduleId))
-        const request: Request = { type: 'run', active: result.id, limit: covered.hits * 100 + 10_000, collect: false, specs: covered.specs }
-        const outcome = await session.run(request, baselineWall * 2 + options.timeout)
-        if (outcome === 'timeout') {
-          status = 'Timeout'
-          session.kill()
-          session = await start()
-          await session.plan(plans)
+        if (prediction !== undefined) result.reason = prediction
+        if (prediction !== undefined && options.predict) {
+          status = 'Survived'
+          result.predicted = true
         } else {
-          status = judge(outcome.modules, outcome.unhandledErrors)
+          const request: Request = { type: 'run', active: result.id, limit: covered.hits * 100 + 10_000, collect: false, profile: 0, specs: covered.specs }
+          const outcome = await session.run(request, baselineWall * 2 + options.timeout)
+          if (outcome === 'timeout') {
+            status = 'Timeout'
+            session.kill()
+            session = await start()
+            await session.plan(plans)
+          } else {
+            status = judge(outcome.modules, outcome.unhandledErrors)
+          }
+          // A wrong prediction: flaky tests, or a nyorori bug.
+          if (prediction !== undefined && status !== 'Survived') result.mispredicted = status
         }
       }
       if (result.suppression) {
@@ -188,6 +230,20 @@ export async function run(options: RunOptions): Promise<Report> {
     types?.close()
     await session?.close()
     rmSync(setupDir, { recursive: true, force: true })
+  }
+}
+
+/** A suppression this PR added that matches no judged mutant would only pile up. */
+function reportUnusedSuppressions(report: Report): void {
+  const used = new Set(report.results.map((result) => result.suppression))
+  for (const suppression of report.suppressions) {
+    if (suppression.isNew && !used.has(suppression)) {
+      report.problems.push({
+        file: suppression.file,
+        line: suppression.line,
+        message: `Suppression matches no mutant of ${suppression.operators.join(', ')} on line ${suppression.targetLine}. Remove it.`,
+      })
+    }
   }
 }
 

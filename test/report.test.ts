@@ -12,6 +12,7 @@ test('equivalent mutants are counted, but neither annotated nor failing', () => 
       { file: '/repo/src/a.ts', line: 3, column: 7, operator: 'Condition', description: '`DEBUG` → `false`' },
       { file: '/repo/src/a.ts', line: 3, column: 17, operator: 'Update', description: '`++` → `--`' },
     ],
+    skipped: [],
     suppressions: [],
     problems: [],
     types: { backend: 'tsrs', files: 1, untyped: [] },
@@ -31,6 +32,7 @@ test('TypeScript files judged without types get one line of text, and nothing el
     files: ['src/a.ts'],
     results: [{ id: 1, file: '/repo/src/a.ts', line: 2, column: 15, operator: 'Arithmetic', description: '`+` → `-`', status: 'Killed', tests: ['test/a.test.ts'] }],
     equivalent: [],
+    skipped: [],
     suppressions: [],
     problems: [],
     types: { backend: 'none', reason, untyped: [{ file: '/repo/src/a.ts', reason }, { file: '/repo/src/b.ts', reason }] },
@@ -43,4 +45,64 @@ test('TypeScript files judged without types get one line of text, and nothing el
   expect(exitCode(report)).toBe(0)
   // Turned off on purpose: nothing to explain.
   expect(formatText({ ...report, types: { backend: 'none', reason: 'disabled with --no-types', untyped: [] } })).toBe('nyorori: 1 mutant in 1 changed file: 1 Killed')
+})
+
+test('a predicted survivor shows why no test can notice it; skipped string `+` is counted', () => {
+  const reason = 'no test makes `user` null or undefined here'
+  const report: Report = {
+    gitRoot: '/repo',
+    base: 'abc',
+    files: ['src/a.js'],
+    results: [
+      { id: 1, file: '/repo/src/a.js', line: 2, column: 14, operator: 'OptionalChaining', description: '`?.` → `.`', status: 'Survived', tests: ['test/a.test.js'], reason, predicted: true },
+      { id: 2, file: '/repo/src/a.js', line: 5, column: 3, operator: 'Update', description: '`++` → `--`', status: 'Survived', tests: ['test/a.test.js'] },
+    ],
+    equivalent: [],
+    skipped: [
+      { id: 3, file: '/repo/src/a.js', line: 8, column: 17, operator: 'Arithmetic', description: '`+` → `-`', reason: 'string concatenation in every observed evaluation' },
+      { id: 4, file: '/repo/src/a.js', line: 9, column: 17, operator: 'Arithmetic', description: '`+` → `-`', reason: 'string concatenation in every observed evaluation' },
+    ],
+    suppressions: [],
+    problems: [],
+    types: { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
+    dryRun: false,
+  }
+  expect(formatText(report)).toBe(`nyorori: 2 mutants in 1 changed file: 2 Survived
+  Survived   src/a.js:2:14  OptionalChaining  \`?.\` → \`.\`  (${reason})
+  Survived   src/a.js:5:3  Update  \`++\` → \`--\`  (every test still passes with this change)
+  2 mutants skipped: string concatenation in every observed evaluation`)
+  expect(formatAnnotations(report)[0]).toBe(
+    '::error file=src/a.js,line=2,col=14,title=nyorori%3A mutant survived::No test fails when OptionalChaining changes this code (`?.` → `.`): no test makes `user` null or undefined here. Add a test that checks this behavior.',
+  )
+  expect(formatSummary(report)).toContain(`| Survived | \`src/a.js:2:14\` | OptionalChaining | \`?.\` → \`.\` | ${reason} |
+| Survived | \`src/a.js:5:3\` | Update | \`++\` → \`--\` | every test still passes with this change |
+
+2 mutants skipped: string concatenation in every observed evaluation.
+`)
+  expect(exitCode(report)).toBe(1)
+  // Skipped mutants alone never fail the run.
+  expect(exitCode({ ...report, results: [] })).toBe(0)
+})
+
+test('with --no-predict, a survivor the profile got wrong is reported, without failing the run', () => {
+  const report: Report = {
+    gitRoot: '/repo',
+    base: 'abc',
+    files: ['src/a.js'],
+    results: [
+      { id: 1, file: '/repo/src/a.js', line: 3, column: 9, operator: 'ComparisonBoundary', description: '`<` → `<=`', status: 'Killed', tests: ['test/a.test.js'], reason: 'no test has `x === lo`', mispredicted: 'Killed' },
+    ],
+    equivalent: [],
+    skipped: [],
+    suppressions: [],
+    problems: [],
+    types: { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
+    dryRun: false,
+  }
+  expect(formatText(report)).toBe(`nyorori: 1 mutant in 1 changed file: 1 Killed
+  MISPREDICT src/a.js:3:9  ComparisonBoundary  \`<\` → \`<=\`  (predicted to survive: no test has \`x === lo\`; Killed when run)`)
+  expect(formatSummary(report)).toContain('### Wrong predictions')
+  expect(formatSummary(report)).toContain('- `src/a.js:3:9` ComparisonBoundary `<` → `<=`: Killed, predicted to survive (no test has `x === lo`)')
+  expect(formatAnnotations(report)).toEqual([])
+  expect(exitCode(report)).toBe(0)
 })

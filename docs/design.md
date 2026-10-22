@@ -22,6 +22,8 @@ PR이 **추가하거나 바꾼 코드**에만 mutation을 넣고, 그 PR 시점�
 | 문자열 `+` 판별 | TS 파일은 `tsrs`(TypeScript 7 컴파일러의 Rust 포트)의 unstable API로 타입을 본다. optionalDependency로 버전을 정확히 고정하고, 쓸 수 없으면 문법 규칙으로 돌아간다 |
 | 이 PR이 새로 추가한 억제 | `warn`: 통과시키되 경고 어노테이션과 요약 맨 위에 표시 |
 | NoCoverage | Survived와 똑같이 CI 실패 |
+| 실행 시간 프로파일링 | 기준 실행에만 probe를 넣은 계측을 쓴다. mutant 실행은 probe 없는 계측을 쓴다 |
+| 프로파일로 살아남는 것이 확실한 mutant | 실행하지 않고 이유와 함께 Survived로 보고한다. `--no-predict`면 실행해서 예측을 검증한다 |
 
 ## 전체 흐름
 
@@ -36,12 +38,18 @@ nyorori run --base <ref>
                   TS 파일의 `+`는 tsrs에 타입을 묻는다. tsrs 프로세스는 이 단계에서만 떠 있다
                   → 억제 주석 읽기 (L2)
   4. 계측          모든 mutant를 파일에 한꺼번에 넣는다 (mutant schemata)
+                  파일마다 두 벌을 만든다: probe 없는 계측(plain)과 probe를 넣은 계측(profiled)
                   Vite 플러그인(enforce: 'pre')이 원본 대신 계측된 코드를 돌려준다
-  5. 기준 실행     원본 그대로(mutant 0)로 관련 테스트를 실행한다
+  5. 기준 실행     원본 그대로(mutant 0)로 관련 테스트를 profiled 계측으로 실행한다
                   - 실패가 하나라도 있으면 exit 2로 중단한다 (mutant를 판정할 수 없음)
                   - 테스트 파일마다 각 mutant 지점이 몇 번 실행됐는지(hit) 기록한다
-  6. mutant 실행   mutant마다 provide(id) → 그 지점을 실행한 테스트 파일만, bail: 1로 실행
-  7. 보고          stdout, ::error 어노테이션, $GITHUB_STEP_SUMMARY, --json
+                  - probe가 지점을 지나간 값의 종류를 기록한다 (실행 시간 프로파일링)
+  6. 프로파일 판정  모든 실행에서 문자열을 이어 붙인 `+`의 mutant는 건너뛴다
+                  모든 실행에서 원본과 같게 동작한 mutant는 살아남는 것이 확실하다고 표시한다
+  7. mutant 실행   세션이 plain 계측으로 바꾸고 계측한 파일을 무효화한다
+                  mutant마다 provide(id) → 그 지점을 실행한 테스트 파일만, bail: 1로 실행
+                  살아남는 것이 확실한 mutant는 실행하지 않는다 (--no-predict면 실행한다)
+  8. 보고          stdout, ::error 어노테이션, $GITHUB_STEP_SUMMARY, --json
                   Survived, NoCoverage, 억제 주석 문제가 있으면 exit 1
 ```
 
@@ -66,6 +74,19 @@ function f() { if (!__nyorori_h(5, 5)) return; ... }
 - 런타임에 그 mutant를 켠 결과
 - 소스에 그 변경만 직접 적용한 결과
 
+profiled 계측은 원본 분기 안에 probe를 더 넣는다("실행 시간 프로파일링" 참고).
+
+```js
+// age >= 18 (ComparisonBoundary, Condition)
+(__nyorori_h(3, 5) ? (__nyorori_v(12, __nyorori_b0(20, age , 18))) : …)
+// user?.name ?? 'anon' (OptionalChaining, Logical)
+(__nyorori_h(1, 1) ? ((__nyorori_h(2, 2) ? (__nyorori_v(4, __nyorori_v(8, user)?.name)) : (user.name)) ?? 'anon') : …)
+// o.m?.(x)
+(__nyorori_h(6, 6) ? (o.m?.(...__nyorori_e(24), x)) : (o.m(x)))
+```
+
+`test/instrument.test.ts`는 profiled 계측도 원본, plain 계측과 똑같이 동작하는지 확인한다. 피연산자를 평가하는 순서와 횟수, getter와 `valueOf`가 불리는 횟수, 선택적 호출의 `this`와 인자 개수, hit 수가 같아야 한다.
+
 ### 무한 루프 처리
 
 무한 루프에 빠진 워커가 있으면 Vitest의 `cancelCurrentRun()`도 `close()`도 끝나지 않는다. 그래서 두 겹으로 막는다.
@@ -79,7 +100,7 @@ function f() { if (!__nyorori_h(5, 5)) return; ... }
 |---|---|---|
 | Killed | 테스트가 하나 이상 실패 | 통과 |
 | Timeout | hit 상한 초과, 또는 세션 강제 종료 | 통과 (killed로 취급) |
-| Survived | 관련 테스트가 모두 통과 | **실패** |
+| Survived | 관련 테스트가 모두 통과. 또는 기준 실행의 프로파일로 보아 살아남는 것이 확실함(실행하지 않음, 이유를 함께 보고) | **실패** |
 | NoCoverage | 기준 실행에서 이 지점을 실행한 테스트가 없음 | **실패** |
 | Ignored | 소스 주석으로 억제됨 (L2) | 통과, 보고서에 표시 |
 
@@ -89,7 +110,8 @@ function f() { if (!__nyorori_h(5, 5)) return; ... }
 - 계측 플러그인이 닿지 않는 Vitest project가 있는 경우 (남은 위험의 "여러 project 설정" 참고)
 
 NoCoverage는 테스트를 돌리지 않고 판정하므로 비용이 들지 않는다.
-TCE로 버린 mutant는 판정 대상이 아니다. 실행하지 않고, 개수만 보고한다(L1 참고).
+프로파일로 살아남는 것이 확실한 mutant도 실행하지 않는다.
+TCE로 버린 mutant와, 실행 시간에 문자열 연결로 확인되어 건너뛴 `+`의 mutant는 판정 대상이 아니다. 실행하지 않고, 개수만 보고한다(L1과 "실행 시간 프로파일링" 참고).
 
 ### 범위 규칙
 
@@ -146,7 +168,8 @@ src/
 ├─ mutate/generate.ts    oxc-parser AST 순회(visitorKeys, ScopeTracker) → 지점과 mutant, L1 휴리스틱, L2 억제 주석
 ├─ mutate/equivalent.ts  L1 TCE: oxc-transform + oxc-minify 결과가 원본과 같은 mutant를 버림
 ├─ mutate/typecheck.ts   tsrs 어댑터: `+`가 문자열 연결인지 숫자 덧셈인지 타입으로 답함
-├─ mutate/instrument.ts  schemata 삽입, 소스맵, 계측 결과 파싱 확인
+├─ mutate/instrument.ts  schemata 삽입, probe 삽입(profiled), 소스맵, 계측 결과 파싱 확인
+├─ mutate/profile.ts     probe 기록의 형식과 판정 규칙: 살아남는 것이 확실한 mutant, 문자열 `+`
 ├─ run.ts                오케스트레이션: 세션 관리, 기준 실행, mutant별 실행, 판정
 ├─ session.ts            별도 프로세스에서 Vitest Node API 실행 (플러그인, setup 파일, provide)
 ├─ vitest.ts             프로젝트가 쓰는 Vitest 찾기 (Vite+ 포함)
@@ -208,6 +231,113 @@ merge-base를 구하려면 `actions/checkout`에 `fetch-depth: 0`이 필요하�
   - 모듈 로딩 약 75ms, 프로세스 시작과 프로젝트 열기와 첫 질의 약 85ms, 그 뒤의 `+` 하나에 약 0.7ms, 같은 프로젝트의 다른 파일 하나에 4~6ms, 종료 약 10ms였다.
   - CLI `--dry-run` 전체로는 1.09초에서 1.36초로, 실행 한 번에 0.2~0.3초가 늘었다. mutant 실행 시간에 비하면 작다.
 
+## 실행 시간 프로파일링
+
+기준 실행에서는 모든 지점이 원본 분기를 지난다. 그래서 원본 분기에 probe를 넣으면 테스트에서 어떤 값이 그 지점을 지나갔는지 알 수 있다.
+기록된 모든 평가에서 원본과 같게 동작하는 mutant는, 켜도 테스트가 원본과 똑같이 실행된다. 그래서 실행하지 않아도 살아남는다는 것을 안다.
+이런 mutant는 실행하지 않고 이유와 함께 Survived로 보고한다(`src/mutate/profile.ts`).
+
+### 관찰되지 않음 ≠ 불가능
+
+- 프로파일은 테스트가 한 일만 알려 준다. "어떤 테스트도 `user`를 null로 만들지 않는다"는 "`user`는 null이 될 수 없다"와 다르다.
+- 그래서 프로파일로 mutant를 버리지 않는다. 살아남는다고 판정하고 CI를 실패시킨다. 테스트를 돌렸어도 결과는 같았을 것이고, 프로파일은 실행을 건너뛰고 이유를 알려 줄 뿐이다.
+- 코드가 그 값을 정말 받을 수 없어서 equivalent인지는 사람이 판단한다. 그렇다면 억제 주석을 쓴다.
+- 예외는 문자열 `+`다. 문자열 변형은 2차로 미뤘다(L1). 그래서 기록된 모든 평가에서 문자열을 이은 `+`는 문법으로 알아본 문자열 `+`처럼 변형하지 않는다. 이것은 판정이 아니라 범위에서 빼는 것이다. 테스트가 숫자를 넣지 않았을 뿐인 숫자 `+`라면 mutant를 놓치는 쪽으로 틀린다.
+
+### 결정적 테스트 가정
+
+예측은 테스트가 결정적이라고 가정한다.
+
+- mutant를 켠 실행은 그 지점에 처음 닿을 때까지 기준 실행과 같다. 그 지점에서 mutant가 원본과 같은 값을 내고 부수 효과도 같으면, 다음에 닿을 때까지도 같다. 그러므로 테스트 전체가 같게 실행된다.
+- 테스트가 시간, 난수, 실행 순서, 동시성에 따라 달라지면 mutant 실행이 기준 실행과 다른 값을 볼 수 있다. 이때 예측이 틀릴 수 있다.
+- 기준 실행은 관련 테스트 파일을 모두 돌리고, mutant 실행은 그 지점을 실행한 파일만 돌린다. `isolate: false`로 파일끼리 상태를 나누면 이것도 실행을 바꿀 수 있다. hit으로 테스트를 고르는 방식이 원래 갖고 있던 가정과 같다.
+
+### probe
+
+probe는 원본 텍스트에만 넣는다. mutant의 대체 텍스트는 소스 문자열 그대로라서 probe가 없다. 기준 실행에서는 모든 지점이 원본 분기를 지나므로 이것으로 충분하다.
+
+| probe | 형태 | 기록 |
+|---|---|---|
+| 값 | `E` → `__nyorori_v(k, E)` | E 값의 종류 |
+| 이항 | `L op R` → `__nyorori_bN(k, L, R)` | 두 피연산자의 종류, 문자열 피연산자가 있었는지, 바꾼 연산자가 다른 값을 냈는지 |
+| 호출 | `f?.(a)` → `f?.(...__nyorori_e(k), a)` | 호출이 일어난 횟수 |
+
+- 값의 종류는 비트로 기록한다: undefined, null, false, true, 0, NaN, 그 밖의 수, 빈 문자열, 그 밖의 문자열, 0n, 그 밖의 BigInt, symbol, 함수, 객체. `typeof`와 원시값 비교만 쓰므로 사용자 코드가 돌지 않는다.
+- 모든 probe는 평가 횟수도 센다.
+- 원본과 똑같이 평가한다.
+  - 값 probe는 받은 값을 그대로 돌려주는 함수 호출이다. 감싼 식은 같은 자리에서 한 번 평가된다.
+  - 이항 probe는 L과 R을 인자로 받으므로 원래 순서대로 한 번씩 평가하고, 원래 연산자를 한 번 적용한다.
+  - 바꾼 연산자는 두 피연산자가 원시값일 때만 계산한다. 객체면 `valueOf`/`toString`이 한 번 더 불리므로 계산하지 않고 "모름"으로 기록한다.
+  - 원래 연산자가 throw하면 "다름"으로 기록하고 같은 오류를 다시 던진다. `1n / 0n`은 throw하지만 `1n * 0n`은 throw하지 않기 때문이다.
+  - 연산 중에 `valueOf`가 같은 probe를 다시 부를 수 있으므로, 플래그는 마지막에 OR로 합친다.
+  - 선택적 호출의 callee는 감싸지 않는다. `o.m?.()`의 callee를 함수 호출로 감싸면 `this`를 잃는다. 대신 인자 맨 앞에 빈 배열의 spread를 넣는다. 이것은 callee가 nullish가 아닐 때만 평가되고, 인자 수를 바꾸지 않는다.
+  - `a?.b?.c`의 두 번째 링크는 그 객체 `a?.b`를 값 probe로 감싼다. 체인을 `?.` 앞에서 자르는 것은 안전하다. 앞부분이 멈추면 undefined가 되고, 뒤의 `?.`도 거기서 멈추기 때문이다.
+- probe 함수는 파일 끝에 붙인 함수 선언이라서, 모듈 본문이 끝나기 전에 불려도 된다. 이항 probe는 파일에서 쓰는 연산자 쌍마다 따로 만들어서 연산자로 분기하지 않는다.
+- 기록은 테스트 파일마다 `Float64Array` 하나에 쓴다. probe 하나가 4칸(종류, 오른쪽 피연산자의 종류, 플래그, 횟수)을 쓴다. 키는 그 probe를 읽는 첫 mutant의 id다.
+- setup 파일이 `afterAll`에서 실행된 probe의 기록만 `suite.meta`로 보낸다. hit과 같은 경로다. CLI는 테스트 파일들의 기록을 합친다.
+
+### 판정 규칙
+
+N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 것이다.
+
+| mutant | 살아남는 것이 확실한 조건 | 이유 예 |
+|---|---|---|
+| OptionalChaining, 멤버 접근 `a?.b`, `a?.[k]` | 객체가 nullish였던 적이 없음 | ``no test makes `user` null or undefined here`` |
+| OptionalChaining, 호출 `f?.()` | 호출 횟수가 N | ``no test makes `handlers.onMessage` null or undefined here`` |
+| Logical `a ?? b` → `a` | `a`가 nullish였던 적이 없음 | ``no test makes `a` null or undefined here`` |
+| ComparisonBoundary | 바꾼 연산자가 늘 같은 결과를 냄. 두 피연산자가 비교상 같았던 적이 없음 | ``no test has `x === lo` `` |
+| Arithmetic | 바꾼 연산자가 늘 같은 값을 냄(`Object.is`). 객체 피연산자가 없음 | `` `item.fee` was always 0`` |
+| Condition → `true`/`false` | 조건에 부수 효과가 없고, 평가 횟수가 N이고, 늘 그 값의 truthiness였음 | `the condition was always true in tests` |
+
+- 기록이 없는 probe는 아무것도 정하지 않는다. 지점이 실행되지 않았으면 NoCoverage가 그대로 남는다.
+- 호출 probe는 호출 횟수를 N과 비교한다. callee가 nullish였거나, 체인이 앞에서 멈췄거나, 그 전에 throw했으면 호출 횟수가 N보다 작으므로 예측하지 않는다.
+- 값 probe는 체인의 앞 링크가 멈춘 평가에서도 undefined를 기록한다. 그 평가에서는 mutant도 멈추므로 사실은 같지만, 예측하지 않는 쪽으로만 틀린다.
+- Arithmetic은 `-0`도 구분한다. `-0 + 0`은 `0`이고 `-0 - 0`은 `-0`이다. 이유는 오른쪽(`+`, `-`)이나 왼쪽(`*`, `/`, `%`) 피연산자가 늘 0이었으면 그렇게 쓰고, 아니면 `` `+` and `-` gave the same value in every test``라고 쓴다.
+- ComparisonBoundary의 이유는 피연산자에 undefined가 있었으면 `` `<` and `<=` gave the same result in every test``로 쓴다. `undefined <= undefined`도 false라서, `===`가 참이어도 결과가 같기 때문이다.
+- Condition을 기록된 값으로 바꿔 놓을 수 있으려면 조건을 평가하지 않아도 아무 일이 없어야 한다. 그래서 문법으로 보수적으로 정한다.
+  - 허용: 이름, 리터럴, `this`, 키가 정해진 멤버 접근(`a.b`, `a["b"]`, `this.#x`), 단항·이항·논리·삼항 연산자, 치환식이 모두 허용되는 템플릿 리터럴, 괄호와 TS 타입 단언
+  - 불허: 호출, `new`, 대입, `++`/`--`, `await`, `yield`, tagged template, `delete`, 계산된 키(`a[i]`)
+  - getter, Proxy, `valueOf`/`toString`, `Symbol.hasInstance`는 여전히 코드를 실행할 수 있다. 이들이 테스트가 보는 상태를 바꾸지 않는다고 가정한다.
+  - 조건이 throw한 평가(`o.a.b`에서 `o.a`가 undefined인 경우 등)는 기록되지 않는다. 고정된 값은 throw하지 않으므로, 평가 횟수가 N과 다르면 예측하지 않는다.
+  - 조건 값이 `true`/`false`가 아닌 값이었으면 이유를 `always truthy`/`always falsy`로 쓴다.
+- 문자열 `+`: 기록된 모든 평가에 문자열 피연산자(빈 문자열 포함)가 있었으면 `+`→`-` mutant를 실행하지 않는다. 문자열 피연산자가 없는 평가가 하나라도 있으면 그대로 실행한다. 실행되지 않은 `+`는 NoCoverage다. 생성 단계의 규칙(리터럴, tsrs)이 먼저 적용된다.
+
+### 계측 전환
+
+- CLI는 파일마다 plain과 profiled 계측을 함께 세션에 넘긴다.
+- `run` 요청의 `profile`이 0보다 크면 세션은 profiled 계측을 내주고, 테스트 파일마다 그 크기의 probe 버퍼를 만들게 한다(`provide`). 기준 실행만 이렇게 한다.
+- 계측 종류가 바뀌면 세션은 계획한 파일마다 `vitest.invalidateFile()`을 부르고 `vitest.watcher.invalidates`에 넣는다. Vite가 변환 결과를 갖고 있으므로, 다음 실행에서 플러그인이 다시 변환하게 하려는 것이다.
+- Vitest 5.0.5에서 `fsModuleCache: false`로 확인했다. 기본값(forks), `pool: 'threads'`, `vmThreads`, `isolate: false`에서 모두 기준 실행은 probe가 있는 코드를, 모든 mutant 실행은 probe가 없는 코드를 받았다.
+  - `test/e2e.test.ts`가 기본 설정에서 이것을 확인한다. 픽스처의 테스트가 실행마다 활성 mutant와, 모듈 함수의 소스(`String(fn)`)에 probe가 있는지를 기록한다.
+  - Vitest 5.0.5는 `isolate: false`여도 실행마다 워커를 새로 띄운다. 그래서 워커 쪽 모듈 캐시는 실행 사이에 남지 않는다. `watcher.invalidates`는 워커를 다시 쓰는 경우를 위해 넣었다.
+- 세션을 강제 종료하고 다시 띄우면 새 세션은 plain 계측으로 시작한다.
+- 전환이 되지 않더라도 판정은 그대로다. probe는 버퍼가 없으면 기록하지 않고 원래 값을 돌려준다. 실행이 느려질 뿐이다.
+
+### 보고
+
+- 예측한 Survived에는 `reason`과 `predicted: true`가 붙는다. 텍스트 출력, 어노테이션, step summary(`Why` 열)는 `every test still passes with this change` 대신 이 이유를 보여 준다.
+- 문자열 `+`로 건너뛴 mutant는 `--json`의 `skipped`에 이유와 함께 남는다. 텍스트와 step summary에는 `N mutants skipped: string concatenation in every observed evaluation` 한 줄만 쓴다. 어노테이션은 만들지 않고 exit code에도 영향이 없다.
+- 억제 주석
+  - 예측한 mutant를 억제하면 실행하지 않고 Ignored가 된다. 살아남는 것이 확실하므로 "불필요한 억제"가 아니다.
+  - 이 PR이 추가한 억제가 건너뛴 `+`만 가리키면, TCE와 마찬가지로 해당 mutant가 없다는 문제로 보고된다.
+- `--no-predict`는 예측한 mutant도 실행한다. 이유(`reason`)는 그대로 남는다.
+  - 살아남지 않은 mutant에는 실제 판정을 `mispredicted`로 남기고, 텍스트에 `MISPREDICT` 줄을, step summary에 "Wrong predictions"를 쓴다. exit code는 바꾸지 않는다.
+  - 결정적 테스트에서는 생기지 않는다. nyorori의 테스트도 이 모드로 예측을 검증한다.
+
+### 비용
+
+기준 실행의 wall time을 Vitest 인스턴스 하나에서 계측 종류를 번갈아 바꾸며 재고 중앙값을 냈다(측정 스크립트는 커밋하지 않았다).
+
+| 대상 | mutant / probe | 원본 | plain | profiled |
+|---|---|---|---|---|
+| 이 저장소의 `src/mutate/*.ts`와 `src/report.ts` 전체, 단위 테스트 5개 | 596 / 165 | 5898ms | 5931ms | 5961ms (+0.5%) |
+| 위 중 mutant 생성 위주의 테스트 3개 | 506 / 135 | 422ms | 452ms | 474ms (+4.9%) |
+| 함수 7개를 30만 번 부르는 hot loop (JS) | 36 / 18 | 250ms | 390ms | 530ms (+36%) |
+
+- hot loop에서 워커 시작 같은 고정 비용(같은 설정의 작은 테스트 파일이 약 190ms)을 빼면, probe는 계측한 코드의 실행 시간을 약 1.7배로 만든다. 보통의 테스트에서는 차이가 작다.
+- mutant 실행은 plain 계측을 쓰므로 probe 비용이 없다. 예측한 mutant는 실행하지 않으므로 그만큼 빨라진다.
+- 계측을 두 벌 만들고 파싱 확인도 두 번 한다. 계측을 바꿀 때 계획한 파일을 한 번 더 변환한다.
+
 ## Equivalent mutant
 
 ### 전제
@@ -238,6 +368,7 @@ merge-base를 구하려면 `actions/checkout`에 `fetch-depth: 0`이 필요하�
     - 식 전체의 타입이 `number`나 `bigint`이면 변형한다. 숫자 리터럴 타입과 숫자 enum이 여기에 든다.
     - 타입 오류 때문에 식 전체가 `any`인데 피연산자 하나가 문자열을 포함하는 union이면(`string | undefined` + 숫자) 문자열 연결로 본다.
     - `any`, 타입 오류, tsconfig에 속하지 않는 파일, tsrs를 쓸 수 없는 경우, JS 파일은 문법 규칙만 쓴다. 이때는 변수끼리의 문자열 `+`도 변형된다.
+  - 생성 단계에서 남은 `+`는 기준 실행에서 한 번 더 거른다. 실행된 모든 평가에서 피연산자 하나가 문자열이었으면 그 mutant는 실행하지 않는다("실행 시간 프로파일링" 참고). JS와 TS 모두 해당한다.
   - tsrs가 틀리면 다음 둘 중 하나가 된다.
     - 숫자 `+`를 문자열로 보면 mutant를 놓친다.
     - 문자열 `+`를 숫자로 보면 타입 정보가 없을 때처럼 변형된다.
@@ -331,7 +462,7 @@ return age >= 18
 ## 남은 위험
 
 - **Vitest API 의존.**
-  - 쓰는 API: `related` + `getRelevantTestSpecifications()`, `project.provide()`, `project.createSpecification()`, `TestModule.meta()`, 리포터의 `onTestRunEnd`
+  - 쓰는 API: `related` + `getRelevantTestSpecifications()`, `project.provide()`, `project.createSpecification()`, `TestModule.meta()`, 리포터의 `onTestRunEnd`, 계측 전환의 `invalidateFile()`과 `watcher.invalidates`
   - `runTestSpecifications()`의 반환값에는 이 인스턴스가 지금까지 실행한 모든 모듈이 들어 있다. 앞선 mutant에서 실패한 파일이 뒤 mutant의 결과에 섞이므로, 결과는 `onTestRunEnd`로 받는다.
   - Vitest 5의 디스크 transform 캐시(`fsModuleCache`)는 소스 내용만으로 키를 만든다. 다른 실행이 다른 mutant id로 계측한 코드를 재사용하게 되므로 끈다. 실행마다 1초 정도 느려진다. 계획 해시를 캐시 키에 넣으면(`defineCacheKeyGenerator`) 되살릴 수 있다.
   - setup 파일의 `afterAll(({}, suite) => …)` 형태는 Vitest 5에서 바뀐 것이다.
@@ -355,7 +486,7 @@ return age >= 18
 - **`experimental.viteModuleRunner: false`.** Vite transform을 거치지 않고 Node가 직접 import하므로 계측되지 않는다. 같은 이유로 시작할 때 exit 2로 멈춘다.
 - **Vitest의 임시 디렉터리.** 실행이 정상적으로 끝나면 CLI가 세션에 `vitest.close()`를 요청하므로, Vitest가 `os.tmpdir()`에 만드는 임시 디렉터리도 지워진다(5초 안에 답이 없으면 SIGKILL). 무한 루프 때문에 강제 종료한 세션의 임시 디렉터리는 남는다.
 - **스냅샷 테스트.** `update: false`로 실행하므로, mutant가 스냅샷을 바꾸면 killed가 된다.
-- **flaky 테스트.** mutant가 우연히 killed로 판정되는 방향이라서 판정이 느슨해질 뿐, 거짓 실패는 만들지 않는다. 기준 실행이 실패하면 전체를 중단한다.
+- **flaky 테스트.** 실행한 mutant는 우연히 killed로 판정되는 방향이라서 판정이 느슨해질 뿐, 거짓 실패는 만들지 않는다. 기준 실행이 실패하면 전체를 중단한다. 프로파일 예측은 다르다(아래 "프로파일 예측" 참고).
 - **tsrs 의존.**
   - API가 unstable이다. 같은 TypeScript 7 API라도 typescript@7.0.2와 메서드 이름이 다르다. tsrs는 `createSnapshot`/`getConfiguredProject`, 7.0.2는 `updateSnapshot`/`getProject`다.
   - 그래서 버전을 정확히 고정하고, 올릴 때는 `test/typecheck.test.ts`로 확인한다. 쓰는 것은 다음과 같다.
@@ -366,10 +497,16 @@ return age >= 18
   - 바이너리는 macOS arm64와 Linux x64/arm64(glibc, musl)용만 있다. Windows와 Intel macOS에서는 설치는 되지만 타입 정보 없이 돈다.
   - 통신이 동기라서, tsrs가 답하지 않고 멈추면 CLI도 멈춘다. 시간 제한을 걸 수 없다.
   - 프로젝트를 여는 비용은 프로그램 크기에 비례한다. 큰 monorepo에서는 references를 따라 여러 프로젝트를 읽을 수 있다.
+- **프로파일 예측.**
+  - 결정적이지 않은 테스트에서는 예측이 틀릴 수 있다. 이때는 테스트가 잡을 mutant를 Survived로 보고하므로 CI를 거짓으로 실패시킨다. 원래의 flaky 테스트 위험과 방향이 반대다. `--no-predict`로 돌리면 확인할 수 있다.
+  - Condition 예측의 부수 효과 판정은 문법만 본다. getter나 Proxy가 상태를 바꾸면 틀릴 수 있다.
+  - 실행 시간의 문자열 `+` 규칙은 테스트가 문자열만 넣은 숫자 `+`의 mutant를 놓친다.
+  - probe 함수 이름(`__nyorori_v`, `__nyorori_b0` 등)이 사용자 코드와 겹치지 않는다고 가정한다. `__nyorori_h`와 같다.
+  - 호출 probe의 spread는 `Array.prototype[Symbol.iterator]`를 부른다. 이것을 바꾸는 코드는 기준 실행에서 그 호출을 더 보게 된다.
 - **브라우저 모드.** 지원하지 않는다.
 - **실행 시간.**
   - mutant 수 × 관련 테스트 시간만큼 걸린다.
-  - hit 기반 테스트 선택과 `bail: 1`로 줄이고, `--max-mutants`로 상한을 둔다.
+  - hit 기반 테스트 선택과 `bail: 1`, 프로파일로 살아남는 것이 확실한 mutant를 실행하지 않는 것으로 줄이고, `--max-mutants`로 상한을 둔다.
   - mutant는 아직 하나씩 순서대로 실행한다.
 
 ## 다음 단계

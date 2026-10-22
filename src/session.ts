@@ -8,19 +8,30 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import picomatch from 'picomatch'
 import type { Reporter, TestModule, TestProject, TestSpecification, Vitest } from 'vitest/node'
+import { SLOTS } from './mutate/profile.ts'
 import { PROVIDE, type ModuleResult, type Request, type Response, type SpecRef } from './protocol.ts'
 import type { FilePlan } from './types.ts'
 import { findVitest, ProjectError } from './vitest.ts'
 
+// The probe buffer goes back as the records of the probes that ran, keyed by probe key.
 const SETUP = `import { inject, afterAll } from 'vitest'
 const s = (globalThis.__nyorori ??= {})
 s.active = inject(${JSON.stringify(PROVIDE.active)}) ?? 0
 s.limit = inject(${JSON.stringify(PROVIDE.limit)}) ?? 0
 s.hits = inject(${JSON.stringify(PROVIDE.collect)}) ? {} : null
+const probes = inject(${JSON.stringify(PROVIDE.probes)}) ?? 0
+s.prof = probes > 0 ? new Float64Array(probes * ${SLOTS}) : null
 s.count = 0
 s.exceeded = false
 afterAll(({}, suite) => {
   if (s.hits !== null) suite.meta.nyororiHits = s.hits
+  if (s.prof !== null) {
+    const records = {}
+    for (let i = 0; i < s.prof.length; i += ${SLOTS}) {
+      if (s.prof[i + ${SLOTS - 1}] > 0) records[i / ${SLOTS}] = Array.from(s.prof.subarray(i, i + ${SLOTS}))
+    }
+    suite.meta.nyororiProfile = records
+  }
   if (s.exceeded) suite.meta.nyororiExceeded = true
 })
 `
@@ -28,6 +39,8 @@ afterAll(({}, suite) => {
 let vitest: Vitest | undefined
 let setupDir: string | undefined
 const plans = new Map<string, FilePlan>()
+/** Whether the plugin serves the profiled instrumentation (the baseline) rather than the plain one. */
+let profiling = false
 
 // runTestSpecifications() returns every module the instance has ever run, so
 // a file that failed for an earlier mutant would count as failing for later
@@ -65,7 +78,7 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
       if (code !== plan.original) {
         throw new Error(`nyorori: ${plan.file} reached the transform already changed by another plugin; it cannot be mutated.`)
       }
-      return { code: plan.instrumented, map: plan.map }
+      return profiling ? plan.profiled : { code: plan.instrumented, map: plan.map }
     },
   }
   vitest = await createVitest(
@@ -82,7 +95,7 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
       bail: 1,
       passWithNoTests: true,
       coverage: { enabled: false },
-      provide: { [PROVIDE.active]: 0, [PROVIDE.limit]: 0, [PROVIDE.collect]: false },
+      provide: { [PROVIDE.active]: 0, [PROVIDE.limit]: 0, [PROVIDE.collect]: false, [PROVIDE.probes]: 0 },
     },
     { plugins: [plugin] },
   )
@@ -126,11 +139,29 @@ function fromRef(ref: SpecRef): TestSpecification {
   return project.createSpecification(ref.moduleId)
 }
 
-async function run(active: number, limit: number, collect: boolean, refs: SpecRef[]): Promise<Response> {
+/**
+ * Switches the plugin between the profiled and the plain instrumentation. Vite
+ * keeps transformed code, so every planned file is invalidated and transformed
+ * again on the next run. Vitest 5.0.5 starts new workers for every run, even
+ * with `isolate: false`; `watcher.invalidates` would also make a reused worker
+ * drop the module it evaluated.
+ */
+function serveProfiled(profiled: boolean): void {
+  if (profiled === profiling) return
+  profiling = profiled
+  for (const file of plans.keys()) {
+    vitest!.invalidateFile(file)
+    vitest!.watcher.invalidates.add(file)
+  }
+}
+
+async function run(active: number, limit: number, collect: boolean, profile: number, refs: SpecRef[]): Promise<Response> {
+  serveProfiled(profile > 0)
   for (const project of vitest!.projects) {
     project.provide(PROVIDE.active, active)
     project.provide(PROVIDE.limit, limit)
     project.provide(PROVIDE.collect, collect)
+    project.provide(PROVIDE.probes, profile)
   }
   const started = performance.now()
   lastRun = undefined
@@ -139,7 +170,7 @@ async function run(active: number, limit: number, collect: boolean, refs: SpecRe
   const result: { modules: readonly TestModule[]; errors: readonly unknown[] } = lastRun
   const wall = performance.now() - started
   const modules: ModuleResult[] = result.modules.map((module) => {
-    const meta = module.meta() as { nyororiHits?: Record<string, number>; nyororiExceeded?: boolean }
+    const meta = module.meta() as { nyororiHits?: Record<string, number>; nyororiProfile?: Record<string, number[]>; nyororiExceeded?: boolean }
     const passed = module.ok()
     let error: string | undefined
     if (!passed) {
@@ -150,6 +181,7 @@ async function run(active: number, limit: number, collect: boolean, refs: SpecRe
       spec: toRef(module.project.createSpecification(module.moduleId)),
       passed,
       hits: meta.nyororiHits ?? {},
+      profile: meta.nyororiProfile ?? {},
       exceeded: meta.nyororiExceeded === true,
       duration: module.diagnostic().duration,
       error,
@@ -171,7 +203,7 @@ process.on('message', async (request: Request) => {
         break
       }
       case 'run':
-        send(await run(request.active, request.limit, request.collect, request.specs))
+        send(await run(request.active, request.limit, request.collect, request.profile, request.specs))
         break
       case 'close':
         await vitest?.close()

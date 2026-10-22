@@ -12,6 +12,7 @@ import {
 import { ScopeTracker } from 'oxc-walker'
 import { isOperator, type EquivalentMutant, type Mutant, type Operator, type Suppression, type SuppressionProblem } from '../types.ts'
 import { dropEquivalent } from './equivalent.ts'
+import type { Probe, Rule } from './profile.ts'
 import type { TypeOracle } from './typecheck.ts'
 
 /**
@@ -36,6 +37,8 @@ export interface PlannedMutant {
   mutant: Mutant
   /** Source text that replaces the whole site when this mutant is active. Unused for body sites. */
   replacement: string
+  /** What the baseline records for this mutant, and what the record must show for it to survive (see profile.ts). */
+  profile?: { probe: Probe; rule: Rule }
 }
 
 export interface GenerateResult {
@@ -121,6 +124,7 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
   const position = (offset: number) => toPosition(lines, offset)
   const sites = new Map<string, Site>()
   const statements = new Map<number, ExpressionStatement>()
+  const valueProbes = new Map<string, Probe>()
 
   function add(
     site: { start: number; end: number },
@@ -129,17 +133,30 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
     operator: Operator,
     replacement: string,
     description: string,
-  ): void {
+  ): PlannedMutant | undefined {
     const { line, column } = position(anchor)
-    if (!changed.has(line)) return
+    if (!changed.has(line)) return undefined
     const key = `${site.start}:${site.end}:${kind}`
     let target = sites.get(key)
     if (!target) {
       target = { start: site.start, end: site.end, kind, mutants: [] }
       sites.set(key, target)
     }
-    if (target.mutants.some((m) => m.replacement === replacement && m.mutant.operator === operator)) return
-    target.mutants.push({ mutant: { id: 0, file, line, column, operator, description }, replacement })
+    if (target.mutants.some((m) => m.replacement === replacement && m.mutant.operator === operator)) return undefined
+    const planned: PlannedMutant = { mutant: { id: 0, file, line, column, operator, description }, replacement }
+    target.mutants.push(planned)
+    return planned
+  }
+
+  // Both Condition mutants of a test read the same record, so they share its probe.
+  function valueProbe(node: Span): Probe {
+    const place = `${node.start}:${node.end}`
+    let probe = valueProbes.get(place)
+    if (!probe) {
+      probe = { kind: 'value', key: 0, start: node.start, end: node.end }
+      valueProbes.set(place, probe)
+    }
+    return probe
   }
 
   const text = (node: Span) => code.slice(node.start, node.end)
@@ -162,9 +179,12 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
     if (!test) return
     const inner = unwrap(test)
     if (isBooleanLiteral(inner)) return
+    // Only a test without side effects can be replaced by its observed value.
+    const pure = isPure(test)
     for (const value of values) {
       if (value === 'true' && isAlwaysTrue(inner)) continue
-      add(test, 'expression', test.start, 'Condition', value, `\`${snippet(text(test))}\` → \`${value}\``)
+      const planned = add(test, 'expression', test.start, 'Condition', value, `\`${snippet(text(test))}\` → \`${value}\``)
+      if (planned && pure) planned.profile = { probe: valueProbe(test), rule: { kind: 'condition', value: value === 'true' } }
     }
   }
 
@@ -179,8 +199,15 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
         const at = findToken(code, left.end, right.start, node.operator)
         if (at < 0) break
         if (node.operator === '+' && isConcatenation(left, right, at)) break
-        add(node, 'expression', at, operator, edit(node, at, at + node.operator.length, replacementOp),
+        const planned = add(node, 'expression', at, operator, edit(node, at, at + node.operator.length, replacementOp),
           `\`${node.operator}\` → \`${replacementOp}\``)
+        // `===` → `!==` changes every result; nothing to learn from the values.
+        if (planned && operator !== 'Equality') {
+          planned.profile = {
+            probe: { kind: 'binary', key: 0, start: node.start, end: node.end, at, operator: node.operator, mutated: replacementOp },
+            rule: { kind: 'binary', operator: node.operator, mutated: replacementOp, left: snippet(text(left)), right: snippet(text(right)) },
+          }
+        }
         break
       }
       case 'LogicalExpression': {
@@ -188,7 +215,8 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
         const at = findToken(code, left.end, right.start, node.operator)
         if (at < 0) break
         if (node.operator === '??') {
-          add(node, 'expression', at, 'Logical', text(left), `\`${snippet(text(node))}\` → \`${snippet(text(left))}\``)
+          const planned = add(node, 'expression', at, 'Logical', text(left), `\`${snippet(text(node))}\` → \`${snippet(text(left))}\``)
+          if (planned) planned.profile = { probe: valueProbe(left), rule: { kind: 'nonNullish', subject: snippet(text(left)) } }
         } else {
           const other = node.operator === '&&' ? '||' : '&&'
           add(node, 'expression', at, 'Logical', edit(node, at, at + 2, other), `\`${node.operator}\` → \`${other}\``)
@@ -235,7 +263,16 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
           const at = findToken(code, from.end, link.end, '?.')
           if (at < 0) continue
           const dot = link.type === 'MemberExpression' && !link.computed ? '.' : ''
-          add(node, 'expression', at, 'OptionalChaining', edit(node, at, at + 2, dot), `\`?.\` → \`${dot || '(none)'}\``)
+          const planned = add(node, 'expression', at, 'OptionalChaining', edit(node, at, at + 2, dot), `\`?.\` → \`${dot || '(none)'}\``)
+          if (!planned) continue
+          const subject = snippet(text(from))
+          if (link.type === 'MemberExpression') {
+            // Cutting the chain at the object of a `?.` is safe: if the part before stops early, the `?.` sees undefined and stops too.
+            planned.profile = { probe: valueProbe(link.object), rule: { kind: 'nonNullish', subject } }
+          } else {
+            const probe = callProbe(code, link)
+            if (probe) planned.profile = { probe, rule: { kind: 'called', subject } }
+          }
         }
         break
       }
@@ -286,6 +323,8 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
     for (const planned of site.mutants) {
       planned.mutant.id = id++
       mutants.push(planned.mutant)
+      // After TCE, so a probe whose first reader was dropped is keyed by the next one.
+      if (planned.profile && planned.profile.probe.key === 0) planned.profile.probe.key = planned.mutant.id
     }
   }
 
@@ -406,6 +445,42 @@ function isUndefined(node: Node): boolean {
   return (node.type === 'Identifier' && node.name === 'undefined') || (node.type === 'UnaryExpression' && node.operator === 'void')
 }
 
+/**
+ * Whether evaluating `node` does nothing but produce its value, judged by syntax
+ * and conservatively: names, literals, member access with a fixed key, and
+ * operators over those. No calls, `new`, assignments, updates, `await`, `yield`,
+ * tagged templates or `delete`. Getters, proxies and valueOf/toString can still
+ * run code here; the profile assumes they do not change anything the tests see.
+ */
+function isPure(node: Node): boolean {
+  switch (node.type) {
+    case 'Identifier':
+    case 'Literal':
+    case 'ThisExpression':
+      return true
+    case 'ParenthesizedExpression':
+    case 'ChainExpression':
+    case 'TSAsExpression':
+    case 'TSSatisfiesExpression':
+    case 'TSNonNullExpression':
+    case 'TSTypeAssertion':
+      return isPure(node.expression)
+    case 'MemberExpression':
+      return isPure(node.object) && (!node.computed || node.property.type === 'Literal')
+    case 'UnaryExpression':
+      return node.operator !== 'delete' && isPure(node.argument)
+    case 'BinaryExpression':
+    case 'LogicalExpression':
+      return isPure(node.left) && isPure(node.right)
+    case 'ConditionalExpression':
+      return isPure(node.test) && isPure(node.consequent) && isPure(node.alternate)
+    case 'TemplateLiteral':
+      return node.expressions.every(isPure)
+    default:
+      return false
+  }
+}
+
 /** `x.length >= 0`: turning it into `true` changes nothing. */
 function isAlwaysTrue(node: Node): boolean {
   if (node.type !== 'BinaryExpression' || node.operator !== '>=') return false
@@ -418,6 +493,19 @@ function isAlwaysTrue(node: Node): boolean {
 function isConsoleCall(node: Node): boolean {
   return node.type === 'CallExpression' && node.callee.type === 'MemberExpression' &&
     node.callee.object.type === 'Identifier' && node.callee.object.name === 'console'
+}
+
+/**
+ * A probe that counts the calls an optional call makes, as a spread of an
+ * empty array in front of its arguments: it runs only when the callee is not
+ * nullish, adds no argument, and leaves the callee (and so `this`) alone.
+ */
+function callProbe(code: string, link: CallExpression): Probe | undefined {
+  const [first] = link.arguments
+  if (first) return { kind: 'call', key: 0, at: first.start, args: true }
+  // No arguments: the call ends with `)`, even after type arguments.
+  const close = link.end - 1
+  return code.charAt(close) === ')' ? { kind: 'call', key: 0, at: close, args: false } : undefined
 }
 
 function optionalLinks(expression: Node): Array<MemberExpression | CallExpression> {

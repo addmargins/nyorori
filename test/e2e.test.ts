@@ -317,6 +317,171 @@ test('total', () => { expect(total(2, 3)).toBe(5) })
     })
   })
 
+  describe('baseline profile', () => {
+    const SHOP = `export function label(prefix, name) {
+  return prefix + name
+}
+
+export function add(a, b) {
+  return a + b
+}
+
+export function unused(a, b) {
+  return a + b
+}
+
+export function lineTotal(item) {
+  return item.price * item.qty + item.fee
+}
+
+export function displayName(user) {
+  return user?.profile?.name ?? 'anonymous'
+}
+
+export function clamp(x, lo, hi) {
+  if (x < lo) return lo
+  return Math.min(x, hi)
+}
+
+export function total(list) {
+  if (Array.isArray(list)) return list.length
+  return 0
+}
+
+export function notify(handlers, msg) {
+  handlers.onMessage?.(msg)
+  return handlers.log
+}
+
+export function mode(options) {
+  if (options.verbose) return 'verbose'
+  return 'quiet'
+}
+`
+    const SHOP_TEST = `import { appendFileSync } from 'node:fs'
+import { afterAll, expect, test } from 'vitest'
+import * as shop from '../src/shop.js'
+
+test('label', () => { expect(shop.label('Mr. ', 'Kim')).toBe('Mr. Kim') })
+test('add', () => { expect(shop.add(1, 2)).toBe(3); expect(shop.add('a', 'b')).toBe('ab') })
+test('lineTotal', () => { expect(shop.lineTotal({ price: 3, qty: 2, fee: 0 })).toBe(6) })
+test('displayName', () => {
+  expect(shop.displayName({ profile: { name: 'Lee' } })).toBe('Lee')
+  expect(shop.displayName({})).toBe('anonymous')
+})
+test('clamp', () => { expect(shop.clamp(-5, 0, 10)).toBe(0); expect(shop.clamp(5, 0, 10)).toBe(5) })
+test('total', () => { expect(shop.total([1, 2])).toBe(2) })
+test('notify', () => {
+  expect(shop.notify({ log: [], onMessage(m) { this.log.push(m) } }, 'hi')).toEqual(['hi'])
+})
+test('mode', () => { expect(shop.mode({})).toBe('quiet') })
+
+// For nyorori's own test: the mutant each run activated, and whether the module had probes.
+afterAll(() => {
+  const profiled = Object.values(shop).some((f) => /__nyorori_[vbe]/.test(String(f)))
+  appendFileSync(new URL('../runs.log', import.meta.url), JSON.stringify({ active: globalThis.__nyorori.active, profiled }) + '\\n')
+})
+`
+    // Same functions with other bodies, so only the body lines count as changed.
+    const SHOP_BASE = SHOP.replace(/^  .*$/gm, '  // todo')
+    const runs = (dir: string): Array<{ active: number; profiled: boolean }> => {
+      const log = path.join(dir, 'runs.log')
+      const lines = readFileSync(log, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+      rmSync(log)
+      return lines
+    }
+    const expected = [
+      'src/shop.js:6 Arithmetic `+` → `-`: Killed',
+      'src/shop.js:10 Arithmetic `+` → `-`: NoCoverage',
+      'src/shop.js:14 Arithmetic `+` → `-`: Survived',
+      'src/shop.js:14 Arithmetic `*` → `/`: Killed',
+      "src/shop.js:18 Logical `user?.profile?.name ?? 'anonymous'` → `user?.profile?.name`: Killed",
+      'src/shop.js:18 OptionalChaining `?.` → `.`: Killed',
+      'src/shop.js:18 OptionalChaining `?.` → `.`: Survived',
+      'src/shop.js:22 Condition `x < lo` → `true`: Killed',
+      'src/shop.js:22 Condition `x < lo` → `false`: Killed',
+      'src/shop.js:22 ComparisonBoundary `<` → `<=`: Survived',
+      // A test with a call is never predicted; this one runs, and survives.
+      'src/shop.js:27 Condition `Array.isArray(list)` → `true`: Survived',
+      'src/shop.js:27 Condition `Array.isArray(list)` → `false`: Killed',
+      'src/shop.js:32 OptionalChaining `?.` → `(none)`: Survived',
+      'src/shop.js:37 Condition `options.verbose` → `true`: Killed',
+      'src/shop.js:37 Condition `options.verbose` → `false`: Survived',
+    ]
+    const reasons = [
+      'src/shop.js:14:32 `item.fee` was always 0',
+      'src/shop.js:18:14 no test makes `user` null or undefined here',
+      'src/shop.js:22:9 no test has `x === lo`',
+      'src/shop.js:32:21 no test makes `handlers.onMessage` null or undefined here',
+      'src/shop.js:37:7 the condition was always falsy in tests',
+    ]
+    const reasonsOf = (report: Report) =>
+      report.results.filter((r) => r.reason).map((r) => `${path.relative(report.gitRoot, r.file)}:${r.line}:${r.column} ${r.reason}`)
+
+    test('reports survivors from the profile without running them, and skips string `+`', () => {
+      const dir = project('profile', { 'src/shop.js': SHOP_BASE }, { 'src/shop.js': SHOP, 'test/shop.test.js': SHOP_TEST })
+      const { status, report, output } = nyorori(dir)
+      expect(status, output).toBe(1)
+      expect(statuses(report!)).toEqual(expected)
+      expect(reasonsOf(report!)).toEqual(reasons)
+      // Every mutant with a reason was judged from the profile alone.
+      expect(report!.results.filter((r) => r.predicted).map((r) => r.id)).toEqual(report!.results.filter((r) => r.reason).map((r) => r.id))
+      expect(report!.skipped.map((m) => `${path.relative(report!.gitRoot, m.file)}:${m.line} ${m.operator} ${m.description}: ${m.reason}`)).toEqual([
+        'src/shop.js:2 Arithmetic `+` → `-`: string concatenation in every observed evaluation',
+      ])
+      expect(output).toContain('Survived   src/shop.js:14:32  Arithmetic  `+` → `-`  (`item.fee` was always 0)')
+      expect(output).toContain('Survived   src/shop.js:27:7  Condition  `Array.isArray(list)` → `true`  (every test still passes with this change)')
+      expect(output).toContain('1 mutant skipped: string concatenation in every observed evaluation')
+
+      // The baseline (no active mutant) got the profiled code, every mutant run the plain code.
+      // Neither the predicted survivors nor the uncovered mutant ran.
+      const log = runs(dir)
+      expect(log[0]).toEqual({ active: 0, profiled: true })
+      expect(log.slice(1).filter((run) => run.profiled)).toEqual([])
+      const ran = log.slice(1).map((run) => run.active)
+      const judged = report!.results.filter((r) => !r.predicted && r.status !== 'NoCoverage').map((r) => r.id)
+      expect(ran.sort((a, b) => a - b)).toEqual(judged)
+    })
+
+    test('with --no-predict runs the predicted survivors, which survive', () => {
+      const dir = project('no-predict', { 'src/shop.js': SHOP_BASE }, { 'src/shop.js': SHOP, 'test/shop.test.js': SHOP_TEST })
+      const { status, report, output } = nyorori(dir, '--no-predict')
+      expect(status, output).toBe(1)
+      expect(statuses(report!)).toEqual(expected)
+      expect(reasonsOf(report!)).toEqual(reasons)
+      expect(report!.results.filter((r) => r.predicted || r.mispredicted)).toEqual([])
+      expect(output).not.toContain('MISPREDICT')
+      const log = runs(dir)
+      expect(log.slice(1).filter((run) => run.profiled)).toEqual([])
+      // Everything but NoCoverage and the skipped string `+` ran.
+      expect(log.slice(1)).toHaveLength(report!.results.filter((r) => r.status !== 'NoCoverage').length)
+    })
+
+    test('a suppression of a predicted survivor holds without a run; one of a skipped string `+` matches nothing', () => {
+      const dir = project('profile-suppress', {
+        'src/shop.js': 'export function label(prefix, name) {\n}\n\nexport function total(item) {\n}\n',
+        'test/shop.test.js': "import { expect, test } from 'vitest'\nimport { label, total } from '../src/shop.js'\ntest('shop', () => { expect(label('a', 'b')).toBe('ab'); expect(total({ price: 3, fee: 0 })).toBe(3) })\n",
+      }, {
+        'src/shop.js': `export function label(prefix, name) {
+  // nyorori-ignore-next-line Arithmetic -- joins two names
+  return prefix + name
+}
+
+export function total(item) {
+  // nyorori-ignore-next-line Arithmetic -- there are no fees yet
+  return item.price + item.fee
+}
+`,
+      })
+      const { status, report, output } = nyorori(dir)
+      expect(status, output).toBe(1)
+      expect(statuses(report!)).toEqual(['src/shop.js:8 Arithmetic `+` → `-`: Ignored'])
+      expect(report!.results[0]).toMatchObject({ predicted: true, reason: '`item.fee` was always 0' })
+      expect(report!.skipped.map((m) => m.line)).toEqual([3])
+      expect(report!.problems.map((p) => `${p.line} ${p.message}`)).toEqual(['2 Suppression matches no mutant of Arithmetic on line 3. Remove it.'])
+    })
+  })
+
   describe('verdicts do not leak between runs', () => {
     const base = {
       'src/a.ts': 'export function inc(x: number): number {\n  return x + 1\n}\n',

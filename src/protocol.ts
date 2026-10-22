@@ -10,7 +10,11 @@ export type Request =
   /** `setupDir` is a temporary directory the CLI owns and removes after the run. */
   | { type: 'init'; root: string; candidates: string[]; exclude: string[]; setupDir: string }
   | { type: 'plan'; files: FilePlan[] }
-  | { type: 'run'; active: number; limit: number; collect: boolean; specs: SpecRef[] }
+  /**
+   * `profile` > 0 serves the profiled instrumentation and gives each test file a
+   * buffer for that many probe keys (the baseline); 0 serves the plain one.
+   */
+  | { type: 'run'; active: number; limit: number; collect: boolean; profile: number; specs: SpecRef[] }
   | { type: 'close' }
 
 export interface ModuleResult {
@@ -18,6 +22,8 @@ export interface ModuleResult {
   passed: boolean
   /** Hit counts per mutant id; only in collecting runs. */
   hits: Record<string, number>
+  /** Probe records per probe key; only in profiling runs. */
+  profile: Record<string, number[]>
   /** The active mutant hit its limit in this file. */
   exceeded: boolean
   duration: number
@@ -37,6 +43,7 @@ export const PROVIDE = {
   active: 'nyorori:active',
   limit: 'nyorori:limit',
   collect: 'nyorori:collect',
+  probes: 'nyorori:probes',
 } as const
 
 declare module 'vitest' {
@@ -44,5 +51,6 @@ declare module 'vitest' {
     'nyorori:active': number
     'nyorori:limit': number
     'nyorori:collect': boolean
+    'nyorori:probes': number
   }
 }
