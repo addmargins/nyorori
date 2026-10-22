@@ -73,6 +73,11 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
   const plugin = {
     name: 'nyorori',
     enforce: 'pre' as const,
+    // jsdom and happy-dom tests load setup files through Vite's /@fs/ route,
+    // which serves only allowed directories; the setup file lives outside the project.
+    configResolved(config: { server: { fs: { allow: string[] } } }) {
+      config.server.fs.allow.push(dir)
+    },
     transform(code: string, id: string) {
       const plan = plans.get(id.split('?')[0]!)
       if (!plan) return undefined
@@ -93,6 +98,10 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
       fsModuleCache: false,
       related: candidates,
       update: false,
+      // Hits and profiles are attributed per test file by the setup file, which
+      // Vitest runs only once per worker under `isolate: false` here, so later
+      // files would record nothing and their code would look untested.
+      isolate: true,
       // No bail: cancelling a run makes test files that never started report
       // their state from an earlier run, and can abort the next run, so a
       // killed mutant could pass as Survived and the other way round.
@@ -127,12 +136,18 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
   const coverageInclude = config.coverage.include?.length ? picomatch(config.coverage.include, { dot: true }) : () => true
   const coverageExclude = picomatch(config.coverage.exclude, { dot: true })
   const userExclude = exclude.length > 0 ? picomatch(exclude, { dot: true }) : () => false
-  return candidates.filter((file) => {
+  const eligible = candidates.filter((file) => {
     const relative = path.relative(config.root, file)
     if (relative.startsWith('..') || path.isAbsolute(relative)) return false
     if (vitest!.projects.some((project) => project.matchesTestGlob(file))) return false
     return coverageInclude(relative) && !coverageExclude(relative) && !userExclude(relative)
   })
+  // Tests are picked from the files that get mutants. A changed vitest.config
+  // among them would make Vitest pick the whole suite (forceRerunTriggers),
+  // including tests that only pass in the project's own CI setup.
+  config.related = eligible
+  config.forceRerunTriggers = []
+  return eligible
 }
 
 function toRef(spec: TestSpecification): SpecRef {

@@ -149,6 +149,13 @@ nyorori는 Vite 플러그인으로 바뀐 코드를 계측합니다.
 
 Vite에 영향을 주지 않는 `test` 옵션(`name`, `include`, `environment` 등)만 바꾸는 inline project는 루트 설정의 Vite 서버를 같이 쓰므로 지원합니다.
 
+그 밖에 알아 둘 점:
+
+- 브라우저 모드 project도 지원하지 않습니다(exit 2).
+- Yarn PnP(Plug'n'Play)에서는 Action의 `node`가 Vitest를 찾지 못합니다. `.yarnrc.yml`에 `nodeLinker: node-modules`를 두세요.
+- nyorori는 테스트 파일마다 실행 기록을 모으려고 `isolate: true`로 실행합니다. `isolate: false`인 프로젝트에서는 평소보다 느릴 수 있습니다.
+- 기준 실행은 값 종류를 기록하느라 조금 느립니다. 실행 시간을 직접 재서 단언하는 테스트(예: ReDoS 방어 테스트)는 기준 실행에서 실패해 exit 2가 될 수 있습니다.
+
 ## Mutation 연산자
 
 | 이름 | 변형 |

@@ -694,4 +694,48 @@ export function total(item) {
       ])
     }
   })
+
+  describe('project setups seen in real repositories', () => {
+    const lib = 'export function big(x: number): boolean {\n  return x > 1\n}\n'
+    const changed = 'export function big(x: number): boolean {\n  return x >= 2\n}\n'
+    const spec = (name: string) => `import { expect, it } from 'vitest'\nimport { big } from '../src/${name}'\nit('${name}', () => {\n  expect(big(5)).toBe(true)\n  expect(big(0)).toBe(false)\n})\n`
+
+    test('a DOM environment can load the setup file from outside the project', () => {
+      const dir = project('happy-dom', {
+        'vitest.config.ts': "export default { test: { environment: 'happy-dom' } }\n",
+        'src/a.ts': lib,
+        'test/a.test.ts': spec('a'),
+      }, { 'src/a.ts': changed })
+      const { status, report, output } = nyorori(dir)
+      expect(status, output).toBe(1)
+      expect(statuses(report!)).toEqual(['src/a.ts:2 ComparisonBoundary `>=` → `>`: Survived'])
+    })
+
+    test('every test file records its hits under isolate: false', () => {
+      const dir = project('no-isolate', {
+        'vitest.config.ts': 'export default { test: { isolate: false, maxWorkers: 1 } }\n',
+        'src/a.ts': lib, 'src/b.ts': lib, 'src/c.ts': lib,
+        'test/a.test.ts': spec('a'), 'test/b.test.ts': spec('b'), 'test/c.test.ts': spec('c'),
+      }, { 'src/a.ts': changed, 'src/b.ts': changed, 'src/c.ts': changed })
+      const { status, report, output } = nyorori(dir)
+      expect(status, output).toBe(1)
+      expect(statuses(report!)).toEqual(['a', 'b', 'c'].map((f) => `src/${f}.ts:2 ComparisonBoundary \`>=\` → \`>\`: Survived`))
+    })
+
+    test('a changed Vitest config does not pull in the whole suite', () => {
+      // Stands for tests that only pass in the project's own CI, like a dist check.
+      const dir = project('config-change', {
+        'vitest.config.ts': 'export default { test: {} }\n',
+        'src/a.ts': lib,
+        'test/a.test.ts': spec('a'),
+        'test/dist.test.ts': "import { it } from 'vitest'\nit('needs a build', () => { throw new Error('no dist') })\n",
+      }, {
+        'vitest.config.ts': 'export default { test: { testTimeout: 10_000 } }\n',
+        'src/a.ts': changed,
+      })
+      const { status, report, output } = nyorori(dir)
+      expect(status, output).toBe(1)
+      expect(statuses(report!)).toEqual(['src/a.ts:2 ComparisonBoundary `>=` → `>`: Survived'])
+    })
+  })
 })
