@@ -607,7 +607,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
   - 값을 버리는 메트릭·트레이싱 호출 문: `metrics.increment('hits')`, `await this.statsd.timing('load', ms)`
     - receiver의 마지막 이름이 `metrics`, `statsd`, `telemetry`, `tracer`(앞에 `_`가 붙어도 된다)이거나 `Metrics`, `Telemetry`, `Tracer`로 끝나고, 메서드가 `increment`, `decrement`, `gauge`, `histogram`, `timing`, `distribution`, `record`, `addEvent`, `setAttribute`, `setAttributes`, `setStatus`, `recordException`인 것이다.
     - 값을 쓰는 호출(`return metrics.increment(x)`)은 변형한다. 그 값은 코드가 쓰는 것이다.
-    - 근거는 Google의 경험뿐이다. es-toolkit과 i18next에는 이런 호출이 없어서 여기서는 확인하지 못했다. 그래서 좁게 잡았다. `span`은 DOM 요소일 때도 많아서(`span.setAttribute('class', c)`) 넣지 않았다. `counter`, `stats`도 같은 이유로 뺐다.
+    - 근거는 Google 논문이 "모니터링 시스템의 값 증가"를 바람직하지 않은 테스트 목표의 예로 든 것뿐이다(TSE §3.2.3). 트레이싱(`tracer`, `recordException` 등)과 메서드 이름 목록은 논문에 없고 우리가 정했다. es-toolkit과 i18next에는 이런 호출이 없어서 여기서는 확인하지 못했다. 그래서 좁게 잡았다. `span`은 DOM 요소일 때도 많아서(`span.setAttribute('class', c)`) 넣지 않았다. `counter`, `stats`도 같은 이유로 뺐다.
 - `!!x`에서는 바깥 `!`만 변형한다. 안쪽을 빼도 결과가 같은 `!x`이기 때문이다.
 - `x.length >= 0` 같은 항상 참인 조건은 `true`로 바꾸지 않는다.
 - 조건이 이미 `true`/`false` 리터럴이면 Condition mutant를 만들지 않는다. BooleanLiteral mutant와 겹치기 때문이다.
@@ -678,7 +678,11 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 
 **로그 필터의 측정.**
 
-- Google은 코드 리뷰에 보고하는 mutant를 "arid" 노드(로그, 모니터링 등 단위 테스트가 거의 확인하지 않는 코드와, 그것에만 쓰이는 코드)에서 만들지 않는다. 초기에 넣은 세 휴리스틱(로그, sleep·deadline·timeout 같은 시간 설정, 설정 플래그)이 쓸모 있다고 본 mutant의 비율을 약 15%에서 80%로 올렸고, 그 뒤 다듬어서 89%가 됐다고 한다("Practical Mutation Testing at Scale", TSE 2021). 로그 휴리스틱은 함수 이름이 `log`로 시작하거나 receiver 이름이 `logger`인 호출을 거르며, 표본 100개 중 99개가 맞았다. 모니터링 값의 증가는 "테스트하기 쉽지만 좋은 테스트 목표가 아닌" 예로 든다.
+- Google의 mutation testing 서비스는 코드 리뷰(Critique)에서 바뀐 줄의 mutant를 보고한다. 2014년부터 운영했고, 프로젝트가 골라서 켠다. 이 서비스는 "arid" 노드에는 mutant를 아예 만들지 않는다. arid 노드는 변형하면 비생산적인 mutant가 나오는 노드다. 로그 호출 같은 단순 노드와, 자식이 모두 arid인 복합 노드(로그만 하는 `if`)가 있다.
+  - 출처는 Petrović·Ivanković(Google)·Fraser·Just, "Practical Mutation Testing at Scale: A view from Google", IEEE TSE 48(10), 2022(온라인 2021)다. 시스템을 만든 사람들의 보고다.
+  - 초기 세 휴리스틱(로그, deadline·timeout·exponential backoff 같은 시간 관련 설정, 설정 플래그)이 productive 비율을 약 15%에서 80%로 올린 것으로 본다고 쓴다. 다만 논문 스스로 "정확히 재기는 어렵지만 강한 정황이 있다"고 단서를 단다. productive 비율은 개발자가 피드백한 mutant 중 "Not useful"이 아닌 비율이다. 그 뒤 규칙을 더해 89%가 됐다(§3.2.5). 2018년 ICSE-SEIP 논문은 같은 개선을 20%에서 80%로 적었다.
+  - 로그 휴리스틱은 함수 이름이 `log`로 시작하거나, 호출하는 객체의 이름이 `logger`인 호출을 arid로 본다. 표본 100개 중 99개가 맞았고, 나머지 하나는 효용이 미미했다(§3.2.3).
+  - 모니터링 시스템의 값 증가, 저수준 API, 플래그 변경을 "변형하기 쉽고 테스트하기도 쉽지만 대개 바람직하지 않은 테스트 목표"의 예로 든다(§3.2.3).
 - 모든 줄을 바뀐 것으로 쳤을 때 로거와 메트릭 규칙이 없애는 mutant는 i18next `src`에서 2604개 중 32개, es-toolkit `src`에서 0개다. es-toolkit `src`에는 로그 레벨 이름의 메서드 호출이 하나도 없다. i18next의 32개는 `this.logger.warn`(19곳), `.log`(4곳), `.error`(1곳)의 `CallStatement` 24개와, `this.logger.log(updateMissing ? … : …)` 인자 안의 Condition·Logical·Negation 8개다.
 - 32개를 하나씩 원본에 적용하고 `vitest related`로 돌렸다. 25개가 살아남고 7개가 잡혔다. 인자 안의 8개는 모두 살아남았고, `CallStatement`는 17개가 살아남고 7개가 잡혔다. 잡은 테스트는 모두 로거를 바꿔 끼우고 `warn`을 확인한다.
   - `i18next.hasLoadedNamespace.test.js`: `type: 'logger'` 모듈이 `warn`의 첫 인자를 모으고, 테스트가 메시지와 개수를 확인한다. `i18next.js`의 175·491줄, `Translator.js`의 287·504줄, `BackendConnector.js`의 237줄
@@ -902,7 +906,7 @@ return age >= 18
   - 이름으로 판단한다. 로거 이름에 로그 레벨 메서드가 있지만 로거가 아닌 객체의 호출은 변형하지 않아서, 그 mutant를 놓친다. 이름이 다른 로거(`out.warn(…)`, `debug('x')`나 `log('x')`처럼 함수로 부르는 로거, `logger.child({ id }).info(…)`)는 거르지 않아서, 그 mutant가 살아남으면 억제 주석이 필요하다.
   - 경고를 테스트하는 라이브러리에서는 그 검출을 잃는다. i18next에서는 로그 호출 24곳 중 7곳을 테스트가 확인했다("로그 필터의 측정" 참고). 경고 호출을 더하거나 지우는 PR은 그 경고를 테스트하지 않아도 통과한다.
   - 로그만 하는 `if`의 조건(`if (err) this.logger.warn(…)`의 `err`)은 변형한다. Google은 자식이 모두 arid인 노드도 arid로 보지만, 여기서는 하지 않았다. i18next `src`에는 그런 `if`가 8곳, 그 조건의 mutant가 30개 있다. 그중 몇 곳은 위의 테스트가 확인하는 경고를 지킨다.
-  - 메트릭·트레이싱 이름은 Google의 경험만 근거로 한다. 측정한 저장소에 그런 호출이 없었다.
+  - 메트릭 이름은 Google 논문의 예(모니터링 값의 증가)만 근거로 하고, 트레이싱과 메서드 이름 목록은 우리가 정했다. 측정한 저장소에 그런 호출이 없었다.
 - **브라우저 모드.** 지원하지 않는다.
 - **실행 시간.**
   - mutant 수 × 관련 테스트 시간만큼 걸린다.
