@@ -35,7 +35,8 @@ export function f<S extends string>(name: string, suffix: string, n: number, big
   ]
 }
 `,
-  'src/mixed.ts': `export function f(name: string, suffix: string, a: number, b: number, loose: any) {
+  // Destructured, so only the checker knows that `name + suffix` joins strings.
+  'src/mixed.ts': `export function f({ name, suffix }: { name: string; suffix: string }, a: number, b: number, loose: any) {
   const label = name + suffix
   const sum = a + b
   return [label, sum, loose + a]

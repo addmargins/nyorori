@@ -9,9 +9,10 @@ import {
   type Node,
   type Span,
 } from 'oxc-parser'
-import { ScopeTracker } from 'oxc-walker'
+import { ScopeTracker, type ScopeTrackerNode } from 'oxc-walker'
 import { isOperator, type EquivalentMutant, type Mutant, type Operator, type Suppression, type SuppressionProblem } from '../types.ts'
 import { dropEquivalent } from './equivalent.ts'
+import { Strings, type Bindings } from './infer.ts'
 import type { Probe, Rule } from './profile.ts'
 import type { TypeOracle } from './typecheck.ts'
 
@@ -113,7 +114,8 @@ const SUPPRESS_RE = /^nyorori-ignore-next-line\s+([A-Za-z]+(?:\s*,\s*[A-Za-z]+)*
  * Builds the mutants whose anchor lies on one of `changed` lines, plus the
  * suppression comments that apply to them. Mutants that minify to the
  * original code are set aside in `equivalent`. Ids start at `firstId`.
- * `types` tells string `+` from numeric `+` where the syntax cannot.
+ * `types` tells string `+` from numeric `+` by the operand types; where it
+ * cannot, the syntax decides.
  */
 export function generate(file: string, code: string, changed: ReadonlySet<number>, firstId: number, types = NO_TYPES): GenerateResult {
   const parsed = parseSync(file, code)
@@ -165,14 +167,18 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
     code.slice(site.start, from) + insert + code.slice(to, site.end)
 
   /**
-   * String `+` is not mutated (string mutations are deferred). A string or
-   * template literal operand settles it; otherwise the operand types do, where known.
+   * String `+` is not mutated (string mutations are deferred). The operand
+   * types settle it where they are known; otherwise the syntax does, where it
+   * is certain that an operand is a string (infer.ts).
    */
   function isConcatenation(left: Node, right: Node, at: number): boolean {
-    if (isStringLike(left) || isStringLike(right)) return true
-    // Only a `+` that can become a mutant is worth starting the type checker for.
+    // Only a `+` that can become a mutant is worth the question.
     if (!changed.has(position(at).line)) return false
-    return types.plus(file, left, right) === 'string'
+    // The checker cannot answer otherwise for a literal, so it is not started for one.
+    if (isStringLiteral(left) || isStringLiteral(right)) return true
+    const kind = types.plus(file, left, right)
+    if (kind !== 'unknown') return kind === 'string'
+    return strings.isString(left) || strings.isString(right)
   }
 
   function condition(test: Expression | null, values: string[]): void {
@@ -306,6 +312,7 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
   }
 
   const scopes = new Scopes()
+  const strings = new Strings(scopes)
   // The tracker records a name when the walk reaches its declaration, so a first
   // pass collects them all and the second also sees names declared below their
   // use: hoisted `var` and functions, or a module-level logger defined further down.
@@ -386,9 +393,9 @@ function readSuppressions(
  * oxc-walker's own walk. That one enters every key and every node, so the
  * tracker would also count ambient declarations, which bind nothing at runtime:
  * after `declare const console: …`, `console` is still the global. The hooks
- * its walk calls are protected, hence the subclass.
+ * its walk calls and the recorded scopes are protected, hence the subclass.
  */
-class Scopes extends ScopeTracker {
+class Scopes extends ScopeTracker implements Bindings {
   constructor() {
     // Exited scopes stay recorded, so the second walk can look names up in them.
     super({ preserveExitedScopes: true })
@@ -400,6 +407,16 @@ class Scopes extends ScopeTracker {
 
   leave(node: Node): void {
     this.processNodeLeave(node)
+  }
+
+  /** For infer.ts, which resolves a constant's initialiser from where it stands. */
+  lookup(name: string, scope: string): ScopeTrackerNode | null {
+    // A key extends its parent's: `0-1` is inside `0`, which is inside the root scope ''.
+    for (let key = scope; ; key = key.slice(0, Math.max(0, key.lastIndexOf('-')))) {
+      const declaration = this.scopes.get(key)?.get(name)
+      if (declaration) return declaration
+      if (key === '') return null
+    }
   }
 }
 
@@ -454,7 +471,7 @@ function isNumber(node: Node, value: number): boolean {
   return node.type === 'Literal' && node.value === value
 }
 
-function isStringLike(node: Node): boolean {
+function isStringLiteral(node: Node): boolean {
   node = unwrap(node)
   return (node.type === 'Literal' && typeof node.value === 'string') || node.type === 'TemplateLiteral'
 }

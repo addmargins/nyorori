@@ -138,8 +138,14 @@ Vite에 영향을 주지 않는 `test` 옵션(`name`, `include`, `environment` �
 
 문자열을 이어 붙이는 `+`는 변형하지 않습니다.
 
-- 문자열 리터럴이나 템플릿 리터럴이 붙은 `+`(`"n=" + x`)는 문법으로 알아봅니다.
-- TypeScript 파일에서는 [tsrs](https://github.com/oxc-project/tsrs)(TypeScript 7 컴파일러의 Rust 포트)로 타입을 확인합니다. 그래서 `name + suffix`처럼 변수끼리 잇는 `+`도 거르고, `a + b`(숫자)는 변형합니다.
+- 피연산자 하나가 문자열인 것이 문법으로 확실하면 알아봅니다. JavaScript와 TypeScript 모두 해당합니다.
+  - 문자열 리터럴과 템플릿 리터럴(`"n=" + x`), `typeof x`, 전역 `String(x)`, 문자열에 부른 `trim()` 같은 메서드, 배열에 부른 `join()`
+  - 문자열이 붙은 `+`. `"a" + b + c`의 두 `+`가 모두 해당합니다.
+  - 그런 식으로 초기화한 `const`
+  - 타입 주석이 `string`이나 문자열 리터럴 타입(`'a' | 'b'`)인 매개변수와 변수. `x?: string`과 `string | undefined`는 제외합니다.
+  - 다시 대입될 수 있는 `let`/`var`의 초기값, 함수 반환값, 객체 멤버, `x as string`, JSDoc은 보지 않습니다. 확실하지 않은 `+`는 변형합니다.
+- TypeScript 파일에서는 [tsrs](https://github.com/oxc-project/tsrs)(TypeScript 7 컴파일러의 Rust 포트)로 타입을 확인합니다. 그래서 `user.name + user.title`처럼 문법으로는 알 수 없는 `+`도 거르고, `a + b`(숫자)는 변형합니다.
+  - tsrs가 답하면 문법보다 그 답을 따릅니다.
   - 파일이 속한 `tsconfig.json`은 편집기처럼 찾습니다. `references`도 따라갑니다.
   - 어느 tsconfig에도 속하지 않는 파일, `any`인 값, JavaScript 파일은 문법으로만 판단합니다.
 - 그렇게 남은 `+`도, 기준 실행의 모든 평가에서 피연산자 하나가 문자열이었다면 실행하지 않습니다. JavaScript와 TypeScript 모두 해당합니다.

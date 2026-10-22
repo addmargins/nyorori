@@ -19,7 +19,7 @@ PR이 **추가하거나 바꾼 코드**에만 mutation을 넣고, 그 PR 시점�
 |---|---|
 | AST 처리 | `oxc-parser` npm 패키지(voidzero의 Rust 파서) 위에 TS로 구현 |
 | equivalent 자동 판별 | TCE: `oxc-transform` + `oxc-minify`. 버전은 `oxc-parser`와 같게 고정 |
-| 문자열 `+` 판별 | TS 파일은 `tsrs`(TypeScript 7 컴파일러의 Rust 포트)의 unstable API로 타입을 본다. optionalDependency로 버전을 정확히 고정하고, 쓸 수 없으면 문법 규칙으로 돌아간다 |
+| 문자열 `+` 판별 | TS 파일은 `tsrs`(TypeScript 7 컴파일러의 Rust 포트)의 unstable API로 타입을 본다. optionalDependency로 버전을 정확히 고정한다. 쓸 수 없거나 답하지 못하면, 문자열인 것이 확실한 피연산자만 알아보는 문법 규칙으로 돌아간다 |
 | 이 PR이 새로 추가한 억제 | `warn`: 통과시키되 경고 어노테이션과 요약 맨 위에 표시 |
 | NoCoverage | Survived와 똑같이 CI 실패 |
 | 실행 시간 프로파일링 | 기준 실행에만 probe를 넣은 계측을 쓴다. mutant 실행은 probe 없는 계측을 쓴다 |
@@ -35,7 +35,8 @@ nyorori run --base <ref>
                   (테스트 파일, coverage.exclude, --exclude 제외)
   3. mutant 생성   oxc-parser로 파싱 → 바뀐 줄에 앵커가 걸린 노드에만 mutant를 만든다
                   → 정적 equivalent 필터 (L1: 휴리스틱, TCE)
-                  TS 파일의 `+`는 tsrs에 타입을 묻는다. tsrs 프로세스는 이 단계에서만 떠 있다
+                  TS 파일의 `+`는 tsrs에 타입을 묻고, 답이 없으면 문법 규칙으로 판단한다
+                  tsrs 프로세스는 이 단계에서만 떠 있다
                   → 억제 주석 읽기 (L2)
   4. 계측          모든 mutant를 파일에 한꺼번에 넣는다 (mutant schemata)
                   파일마다 두 벌을 만든다: probe 없는 계측(plain)과 probe를 넣은 계측(profiled)
@@ -156,6 +157,7 @@ TCE에도 같은 oxc의 `oxc-transform`과 `oxc-minify`를 쓴다.
 mutant 생성은 `oxc-parser`가 주는 타입 있는 AST(`@oxc-project/types`)를 TS로 순회해서 한다.
 - 자식 노드는 `oxc-parser`의 `visitorKeys`(노드 종류별 자식 키 목록)를 따라 방문한다. 타입이나 데코레이터만 담는 키(`typeAnnotation`, `typeArguments`, `decorators` 등)는 들어가지 않는다.
 - 이름이 어느 스코프에서 선언됐는지는 `oxc-walker`(버전 고정)의 `ScopeTracker`로 확인한다. `oxc-walker`의 `walk`는 쓰지 않는다. 그 `walk`는 모든 키와 노드에 들어가므로, 런타임에는 없는 ambient 선언까지 선언으로 센다. 그래서 nyorori의 순회가 `ScopeTracker`를 직접 진행시킨다. 이 진입/이탈 훅은 protected라서 하위 클래스로 연다.
+- 문자열 `+`의 문법 규칙은 `const`의 초기화 식에 나오는 이름을, 순회가 서 있는 곳이 아니라 그 `const`가 선언된 스코프에서 찾는다. 기록된 스코프(`scopes`)도 protected라서 이 조회(`lookup`)도 하위 클래스에 둔다. 스코프 키는 `0-1`이 `0` 안에 있는 식으로 부모의 키를 이어 붙인 것이다.
 
 계측은 `magic-string`으로 한다.
 실행 시간의 거의 전부는 테스트 실행이고, diff 범위의 AST 처리는 미미하다.
@@ -168,6 +170,7 @@ src/
 ├─ mutate/generate.ts    oxc-parser AST 순회(visitorKeys, ScopeTracker) → 지점과 mutant, L1 휴리스틱, L2 억제 주석
 ├─ mutate/equivalent.ts  L1 TCE: oxc-transform + oxc-minify 결과가 원본과 같은 mutant를 버림
 ├─ mutate/typecheck.ts   tsrs 어댑터: `+`가 문자열 연결인지 숫자 덧셈인지 타입으로 답함
+├─ mutate/infer.ts       문자열 `+`의 문법 규칙: 식이 문자열인 것이 확실한지 AST와 스코프로 답함
 ├─ mutate/instrument.ts  schemata 삽입, probe 삽입(profiled), 소스맵, 계측 결과 파싱 확인
 ├─ mutate/profile.ts     probe 기록의 형식과 판정 규칙: 살아남는 것이 확실한 mutant, 문자열 `+`
 ├─ run.ts                오케스트레이션: 세션 관리, 기준 실행, mutant별 실행, 판정
@@ -193,7 +196,7 @@ merge-base를 구하려면 `actions/checkout`에 `fetch-depth: 0`이 필요하�
 
 ### 타입 정보 (tsrs)
 
-`name + suffix`가 문자열 연결인지는 문법만으로 알 수 없다. 그래서 TS 파일의 `+`는 `tsrs`에 타입을 묻는다(L1 참고).
+`a.name + b.title`처럼 멤버나 반환값끼리 잇는 `+`가 문자열 연결인지는 문법만으로 알 수 없다. 그래서 TS 파일의 `+`는 `tsrs`에 타입을 묻는다(L1 참고).
 `tsrs`는 TypeScript 7 컴파일러와 언어 서버를 Rust로 옮긴 것이고, TypeScript 7의 IPC API를 `tsrs/unstable/sync`로 그대로 제공한다.
 동기 API라서 동기로 도는 mutant 생성 안에서 바로 물을 수 있다.
 
@@ -224,7 +227,7 @@ merge-base를 구하려면 `actions/checkout`에 `fetch-depth: 0`이 필요하�
   - 실행할 수 없는 바이너리(EACCES 등)는 다음 tick에 child process의 `'error'` 이벤트를 낸다. 리스너가 없으면 CLI가 죽고 exit 1(발견 있음)처럼 보이게 된다. 그래서 tsrs 클라이언트 내부의 child(`client.channel.child`)에 빈 리스너를 단다. 실패는 그 뒤의 요청이 EPIPE로 알린다.
 - **보고.**
   - `--json`의 `types`에 `{ backend: 'tsrs', files, untyped }` 또는 `{ backend: 'none', reason, untyped }`를 남긴다. `untyped`는 바뀐 줄에 `+`가 있는데 타입 없이 판단한 TS 파일과 그 이유다.
-  - 그런 파일이 있을 때만 텍스트 출력에 한 줄을 쓴다. 변수끼리의 문자열 `+`가 왜 변형됐는지 알 수 있게 하려는 것이다.
+  - 그런 파일이 있을 때만 텍스트 출력에 한 줄을 쓴다. 문법 규칙이 가리지 못한 문자열 `+`가 왜 변형됐는지 알 수 있게 하려는 것이다.
   - `--no-types`로 끄면 tsrs를 읽지 않고, 이 줄도 쓰지 않는다.
   - step summary와 어노테이션은 바꾸지 않는다.
 - **비용.** 이 저장소의 `src/mutate/generate.ts`(467줄, `+` 16개, 프로그램 파일 282개)를 기준으로 쟀다.
@@ -300,7 +303,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
   - getter, Proxy, `valueOf`/`toString`, `Symbol.hasInstance`는 여전히 코드를 실행할 수 있다. 이들이 테스트가 보는 상태를 바꾸지 않는다고 가정한다.
   - 조건이 throw한 평가(`o.a.b`에서 `o.a`가 undefined인 경우 등)는 기록되지 않는다. 고정된 값은 throw하지 않으므로, 평가 횟수가 N과 다르면 예측하지 않는다.
   - 조건 값이 `true`/`false`가 아닌 값이었으면 이유를 `always truthy`/`always falsy`로 쓴다.
-- 문자열 `+`: 기록된 모든 평가에 문자열 피연산자(빈 문자열 포함)가 있었으면 `+`→`-` mutant를 실행하지 않는다. 문자열 피연산자가 없는 평가가 하나라도 있으면 그대로 실행한다. 실행되지 않은 `+`는 NoCoverage다. 생성 단계의 규칙(리터럴, tsrs)이 먼저 적용된다.
+- 문자열 `+`: 기록된 모든 평가에 문자열 피연산자(빈 문자열 포함)가 있었으면 `+`→`-` mutant를 실행하지 않는다. 문자열 피연산자가 없는 평가가 하나라도 있으면 그대로 실행한다. 실행되지 않은 `+`는 NoCoverage다. 생성 단계의 규칙(리터럴, tsrs, 문법 규칙)이 먼저 적용된다.
 
 ### 계측 전환
 
@@ -361,17 +364,63 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 - `x.length >= 0` 같은 항상 참인 조건은 `true`로 바꾸지 않는다.
 - 조건이 이미 `true`/`false` 리터럴이면 Condition mutant를 만들지 않는다. BooleanLiteral mutant와 겹치기 때문이다.
 - `x * 1`, `x / 1`은 `*`↔`/` 변형을 만들지 않는다.
-- 문자열 연결 `+`는 변형하지 않는다. 문자열 변형은 2차로 미뤘다.
-  - 피연산자 하나가 문자열 리터럴이나 템플릿 리터럴이면 문법만으로 문자열 연결이다(`"a" + x`).
-  - 그 밖의 `+`는 TS 파일이면 tsrs에 타입을 묻는다("타입 정보 (tsrs)" 참고).
-    - 식 전체의 타입이 문자열 계열이면 변형하지 않는다. 체커가 정한 결과라서 문자열 변수, 템플릿 리터럴 타입, 문자열 enum, `string`으로 제한된 타입 매개변수, branded string이 모두 들어간다.
-    - 식 전체의 타입이 `number`나 `bigint`이면 변형한다. 숫자 리터럴 타입과 숫자 enum이 여기에 든다.
-    - 타입 오류 때문에 식 전체가 `any`인데 피연산자 하나가 문자열을 포함하는 union이면(`string | undefined` + 숫자) 문자열 연결로 본다.
-    - `any`, 타입 오류, tsconfig에 속하지 않는 파일, tsrs를 쓸 수 없는 경우, JS 파일은 문법 규칙만 쓴다. 이때는 변수끼리의 문자열 `+`도 변형된다.
+- 문자열 연결 `+`는 변형하지 않는다. 문자열 변형은 2차로 미뤘다. 바뀐 줄의 `+`는 다음 순서로 판단한다.
+  1. 피연산자 하나가 문자열 리터럴이나 템플릿 리터럴이면 문자열 연결이다(`"a" + x`). 타입 검사기도 달리 답할 수 없으므로 tsrs를 띄우지 않는다.
+  2. TS 파일이면 tsrs에 타입을 묻는다("타입 정보 (tsrs)" 참고). 답이 있으면 그것을 따른다.
+     - 식 전체의 타입이 문자열 계열이면 변형하지 않는다. 체커가 정한 결과라서 문자열 변수, 템플릿 리터럴 타입, 문자열 enum, `string`으로 제한된 타입 매개변수, branded string이 모두 들어간다.
+     - 식 전체의 타입이 `number`나 `bigint`이면 변형한다. 숫자 리터럴 타입과 숫자 enum이 여기에 든다.
+     - 타입 오류 때문에 식 전체가 `any`인데 피연산자 하나가 문자열을 포함하는 union이면(`string | undefined` + 숫자) 문자열 연결로 본다.
+  3. tsrs가 답하지 못하면 문법 규칙(아래)으로 판단한다. `any`, 타입 오류, tsconfig에 속하지 않는 파일, tsrs를 쓸 수 없는 경우, `--no-types`, JS 파일이 그렇다. 피연산자 하나가 문자열인 것이 확실할 때만 문자열 연결로 보고, 그 밖의 `+`는 변형한다.
   - 생성 단계에서 남은 `+`는 기준 실행에서 한 번 더 거른다. 실행된 모든 평가에서 피연산자 하나가 문자열이었으면 그 mutant는 실행하지 않는다("실행 시간 프로파일링" 참고). JS와 TS 모두 해당한다.
   - tsrs가 틀리면 다음 둘 중 하나가 된다.
     - 숫자 `+`를 문자열로 보면 mutant를 놓친다.
-    - 문자열 `+`를 숫자로 보면 타입 정보가 없을 때처럼 변형된다.
+    - 문자열 `+`를 숫자로 보면 변형된다. 리터럴이 붙지 않은 `+`에서는 tsrs의 답이 문법 규칙보다 먼저다.
+
+**문자열 `+`의 문법 규칙.** `src/mutate/infer.ts`가 파일 하나의 AST와 스코프만 보고, 식이 늘 문자열로 평가되는지(아니면 throw하는지) 정한다. 문자열이라고 잘못 답하면 숫자 `+`의 mutant를 놓치므로, 확실한 경우에만 문자열이라고 답한다.
+
+- 문자열로 보는 식
+  - 문자열 리터럴, 템플릿 리터럴, `typeof x`
+  - 피연산자 하나가 문자열인 `+`. 그래서 `"a" + b + c`의 바깥 `+`도 문자열 연결이다. 리터럴만 보던 규칙은 이것을 변형했다.
+  - 두 갈래가 모두 문자열인 `c ? a : b`, `a || b`, `a && b`, `a ?? b`. 값은 둘 중 하나다.
+  - 괄호, `x!`, `satisfies`, 타입 단언으로 감싼 문자열. 값은 그대로다.
+  - 전역 `String(x)`, `encodeURIComponent`, `encodeURI`, `decodeURIComponent`, `decodeURI`, `escape`, `unescape`, 그리고 `String.fromCharCode`, `String.fromCodePoint`, `String.raw`
+    - 둘러싼 스코프에서 같은 이름을 선언했으면 전역이 아니므로 제외한다. 매개변수, import, 아래쪽의 함수 선언이 그런 예다. console 필터와 같은 `ScopeTracker`로 본다.
+  - 문자열에 부른 문자열 메서드: `trim`, `slice`, `toUpperCase`, `padStart`, `replace` 등. `at`(범위 밖이면 undefined)과 `match`(null)는 뺀다.
+  - 배열에 부른 `join()`과 `toString()`. 배열로 보는 것은 다음과 같다.
+    - 배열 리터럴, `Object.keys`/`values`/`entries`, `Array.from`/`of`, 문자열의 `split()`
+    - 배열의 `map`, `filter`, `slice`, `concat`, `flat`, `flatMap`, `sort`, `reverse`, `toSorted`, `toReversed`
+  - 위의 식으로 초기화한 `const`
+    - 초기화 식 안의 이름은 `const`가 쓰인 곳이 아니라 선언된 곳의 스코프에서 찾는다. 모듈 최상위의 `const s = name`은 함수 매개변수 `name`이 아니라 전역 `name`이다.
+    - 서로를 가리키는 `const`는 문자열로 보지 않는다.
+  - 타입 주석이 문자열 타입인 매개변수와 변수
+    - `string`, 문자열 리터럴 타입, 템플릿 리터럴 타입, 이들의 union, `string & Brand`. 배열 타입과 튜플 타입의 주석은 배열로 본다.
+    - TypeScript가 호출과 대입마다 주석을 검사하므로, 다시 대입되는 `let`이어도 된다.
+- 문자열로 보지 않는 것
+  - `x?: string`, `string | undefined`, `any`, 구조 분해한 매개변수
+  - `let`/`var`의 초기화 식. 다시 대입될 수 있다.
+  - 받는 쪽을 모르는 메서드: `o.toString()`, `o.join()`, `n.toFixed()`. 어떤 객체든 같은 이름의 메서드를 가질 수 있다.
+  - 함수 반환값, 객체 멤버(`url.pathname`), optional chain, `JSON.stringify(x)`(undefined를 돌려줄 수 있음)
+  - `x as string` 자체. 주석과 달리 검사되지 않고, `string | number`를 그대로 좁힌다.
+  - JSDoc. 검사되지 않는 주석이다.
+- 가정
+  - 내장 객체를 덮어쓰지 않는다(TCE의 "minifier의 가정"과 같다). 사용자 객체의 `Symbol.replace`/`Symbol.split`은 TypeScript lib 타입대로 문자열/배열을 돌려준다고 본다.
+  - 타입 주석을 믿는다. `any`로 바꾼 값이나 `strictNullChecks: false`에서의 null처럼 주석과 다른 값이 들어올 수 있다. 그래도 주석이 문자열이라고 밝힌 `+`이고, tsrs도 같게 답한다.
+  - console 필터처럼, sloppy mode에서 블록 안 함수 선언이 바깥으로 호이스팅되는 경우(Annex B)는 보지 못한다.
+  - 어느 경우든 틀리는 방향은 mutant를 놓치는 쪽이다.
+
+**측정.** 공개 저장소 5곳의 모든 `+`를 TypeScript 7.1이 정한 타입과 비교했다. JS 저장소에서는 TypeScript가 JSDoc과 초기화 식으로 추론한 타입이다. 문법 규칙이 문자열이라고 답한 `+` 중 TypeScript가 숫자나 "모름"이라고 답한 것은 없었다. `strictNullChecks`를 켠 TypeScript 6의 답과 비교해도 같았다.
+
+| 저장소 | TypeScript가 문자열이라고 답한 `+` | 리터럴 규칙이 찾은 것 | 문법 규칙이 찾은 것 |
+|---|---|---|---|
+| hono (TS) | 47 | 33 (70%) | 41 (87%) |
+| express | 34 | 26 (76%) | 34 (100%) |
+| axios | 160 | 111 (69%) | 156 (98%) |
+| undici | 25 | 15 (60%) | 19 (76%) |
+| fastify | 77 | 59 (77%) | 77 (100%) |
+
+- 늘어난 것은 대부분 `"a" + b + c`의 바깥 `+`이고, 그다음이 `const`와 타입 주석이다.
+- 놓친 것은 멤버(`url.pathname + url.search`), 함수 반환값, 구조 분해한 값, JSDoc에서 타입이 오는 `+`다.
+- 추론은 생성 단계의 두 번째 순회 안에서, 바뀐 줄의 `+`에만 한다. 위 저장소의 644개 파일에 있는 `+`를 모두 물었을 때 합쳐서 15ms 미만이 들었다. 파싱과 순회(1.3초)는 원래 하던 일이다.
 
 TCE가 잡지 못하는 경우가 있어서 휴리스틱도 그대로 둔다. 예를 들어 `x * 1`은 압축해도 `x*1`로 남는다.
 
@@ -503,6 +552,7 @@ return age >= 18
   - 실행 시간의 문자열 `+` 규칙은 테스트가 문자열만 넣은 숫자 `+`의 mutant를 놓친다.
   - probe 함수 이름(`__nyorori_v`, `__nyorori_b0` 등)이 사용자 코드와 겹치지 않는다고 가정한다. `__nyorori_h`와 같다.
   - 호출 probe의 spread는 `Array.prototype[Symbol.iterator]`를 부른다. 이것을 바꾸는 코드는 기준 실행에서 그 호출을 더 보게 된다.
+- **문자열 `+`의 문법 규칙.** 타입 주석과 내장 객체를 믿는다(L1 참고). 주석과 다른 값이 들어오거나 내장 객체를 덮어쓴 코드에서는 숫자 `+`의 mutant를 놓친다.
 - **브라우저 모드.** 지원하지 않는다.
 - **실행 시간.**
   - mutant 수 × 관련 테스트 시간만큼 걸린다.

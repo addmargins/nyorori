@@ -202,8 +202,9 @@ test('double', () => { expect(double(3)).toBe(6) })
 
   test('does not mutate a `+` that joins string variables, by their types', ({ skip }) => {
     const tsconfig = '{ "compilerOptions": { "strict": true, "module": "nodenext", "noEmit": true }, "include": ["src"] }\n'
+    // Destructured, so only the types tell that `first + last` joins strings.
     const dir = project('types', { 'tsconfig.json': tsconfig, 'src/name.ts': 'export {}\n' }, {
-      'src/name.ts': `export function fullName(first: string, last: string): string {
+      'src/name.ts': `export function fullName({ first, last }: { first: string; last: string }): string {
   return first + last
 }
 
@@ -213,7 +214,7 @@ export function total(a: number, b: number): number {
 `,
       'test/name.test.ts': `import { expect, test } from 'vitest'
 import { fullName, total } from '../src/name'
-test('fullName', () => { expect(fullName('Ada ', 'Lovelace')).toBe('Ada Lovelace') })
+test('fullName', () => { expect(fullName({ first: 'Ada ', last: 'Lovelace' })).toBe('Ada Lovelace') })
 test('total', () => { expect(total(2, 3)).toBe(5) })
 `,
     })
