@@ -188,7 +188,16 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
     }
   }
 
+  // Chains whose value is used as a reference. Wrapping one in a conditional
+  // turns it into a plain value: `(o?.f)()` would lose `this`, and
+  // `delete (o?.x)` would not delete. Parents are visited first, so the set is
+  // filled before the chain is reached.
+  const references = new Set<Node>()
+
   function mutate(node: Node, parent: Node | null): void {
+    if (node.type === 'CallExpression') references.add(unwrapReference(node.callee))
+    else if (node.type === 'TaggedTemplateExpression') references.add(unwrapReference(node.tag))
+    else if (node.type === 'UnaryExpression' && node.operator === 'delete') references.add(unwrapReference(node.argument))
     switch (node.type) {
       case 'BinaryExpression': {
         const entry = BINARY[node.operator]
@@ -258,6 +267,7 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
         condition(node.test, ['false'])
         break
       case 'ChainExpression': {
+        if (references.has(node)) break
         for (const link of optionalLinks(node.expression)) {
           const from = link.type === 'MemberExpression' ? link.object : link.callee
           const at = findToken(code, from.end, link.end, '?.')
@@ -423,6 +433,15 @@ function isNode(value: unknown): value is Node {
 
 function unwrap(node: Node): Node {
   while (node.type === 'ParenthesizedExpression') node = node.expression
+  return node
+}
+
+/** Parentheses and type-only wrappers keep a member expression a reference. */
+function unwrapReference(node: Node): Node {
+  while (
+    node.type === 'ParenthesizedExpression' || node.type === 'TSAsExpression' || node.type === 'TSSatisfiesExpression' ||
+    node.type === 'TSNonNullExpression' || node.type === 'TSTypeAssertion'
+  ) node = node.expression
   return node
 }
 

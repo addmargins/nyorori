@@ -221,3 +221,33 @@ describe('instrument without semicolons', () => {
     for (const { id } of mutants) expect(evaluate(profiled, { ...state(id), prof: prof() })).toBe(evaluate(instrumented, state(id)))
   })
 })
+
+describe('optional chains used as references', () => {
+  // Wrapping these in a conditional would make them plain values.
+  const source = [
+    'function f(o, d, i) {',
+    '  const called = (o?.inner.f)()',
+    '  const tagged = (o?.inner.tag)`x`',
+    '  delete d?.x',
+    '  const keyed = (o?.list[i + 1])()',
+    '  return [called, tagged, keyed, "x" in d, o?.inner.v]',
+    '}',
+    'function main() { const o = { inner: { v: 7, f() { return this.v }, tag() { return this.v } }, list: [0, function () { return this === o.list }] }; try { return JSON.stringify(f(o, { x: 1 }, 0)) } catch (e) { return "throws " + e.constructor.name } }',
+  ].join('\n')
+  const { sites, mutants } = generate('file.js', source, new Set([2, 3, 4, 5, 6]), 1)
+  const instrumented = instrument('file.js', source, sites).code
+  const state = (active: number) => ({ active, limit: 0, hits: null, count: 0, exceeded: false })
+
+  test('keeps `this` and `delete` working, and still mutates the chain used as a value', () => {
+    expect(evaluate(source, state(0))).toBe('[7,7,true,false,7]')
+    expect(evaluate(instrumented, state(0))).toBe(evaluate(source, state(0)))
+    expect(mutants.filter((m) => m.operator === 'OptionalChaining').map((m) => m.line)).toEqual([6])
+    expect(mutants.some((m) => m.line === 5 && m.operator === 'Arithmetic')).toBe(true)
+  })
+
+  test.each(mutants.map((m) => ({ id: m.id, label: `${m.id} ${m.operator} ${m.description}` })))('mutant $label behaves like the source with only that change', ({ id }) => {
+    const site = sites.find((s) => s.mutants.some((p) => p.mutant.id === id))!
+    const planned = site.mutants.find((p) => p.mutant.id === id)!
+    expect(evaluate(instrumented, state(id))).toBe(evaluate(applyMutant(source, site, planned), state(0)))
+  })
+})
