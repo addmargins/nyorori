@@ -6,6 +6,7 @@ import { parseSync, type BinaryExpression, type Node } from 'oxc-parser'
 import { describe, expect, test, vi } from 'vitest'
 import { generate, typeQuestions } from '../src/mutate/generate.ts'
 import { askTypes, loadTypeScript, type FileQuestions, type Limits, type TypeScript } from '../src/mutate/typecheck.ts'
+import { addedLines } from './changes.ts'
 
 const DIR = path.join(import.meta.dirname, '..', '.tmp', 'typecheck')
 
@@ -277,9 +278,9 @@ describe('with TypeScript', () => {
       ['checked/label.js', ['7 `+` → `-`'], ['7 `+` → `-`', '7 `+` → `-`']],
     ] as const) {
       const code = FILES[name]!
-      const types = await askTypes(DIR, [typeQuestions(file(name), code, lines(code))])
-      expect(arithmetic(generate(file(name), code, lines(code), 1, types)), name).toEqual(typed)
-      expect(arithmetic(generate(file(name), code, lines(code), 1)), name).toEqual(untyped)
+      const types = await askTypes(DIR, [typeQuestions(file(name), code, addedLines(code, lines(code)))])
+      expect(arithmetic(generate(file(name), code, addedLines(code, lines(code)), 1, types)), name).toEqual(typed)
+      expect(arithmetic(generate(file(name), code, addedLines(code, lines(code)), 1)), name).toEqual(untyped)
     }
   })
 
@@ -360,12 +361,12 @@ describe('with TypeScript', () => {
     const code = FILES[name]!
     // Only the line of `user?.name` changed.
     const changed = new Set([code.split('\n').indexOf('    user?.name,') + 1])
-    const questions = typeQuestions(file(name), code, changed)
+    const questions = typeQuestions(file(name), code, addedLines(code, changed))
     expect(questions.guarded.map(({ start, end }) => code.slice(start, end))).toEqual(['user'])
     const types = await askTypes(DIR, [questions])
-    const rules = generate(file(name), code, changed, 1, types).sites.flatMap((site) => site.mutants.map((m) => m.profile?.rule))
+    const rules = generate(file(name), code, addedLines(code, changed), 1, types).sites.flatMap((site) => site.mutants.map((m) => m.profile?.rule))
     expect(rules).toEqual([{ kind: 'nonNullish', subject: 'user', type: 'User' }])
-    expect(generate(file(name), code, changed, 1).sites[0]!.mutants[0]!.profile?.rule).toEqual({ kind: 'nonNullish', subject: 'user', type: undefined })
+    expect(generate(file(name), code, addedLines(code, changed), 1).sites[0]!.mutants[0]!.profile?.rule).toEqual({ kind: 'nonNullish', subject: 'user', type: undefined })
   })
 
   test('the TypeScript process is gone once the answers are in', async ({ skip }) => {
@@ -397,9 +398,9 @@ describe('without TypeScript', () => {
       throw new Error('not expected')
     })
     // Only the signature changed; the `+` are on lines 2 to 4.
-    const signature = typeQuestions(file('src/mixed.ts'), FILES['src/mixed.ts']!, new Set([1]))
+    const signature = typeQuestions(file('src/mixed.ts'), FILES['src/mixed.ts']!, addedLines(FILES['src/mixed.ts']!, [1]))
     // Annotated as strings, so the syntax tells.
-    const annotated = typeQuestions(file('scripts/loose.ts'), FILES['scripts/loose.ts']!, new Set([2]))
+    const annotated = typeQuestions(file('scripts/loose.ts'), FILES['scripts/loose.ts']!, addedLines(FILES['scripts/loose.ts']!, [2]))
     const outside = mkdtempSync(path.join(os.tmpdir(), 'nyorori-typecheck-'))
     try {
       const plus = [{ left: { start: 30, end: 31 }, right: { start: 34, end: 35 } }]

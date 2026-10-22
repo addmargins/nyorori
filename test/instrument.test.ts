@@ -5,6 +5,7 @@ import { generate } from '../src/mutate/generate.ts'
 import { instrument } from '../src/mutate/instrument.ts'
 import { SLOTS } from '../src/mutate/profile.ts'
 import { OPERATORS, type Operator } from '../src/types.ts'
+import { addedLines } from './changes.ts'
 
 const SOURCE = `function compare(a, b) { return a >= b && a !== 3 }
 function arith(x) { return -x * 2 + x % 3 - (x / 4) }
@@ -29,7 +30,7 @@ function evaluate(code: string, state: object): string {
 }
 
 describe('instrument', () => {
-  const { sites, mutants } = generate('file.js', SOURCE, changed, 1)
+  const { sites, mutants } = generate('file.js', SOURCE, addedLines(SOURCE, changed), 1)
   const instrumented = instrument('file.js', SOURCE, sites).code
   const state = (active: number) => ({ active, limit: 0, hits: null, count: 0, exceeded: false })
 
@@ -147,7 +148,7 @@ globalThis.main = main`
   // Mutate all of probe() and the classes; main() only drives them.
   const lines = source.split('\n')
   const changed = new Set(lines.map((_, i) => i + 1).filter((line) => line < lines.indexOf('function main() {') + 1))
-  const { sites, mutants } = generate('file.js', source, changed, 1)
+  const { sites, mutants } = generate('file.js', source, addedLines(source, changed), 1)
   const plain = instrument('file.js', source, sites).code
   const profiled = instrument('file.js', source, sites, { profile: true }).code
   const state = (active: number) => ({ active, limit: 0, hits: {}, count: 0, exceeded: false, prof: new Float64Array((mutants.length + 1) * SLOTS) })
@@ -199,7 +200,7 @@ describe('instrument without semicolons', () => {
     '}',
     'function main() { return JSON.stringify([f(0), f(1), f(-1)]) }',
   ].join('\n')
-  const { sites, mutants } = generate('file.js', source, new Set([5, 7, 8, 9]), 1)
+  const { sites, mutants } = generate('file.js', source, addedLines(source, [5, 7, 8, 9]), 1)
   const instrumented = instrument('file.js', source, sites).code
   const state = (active: number) => ({ active, limit: 0, hits: null, count: 0, exceeded: false })
 
@@ -236,7 +237,7 @@ describe('optional chains used as references', () => {
     '}',
     'function main() { const o = { inner: { v: 7, f() { return this.v }, tag() { return this.v } }, list: [0, function () { return this === o.list }] }; try { return JSON.stringify(f(o, { x: 1 }, 0)) } catch (e) { return "throws " + e.constructor.name } }',
   ].join('\n')
-  const { sites, mutants } = generate('file.js', source, new Set([2, 3, 4, 5, 6]), 1)
+  const { sites, mutants } = generate('file.js', source, addedLines(source, [2, 3, 4, 5, 6]), 1)
   const instrumented = instrument('file.js', source, sites).code
   const state = (active: number) => ({ active, limit: 0, hits: null, count: 0, exceeded: false })
 
@@ -289,7 +290,7 @@ function main() {
 }`
   const lines = source.split('\n')
   const changed = new Set(lines.map((_, i) => i + 1).filter((line) => line < lines.indexOf('function main() {') + 1))
-  const { sites, mutants } = generate('file.js', source, changed, 1)
+  const { sites, mutants } = generate('file.js', source, addedLines(source, changed), 1)
   const plain = instrument('file.js', source, sites).code
   const profiled = instrument('file.js', source, sites, { profile: true }).code
   const state = (active: number) => ({ active, limit: 0, hits: null, count: 0, exceeded: false, prof: new Float64Array((mutants.length + 1) * SLOTS) })
@@ -331,7 +332,7 @@ async function main() {
   }
   return JSON.stringify(out)
 }`
-    const result = generate('file.js', asyncSource, new Set([2, 3, 4]), 1)
+    const result = generate('file.js', asyncSource, addedLines(asyncSource, [2, 3, 4]), 1)
     const code = instrument('file.js', asyncSource, result.sites).code
     const profiledCode = instrument('file.js', asyncSource, result.sites, { profile: true }).code
     const run = (text: string, active: number): Promise<string> => vm.runInNewContext(`${text}\nmain()`, { __nyorori: state(active) })

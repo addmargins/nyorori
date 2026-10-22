@@ -1,12 +1,13 @@
 import { describe, expect, test } from 'vitest'
 import { generate } from '../src/mutate/generate.ts'
+import { addedLines, changes } from './changes.ts'
 
 function all(code: string): Set<number> {
   return new Set(code.split('\n').map((_, i) => i + 1))
 }
 
 function mutants(code: string, changed = all(code), file = 'file.ts'): string[] {
-  return generate(file, code, changed, 1).mutants.map((m) => `${m.line}:${m.column} ${m.operator} ${m.description}`)
+  return generate(file, code, addedLines(code, changed), 1).mutants.map((m) => `${m.line}:${m.column} ${m.operator} ${m.description}`)
 }
 
 describe('operators', () => {
@@ -181,7 +182,7 @@ describe('Regex', () => {
     // Out of order: oxc parses it, but no engine compiles it, so nothing is mutated.
     expect(regex('/[bc]{2,1}/')).toEqual([])
     // An emptied pattern is `(?:)`, not the comment `//`.
-    const { sites } = generate('file.js', 'export function f(s) {\n  return /^/.test(s)\n}', new Set([2]), 1)
+    const { sites } = generate('file.js', 'export function f(s) {\n  return /^/.test(s)\n}', addedLines('export function f(s) {\n  return /^/.test(s)\n}', [2]), 1)
     expect(sites.flatMap((site) => site.mutants.filter((m) => m.mutant.operator === 'Regex').map((m) => `${m.mutant.description}: ${m.replacement}`))).toEqual(['`^` removed: /(?:)/'])
   })
 
@@ -191,7 +192,7 @@ describe('Regex', () => {
 })
 
 describe('scope', () => {
-  test('only anchors on changed lines', () => {
+  test('only mutates sites on changed lines', () => {
     const code = ['function f(a) {', '  if (a > 1) return 1', '  return a === 2', '}'].join('\n')
     expect(mutants(code, new Set([3]))).toEqual(['3:12 Equality `===` → `!==`'])
   })
@@ -224,6 +225,98 @@ describe('scope', () => {
       '}',
     ].join('\n')
     expect(mutants(code)).toEqual(['5:22 FunctionBody body → `return`', '5:31 CallUnwrap `f<true>(a satisfies false)` → `a satisfies false`'])
+  })
+})
+
+describe('scope of a change', () => {
+  // What a branch that turns `before` into `after` gets mutated.
+  const changed = (before: string, after: string) =>
+    generate('file.ts', after, changes(before, after), 1).mutants.map((m) => `${m.line}:${m.column} ${m.operator} ${m.description}`)
+
+  test('leaves alone an expression next to a replaced argument', () => {
+    // es-toolkit PR 2047: `arr.length - 1` → `arr.length + 1` was an equivalent mutant of untouched code.
+    const before = [
+      'export function lastIndex(arr: number[], fromIndex: number): number {',
+      '  if (fromIndex < 0) {',
+      '    fromIndex = Math.max(arr.length + fromIndex, 0)',
+      '  } else {',
+      '    fromIndex = Math.min(fromIndex, arr.length - 1)',
+      '  }',
+      '  return fromIndex',
+      '}',
+    ].join('\n')
+    const after = before
+      .replace(' {\n  if', ' {\n  const index = toInteger(fromIndex)\n  if')
+      .replace('arr.length + fromIndex', 'arr.length + index')
+      .replace('Math.min(fromIndex', 'Math.min(index')
+    expect(changed(before, after)).toEqual([
+      '2:17 CallUnwrap `toInteger(fromIndex)` → `fromIndex`',
+      '4:22 CallUnwrap `Math.max(arr.length + index, 0)` → `arr.length + index`',
+      '4:37 Arithmetic `+` → `-`',
+      // The call holds `index`; `arr.length - 1` does not.
+      '6:22 CallUnwrap `Math.min(index, arr.length - 1)` → `index`',
+    ])
+  })
+
+  test('mutates the expressions around a changed operand, wherever their anchors are', () => {
+    const before = 'export function f(a: number, limit: number, max: number) {\n  if (a < limit) return 1\n  return (\n    a > 0 &&\n    a < limit\n  )\n}\n'
+    expect(changed(before, before.replaceAll('a < limit', 'a < max'))).toEqual([
+      '2:7 Condition `a < max` → `true`',
+      '2:7 Condition `a < max` → `false`',
+      '2:9 ComparisonBoundary `<` → `<=`',
+      // Anchored on line 4, which did not change.
+      '4:11 Logical `&&` → `||`',
+      '5:7 ComparisonBoundary `<` → `<=`',
+    ])
+    // Deleting an operand changes the expressions around the place.
+    expect(changed('export function f(a, b, c) {\n  if (a && b && c) return 1\n}\n', 'export function f(a, b, c) {\n  if (a && c) return 1\n}\n')).toEqual([
+      '2:7 Condition `a && c` → `true`',
+      '2:7 Condition `a && c` → `false`',
+      '2:9 Logical `&&` → `||`',
+    ])
+  })
+
+  test('mutates nothing in a reformatted function', () => {
+    const before = 'export function clamp(x: number, lo: number, hi: number): number { if (x < lo) return lo; return x > hi ? hi : x }\n'
+    const after = 'export function clamp(x: number, lo: number, hi: number): number {\n  if (x < lo) {\n    return lo;\n  }\n  return x > hi\n    ? hi\n    : x;\n}\n'
+    expect(changed(before, after)).toEqual([])
+  })
+
+  test('mutates all of a new function, its body included', () => {
+    const before = 'export function one(): number {\n  return 1\n}\n'
+    const added = 'export function isEven(n: number): boolean {\n  return n % 2 === 0\n}\n'
+    const mutated = changed(before, `${before}\n${added}`)
+    expect(mutated).toEqual([
+      '5:44 FunctionBody body → `return`',
+      '6:16 Equality `===` → `!==`',
+      '6:12 Arithmetic `%` → `*`',
+    ])
+    // The same as when every line of it counts as changed, four lines down.
+    expect(mutants(added).map((m) => m.replace(/^\d+/, (line) => String(Number(line) + 4)))).toEqual(mutated)
+  })
+
+  test('mutates a function body when the header changed, a method name included', () => {
+    const before = 'export class A {\n  get size() {\n    return this.n + 1\n  }\n  f(a) {\n    return a > 1\n  }\n}\n'
+    expect(changed(before, before.replace('size', 'length').replace('f(a)', 'f(a, b)').replace('a > 1', 'a > 2'))).toEqual([
+      '2:16 FunctionBody body → `return`',
+      '5:11 FunctionBody body → `return`',
+      '6:14 ComparisonBoundary `>` → `>=`',
+    ])
+    // Only the body changed: the body site stays out.
+    expect(changed(before, before.replace('a > 1', 'a > 2'))).toEqual(['6:14 ComparisonBoundary `>` → `>=`'])
+  })
+
+  test('leaves the call around a callback whose block body changed to the callback', () => {
+    const before = 'export function f(xs) {\n  xs.forEach((x) => {\n    a(x)\n  })\n  xs.forEach((x) => a(x))\n  return xs.some((x) => x.done)\n}\n'
+    const after = before.replaceAll('a(x)', 'b(x)').replace('x.done', 'x.ok')
+    expect(changed(before, after)).toEqual([
+      '3:5 CallStatement `b(x)` removed',
+      // An expression body is part of the expression around it.
+      '5:6 CallStatement `xs.forEach((x) => b(x))` removed',
+      '5:21 FunctionBody `=> b(x)` → `=> undefined`',
+      '5:21 CallUnwrap `b(x)` → `x`',
+      '6:25 FunctionBody `=> x.ok` → `=> undefined`',
+    ])
   })
 })
 
@@ -289,12 +382,25 @@ describe('suppressions', () => {
       '  /* nyorori-ignore-next-line Logical -- old */',
       '}',
     ].join('\n')
-    const result = generate('f.ts', code, new Set([2, 3]), 1)
+    const result = generate('f.ts', code, addedLines(code, [2, 3]), 1)
     expect(result.suppressions).toEqual([
       { file: 'f.ts', line: 2, targetLine: 3, operators: ['ComparisonBoundary', 'Equality'], reason: 'boundary is unreachable', isNew: true },
       { file: 'f.ts', line: 4, targetLine: 5, operators: ['Logical'], reason: 'old', isNew: false },
     ])
     expect(result.problems).toEqual([])
+  })
+
+  test('sets apart new suppressions of lines the branch only reformatted', () => {
+    const before = 'export function f(a) {\n  // nyorori-ignore-next-line ComparisonBoundary -- callers check\n  return a > 1\n}\n'
+    // Re-indented, the comment is on a changed line, so it is new; but no mutant of the line it targets is in scope.
+    const indented = before.replaceAll('\n  ', '\n    ')
+    const result = generate('f.ts', indented, changes(before, indented), 1)
+    expect(result.mutants).toEqual([])
+    expect(result.suppressions).toMatchObject([{ line: 2, targetLine: 3, isNew: true }])
+    expect(result.reformatted).toEqual(result.suppressions)
+    // When the code it targets changed, a suppression that matches nothing there is stale.
+    const edited = indented.replace('a > 1', 'a + 1')
+    expect(generate('f.ts', edited, changes(before, edited), 1).reformatted).toEqual([])
   })
 
   test('accepts the call and regex operators', () => {
@@ -304,7 +410,7 @@ describe('suppressions', () => {
       '  log(trim(s), /a/i)',
       '}',
     ].join('\n')
-    const result = generate('f.js', code, all(code), 1)
+    const result = generate('f.js', code, addedLines(code, all(code)), 1)
     expect(result.problems).toEqual([])
     expect(result.suppressions.map((s) => s.operators)).toEqual([['CallUnwrap', 'CallStatement', 'Regex']])
     expect(result.mutants.filter((m) => m.line === 3).map((m) => m.operator)).toEqual(['CallStatement', 'CallUnwrap', 'Regex'])
@@ -316,7 +422,7 @@ describe('suppressions', () => {
       '// nyorori-ignore-next-line Nope -- why',
       '// nyorori-ignore everything',
     ].join('\n')
-    expect(generate('f.ts', code, all(code), 1).problems.map((p) => `${p.line} ${p.message}`)).toEqual([
+    expect(generate('f.ts', code, addedLines(code, all(code)), 1).problems.map((p) => `${p.line} ${p.message}`)).toEqual([
       '1 Malformed suppression. Use `nyorori-ignore-next-line <Operator>[, <Operator>] -- <reason>`.',
       '2 Unknown operator in suppression: Nope.',
       '3 Malformed suppression. Use `nyorori-ignore-next-line <Operator>[, <Operator>] -- <reason>`.',

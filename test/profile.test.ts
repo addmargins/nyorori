@@ -4,6 +4,7 @@ import { generate } from '../src/mutate/generate.ts'
 import { instrument } from '../src/mutate/instrument.ts'
 import { CLASS, mergeProfile, predict, SLOTS, type Prediction, type ProbeRecord, type Rule } from '../src/mutate/profile.ts'
 import type { Operator } from '../src/types.ts'
+import { addedLines } from './changes.ts'
 
 const UNPROFILED = new Set<Operator>(['FunctionBody', 'CallUnwrap', 'CallStatement', 'Regex'])
 
@@ -26,7 +27,7 @@ function predictions(code: string, calls: string): string[] {
 globalThis.main = main`
   const source = code + driver
   const changed = new Set(code.split('\n').map((_, i) => i + 1))
-  const { sites, mutants } = generate('file.js', source, changed, 1)
+  const { sites, mutants } = generate('file.js', source, addedLines(source, changed), 1)
   const run = (instrumented: string, state: object) => vm.runInNewContext(`${instrumented}\nmain()`, { __nyorori: state }, { timeout: 500 })
   const state = (active: number) => ({ active, limit: 0, hits: {} as Record<string, number>, count: 0, exceeded: false, prof: new Float64Array((mutants.length + 1) * SLOTS) })
 

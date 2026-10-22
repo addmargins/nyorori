@@ -2,7 +2,7 @@ import { fork, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { changedLines, gitRoot, mergeBase } from './git.ts'
+import { diffFiles, fileChanges, gitRoot, mergeBase } from './git.ts'
 import { generate, ParseError, typeQuestions, type PlannedMutant } from './mutate/generate.ts'
 import { instrument, InstrumentError } from './mutate/instrument.ts'
 import { mergeProfile, predict, type ProbeRecord } from './mutate/profile.ts'
@@ -70,7 +70,7 @@ export async function run(options: RunOptions): Promise<Report> {
   } catch {
     throw new RunError(`Cannot find a merge base between ${options.base} and HEAD. In GitHub Actions, check out with \`fetch-depth: 0\`.`)
   }
-  const changed = changedLines(root, base)
+  const changed = diffFiles(root, base)
   const relative = (file: string) => path.relative(repo, file)
 
   const candidates = [...changed.keys()]
@@ -101,24 +101,29 @@ export async function run(options: RunOptions): Promise<Report> {
     const plans: FilePlan[] = []
     const mutants: Mutant[] = []
     const planned = new Map<number, PlannedMutant>()
-    const sources = session.eligible.map((file) => ({ file, code: readFileSync(file, 'utf8') }))
+    const reformatted = new Set<Suppression>()
+    const sources = session.eligible.map((file) => {
+      const code = readFileSync(file, 'utf8')
+      return { file, code, changes: fileChanges(repo, changed.get(file)!, code) }
+    })
     let types: TypeOracle | undefined
     if (options.types) {
       // Generation is synchronous, so the type checker answers everything it will ask beforehand.
-      const answers = await askTypes(root, sources.map(({ file, code }) => typeQuestions(file, code, changed.get(file)!)))
+      const answers = await askTypes(root, sources.map(({ file, code, changes }) => typeQuestions(file, code, changes)))
       report.types = answers.usage
       types = answers
     }
-    for (const { file, code } of sources) {
+    for (const { file, code, changes } of sources) {
       let generated: ReturnType<typeof generate>
       try {
-        generated = generate(file, code, changed.get(file)!, mutants.length + 1, types)
+        generated = generate(file, code, changes, mutants.length + 1, types)
       } catch (error) {
         if (error instanceof ParseError) throw new RunError(`Cannot parse ${relative(file)}: ${error.message}`)
         throw error
       }
       report.equivalent.push(...generated.equivalent)
       report.suppressions.push(...generated.suppressions)
+      for (const suppression of generated.reformatted) reformatted.add(suppression)
       report.problems.push(...generated.problems)
       if (generated.mutants.length === 0) continue
       mutants.push(...generated.mutants)
@@ -144,7 +149,7 @@ export async function run(options: RunOptions): Promise<Report> {
     let results: MutantResult[] = mutants.map((mutant) => ({ ...mutant, status: 'NoCoverage', suppression: suppressionOf(mutant), tests: [] }))
     report.results = results
     if (options.dryRun || results.length === 0) {
-      reportUnusedSuppressions(report)
+      reportUnusedSuppressions(report, reformatted)
       return report
     }
 
@@ -198,7 +203,7 @@ export async function run(options: RunOptions): Promise<Report> {
       return true
     })
     report.results = results
-    reportUnusedSuppressions(report)
+    reportUnusedSuppressions(report, reformatted)
 
     const runMutant = async (id: number, covered: { specs: SpecRef[]; hits: number }): Promise<MutantStatus> => {
       const request: Request = { type: 'run', active: id, limit: covered.hits * 100 + 10_000, collect: false, profile: 0, specs: covered.specs }
@@ -255,11 +260,14 @@ export async function run(options: RunOptions): Promise<Report> {
   }
 }
 
-/** A suppression this PR added that matches no judged mutant would only pile up. */
-function reportUnusedSuppressions(report: Report): void {
+/**
+ * A suppression this PR added that matches no judged mutant would only pile
+ * up. One above a line the PR only reformatted cannot match anything here.
+ */
+function reportUnusedSuppressions(report: Report, reformatted: ReadonlySet<Suppression>): void {
   const used = new Set(report.results.map((result) => result.suppression))
   for (const suppression of report.suppressions) {
-    if (suppression.isNew && !used.has(suppression)) {
+    if (suppression.isNew && !used.has(suppression) && !reformatted.has(suppression)) {
       report.problems.push({
         file: suppression.file,
         line: suppression.line,

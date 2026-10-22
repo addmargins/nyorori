@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from 'vitest'
 import { generate } from '../src/mutate/generate.ts'
 import type { PlusKind, TypeOracle } from '../src/mutate/typecheck.ts'
+import { addedLines } from './changes.ts'
 
 /**
  * The lines whose `+` generate() mutates; every line counts as changed. Mutants
@@ -8,7 +9,8 @@ import type { PlusKind, TypeOracle } from '../src/mutate/typecheck.ts'
  * empty, the unused functions here minify away with all their mutants.
  */
 function mutated(lines: string[], file = 'f.ts', types?: TypeOracle): string[] {
-  const { mutants, equivalent } = generate(file, lines.join('\n'), new Set(lines.map((_, i) => i + 1)), 1, types)
+  const code = lines.join('\n')
+  const { mutants, equivalent } = generate(file, code, addedLines(code, lines.map((_, i) => i + 1)), 1, types)
   return [...mutants, ...equivalent]
     .filter((m) => m.description === '`+` → `-`')
     .map((m) => lines[m.line - 1]!.trim())
@@ -97,7 +99,7 @@ describe('with a type oracle', () => {
     const types = oracle('numeric')
     expect(mutated(annotated, 'f.ts', types)).toEqual([])
     const code = "function f(s, n) {\n  return 'a' + n\n  return s + n\n}"
-    generate('f.ts', code, new Set([1, 2]), 1, types)
+    generate('f.ts', code, addedLines(code, [1, 2]), 1, types)
     expect(types.plus).not.toHaveBeenCalled()
   })
 })

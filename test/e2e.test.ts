@@ -137,6 +137,61 @@ export function untested(n: number): number {
     ])
   })
 
+  test('mutates the code that changed, not what a changed line or a reformatted function only kept', () => {
+    const base = `export function lastIndex(arr: number[], fromIndex: number): number {
+  if (fromIndex < 0) {
+    fromIndex = Math.max(arr.length + fromIndex, 0)
+  } else {
+    fromIndex = Math.min(fromIndex, arr.length - 1)
+  }
+  return fromIndex
+}
+
+export function clamp(x: number, lo: number, hi: number): number {
+  // nyorori-ignore-next-line ComparisonBoundary -- equal bounds give the same value
+  return x < lo ? lo : x > hi ? hi : x
+}
+`
+    // The pattern of es-toolkit PR 2047, a re-indented function with its suppression, and a new function.
+    const head = `export function lastIndex(arr: number[], fromIndex: number): number {
+  const index = Math.trunc(fromIndex)
+  if (fromIndex < 0) {
+    fromIndex = Math.max(arr.length + index, 0)
+  } else {
+    // nyorori-ignore-next-line Arithmetic -- the last index
+    fromIndex = Math.min(index, arr.length - 1)
+  }
+  return fromIndex
+}
+
+export function clamp(x: number, lo: number, hi: number): number {
+    // nyorori-ignore-next-line ComparisonBoundary -- equal bounds give the same value
+    return x < lo
+      ? lo
+      : x > hi ? hi : x
+}
+
+export function isEven(n: number): boolean {
+  return n % 2 === 0
+}
+`
+    const dir = project('tokens', { 'src/find.ts': base }, { 'src/find.ts': head })
+    const { status, report, output } = nyorori(dir, '--dry-run')
+    expect(status, output).toBe(0)
+    expect(report!.results.map((r) => `${r.line}:${r.column} ${r.operator} ${r.description}`)).toEqual([
+      '2:22 CallUnwrap `Math.trunc(fromIndex)` → `fromIndex`',
+      '4:22 CallUnwrap `Math.max(arr.length + index, 0)` → `arr.length + index`',
+      '4:37 Arithmetic `+` → `-`',
+      '7:22 CallUnwrap `Math.min(index, arr.length - 1)` → `index`',
+      '19:44 FunctionBody body → `return`',
+      '20:16 Equality `===` → `!==`',
+      '20:12 Arithmetic `%` → `*`',
+    ])
+    // `arr.length - 1` is no longer in scope, so its new suppression should go; the re-indented one stays.
+    expect(report!.problems.map((p) => `${p.line} ${p.message}`)).toEqual(['6 Suppression matches no mutant of Arithmetic on line 7. Remove it.'])
+    expect(report!.suppressions.map((s) => `${s.line} ${s.isNew}`)).toEqual(['6 true', '13 true'])
+  })
+
   test('mutates the wrapper calls, call statements and regex flags that fixes add', () => {
     // The kinds of fixes that got no mutant at all when upstream PRs were replayed.
     const base = `export function first(values) {
@@ -718,13 +773,13 @@ export function total(item) {
 
   describe('verdicts do not leak between runs', () => {
     const base = {
-      'src/a.ts': 'export function inc(x: number): number {\n  return x + 1\n}\n',
+      'src/a.ts': 'export function inc(x: number): number {\n  return 1 + x\n}\n',
       'src/b.ts': 'export function isAdult(age: number): boolean {\n  return age > 17\n}\n',
       'test/a.test.ts': "import { expect, test } from 'vitest'\nimport { inc } from '../src/a'\ntest('inc', () => { expect(inc(1)).toBe(2) })\n",
       'test/b.test.ts': "import { expect, test } from 'vitest'\nimport { isAdult } from '../src/b'\ntest('isAdult', () => { expect(isAdult(30)).toBe(true); expect(isAdult(3)).toBe(false) })\n",
     }
     const head = {
-      'src/a.ts': 'export function inc(x: number): number {\n  return x + 1 \n}\n',
+      'src/a.ts': 'export function inc(x: number): number {\n  return x + 1\n}\n',
       'src/b.ts': 'export function isAdult(age: number): boolean {\n  return age >= 18\n}\n',
     }
     const expected = [

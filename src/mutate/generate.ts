@@ -1,6 +1,7 @@
 import {
   parseSync,
   visitorKeys,
+  type BinaryExpression,
   type CallExpression,
   type Comment,
   type Expression,
@@ -11,6 +12,7 @@ import {
   type Span,
 } from 'oxc-parser'
 import { ScopeTracker, type ScopeTrackerNode } from 'oxc-walker'
+import { changesIn, lineStarts, type Changes } from '../diff.ts'
 import { isOperator, type EquivalentMutant, type Mutant, type Operator, type Suppression, type SuppressionProblem } from '../types.ts'
 import { dropEquivalent } from './equivalent.ts'
 import { Strings, type Bindings } from './infer.ts'
@@ -50,6 +52,12 @@ export interface GenerateResult {
   /** Mutants dropped because they minify to the original code; they get no id and no site. */
   equivalent: EquivalentMutant[]
   suppressions: Suppression[]
+  /**
+   * New suppressions whose target line the branch changed only in whitespace
+   * or comments, like a block it re-indented: no mutant of that line is in
+   * scope, so matching none says nothing about the suppression.
+   */
+  reformatted: Suppression[]
   problems: SuppressionProblem[]
 }
 
@@ -113,14 +121,15 @@ const SUPPRESS_PREFIX = 'nyorori-ignore'
 const SUPPRESS_RE = /^nyorori-ignore-next-line\s+([A-Za-z]+(?:\s*,\s*[A-Za-z]+)*)\s+--\s+(\S.*)$/
 
 /**
- * Builds the mutants whose anchor lies on one of `changed` lines, plus the
- * suppression comments that apply to them. Mutants that minify to the
- * original code are set aside in `equivalent`. Ids start at `firstId`.
- * Where the syntax cannot tell string `+` from numeric `+`, `types` answers
- * from the operand types (see typeQuestions).
+ * Builds the mutants of the code that `changes` touch, plus the suppression
+ * comments that apply to them. An expression site is in scope when its text
+ * holds a change; a function body when the function's header does (see
+ * plan). Mutants that minify to the original code are set aside in
+ * `equivalent`. Ids start at `firstId`. Where the syntax cannot tell string
+ * `+` from numeric `+`, `types` answers from the operand types (see typeQuestions).
  */
-export function generate(file: string, code: string, changed: ReadonlySet<number>, firstId: number, types = NO_TYPES): GenerateResult {
-  const { parsed, lines, sites } = plan(file, code, changed, types)
+export function generate(file: string, code: string, changes: Changes, firstId: number, types = NO_TYPES): GenerateResult {
+  const { parsed, lines, sites } = plan(file, code, changes, types)
   const sorted = [...sites.values()].sort((a, b) => a.start - b.start || b.end - a.end)
   // Before ids are assigned, so each remaining site keeps a contiguous id range.
   const { sites: ordered, equivalent } = dropEquivalent(file, code, sorted)
@@ -135,18 +144,20 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
     }
   }
 
-  const { suppressions, problems } = readSuppressions(file, parsed.comments, lines, changed)
-  return { sites: ordered, mutants, equivalent, suppressions, problems }
+  const { suppressions, problems } = readSuppressions(file, parsed.comments, lines, changes.lines)
+  const reformatted = suppressions.filter(({ isNew, targetLine }) => isNew && changes.lines.has(targetLine) &&
+    changesIn(changes.ranges, lines[targetLine - 1] ?? code.length, lines[targetLine] ?? code.length).length === 0)
+  return { sites: ordered, mutants, equivalent, suppressions, reformatted, problems }
 }
 
 /**
- * What generate() will ask `types` about `file`: the `+` on changed lines of
- * mutated code where the syntax cannot tell, and the values that the `?.` and
- * `??` mutants there guard. The type checker answers them all in one pass
+ * What generate() will ask `types` about `file`: the changed `+` of mutated
+ * code where the syntax cannot tell, and the values that the changed `?.` and
+ * `??` mutants guard. The type checker answers them all in one pass
  * before generation, which stays synchronous. A file that does not parse has
  * no questions; generate() reports it.
  */
-export function typeQuestions(file: string, code: string, changed: ReadonlySet<number>): FileQuestions {
+export function typeQuestions(file: string, code: string, changes: Changes): FileQuestions {
   const questions: FileQuestions = { file, plus: [], guarded: [] }
   const recorder: TypeOracle = {
     plus: (_, left, right) => {
@@ -159,15 +170,23 @@ export function typeQuestions(file: string, code: string, changed: ReadonlySet<n
     },
   }
   try {
-    plan(file, code, changed, recorder)
+    plan(file, code, changes, recorder)
   } catch (error) {
     if (!(error instanceof ParseError)) throw error
   }
   return questions
 }
 
-/** The sites and mutants of `file` before TCE and ids, the part of generate() that asks `types`. */
-function plan(file: string, code: string, changed: ReadonlySet<number>, types: TypeOracle): { parsed: ParseResult; lines: number[]; sites: Map<string, Site> } {
+/**
+ * The sites and mutants of `file` before TCE and ids, the part of generate()
+ * that asks `types`. A mutant is made only where its site holds a change:
+ * `a < max` when `max` replaced another operand, but not `arr.length - 1`
+ * when only an argument next to it changed (see `changed`). A body site, whose
+ * mutant skips the whole body, would otherwise come with every edit inside a
+ * function; it takes the function's header instead, from its start (or its
+ * method name) to the `{`.
+ */
+function plan(file: string, code: string, changes: Changes, types: TypeOracle): { parsed: ParseResult; lines: number[]; sites: Map<string, Site> } {
   const parsed = parseSync(file, code)
   if (parsed.errors.length > 0) {
     throw new ParseError(parsed.errors[0]!.message)
@@ -178,6 +197,38 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
   const statements = new Map<number, ExpressionStatement>()
   const valueProbes = new Map<string, Probe>()
 
+  // The block bodies of functions, by start (filled by the first walk below).
+  const blocks: Span[] = []
+
+  /**
+   * Whether `span` holds a change of its own. One in the block body of a
+   * function nested in it does not count: those statements belong to that
+   * function and its sites, or `xs.forEach((x) => { … })` would be removed for
+   * every edit in the callback. An expression body is part of the expression.
+   */
+  function changed(span: Span): boolean {
+    return changesIn(changes.ranges, span.start, span.end).some(({ start, end }) =>
+      !inNestedBlock(span, Math.max(start, span.start), Math.min(end, span.end)))
+  }
+
+  function inNestedBlock(span: Span, start: number, end: number): boolean {
+    let lo = 0
+    let hi = blocks.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (blocks[mid]!.start >= span.start) hi = mid
+      else lo = mid + 1
+    }
+    for (let i = lo; i < blocks.length && blocks[i]!.start <= start; i++) {
+      const block = blocks[i]!
+      // A header holds no body, only the `{` of its own.
+      if (block.end > span.end) continue
+      // A deletion right before the `{` or after the `}` is outside.
+      if (start === end ? block.start < start && start < block.end : end <= block.end) return true
+    }
+    return false
+  }
+
   function add(
     site: { start: number; end: number },
     kind: Site['kind'],
@@ -185,9 +236,10 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
     operator: Operator,
     replacement: string,
     description: string,
+    scope: Span = site,
   ): PlannedMutant | undefined {
+    if (!changed(scope)) return undefined
     const { line, column } = position(anchor)
-    if (!changed.has(line)) return undefined
     const key = `${site.start}:${site.end}:${kind}`
     let target = sites.get(key)
     if (!target) {
@@ -222,14 +274,15 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
    * settles it where it is certain that an operand is a string (infer.ts);
    * the checker could not answer otherwise there, so only the rest is asked.
    */
-  function isConcatenation(left: Node, right: Node, at: number): boolean {
+  function isConcatenation(node: BinaryExpression): boolean {
+    const { left, right } = node
     // Only a `+` that can become a mutant is worth the question.
-    if (!changed.has(position(at).line)) return false
+    if (!changed(node)) return false
     if (strings.isString(left) || strings.isString(right)) return true
     return types.plus(file, left, right) === 'string'
   }
 
-  // Asked only for a mutant that exists and that the profile can settle, so it is on a changed line.
+  // Asked only for a mutant that exists and that the profile can settle, so it is in changed code.
   function nonNullableType(value: Node): string | undefined {
     const type = types.nonNullableType(file, value)
     return type === undefined ? undefined : snippet(type)
@@ -275,7 +328,7 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
         if ((node.operator === '*' || node.operator === '/') && (isNumber(right, 1) || isNumber(right, 1n))) break
         const at = findToken(code, left.end, right.start, node.operator)
         if (at < 0) break
-        if (node.operator === '+' && isConcatenation(left, right, at)) break
+        if (node.operator === '+' && isConcatenation(node)) break
         const planned = add(node, 'expression', at, operator, edit(node, at, at + node.operator.length, replacementOp),
           `\`${node.operator}\` → \`${replacementOp}\``)
         // `===` → `!==` changes every result; nothing to learn from the values.
@@ -394,14 +447,19 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
       case 'ArrowFunctionExpression': {
         const { body } = node
         if (!body) break
+        // A method's header starts with its name: `get size() {`, not `() {`.
+        const method = (parent?.type === 'MethodDefinition' || (parent?.type === 'Property' && (parent.method || parent.kind !== 'init'))) &&
+          parent.value === node
+        const start = method ? parent.start : node.start
         if (body.type === 'BlockStatement') {
           const [first] = body.body
           const onlyReturn = body.body.length === 1 && first?.type === 'ReturnStatement' && first.argument === null
           if (body.body.length === 0 || onlyReturn) break
           const at = body.start + 1
-          add({ start: at, end: at }, 'body', body.start, 'FunctionBody', '', 'body → `return`')
+          add({ start: at, end: at }, 'body', body.start, 'FunctionBody', '', 'body → `return`', { start, end: at })
         } else if (!isUndefined(body)) {
-          add(body, 'expression', body.start, 'FunctionBody', 'undefined', `\`=> ${snippet(text(body))}\` → \`=> undefined\``)
+          // The mutant replaces the expression, so a change in it counts, as in any expression site, and so does the header.
+          add(body, 'expression', body.start, 'FunctionBody', 'undefined', `\`=> ${snippet(text(body))}\` → \`=> undefined\``, { start, end: body.end })
         }
         break
       }
@@ -413,7 +471,13 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
   // The tracker records a name when the walk reaches its declaration, so a first
   // pass collects them all and the second also sees names declared below their
   // use: hoisted `var` and functions, or a module-level logger defined further down.
-  walk(parsed.program, null, undefined, scopes, () => undefined)
+  // It also finds the block bodies that `changed` leaves to the functions they belong to.
+  walk(parsed.program, null, undefined, scopes, (node) => {
+    if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') &&
+      node.body?.type === 'BlockStatement') blocks.push(node.body)
+    return undefined
+  })
+  blocks.sort((a, b) => a.start - b.start)
   scopes.freeze()
   walk<Context>(parsed.program, null, 'module', scopes, (node, parent, context) => {
     if (node.type === 'ExpressionStatement') statements.set(node.start, node)
@@ -686,12 +750,6 @@ export function findToken(code: string, from: number, to: number, token: string)
     }
   }
   return -1
-}
-
-export function lineStarts(code: string): number[] {
-  const starts = [0]
-  for (let i = 0; i < code.length; i++) if (code.charCodeAt(i) === 10) starts.push(i + 1)
-  return starts
 }
 
 export function toPosition(starts: number[], offset: number): { line: number; column: number } {

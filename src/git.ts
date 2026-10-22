@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import path from 'node:path'
+import { changedRanges, type Changes, type Hunk } from './diff.ts'
 
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', ['-c', 'core.quotePath=false', ...args], {
@@ -18,38 +19,99 @@ export function mergeBase(cwd: string, base: string): string {
   return git(cwd, ['merge-base', base, 'HEAD']).trim()
 }
 
+/** How one file differs from the base. */
+export interface FileDiff {
+  /** 1-based lines added or modified in the new version. */
+  lines: Set<number>
+  hunks: Hunk[]
+  /** The old version's blob; undefined for an added file. */
+  blob?: string
+}
+
 /**
- * Lines added or modified since `base`, keyed by absolute file path.
+ * The files changed since `base`, keyed by absolute path, and how.
  * Compares against the working tree, so uncommitted edits count as changes.
  */
-export function changedLines(cwd: string, base: string): Map<string, Set<number>> {
+export function diffFiles(cwd: string, base: string): Map<string, FileDiff> {
   const root = gitRoot(cwd)
-  const diff = git(root, ['diff', '--unified=0', '--no-color', '--no-ext-diff', '--find-renames', base, '--'])
+  // Explicit prefixes: `diff.noprefix` or `diff.mnemonicPrefix` in the user's config would change the headers.
+  const diff = git(root, ['diff', '--unified=0', '--no-color', '--no-ext-diff', '--find-renames', '--full-index', '--src-prefix=a/', '--dst-prefix=b/', base, '--'])
   return parseDiff(diff, root)
 }
 
-export function parseDiff(diff: string, root: string): Map<string, Set<number>> {
-  const result = new Map<string, Set<number>>()
-  let current: Set<number> | undefined
+/** What changed in a file whose new version is `code` (see changedRanges). */
+export function fileChanges(cwd: string, diff: FileDiff, code: string): Changes {
+  let before: string | undefined
+  if (diff.blob) {
+    try {
+      before = git(cwd, ['cat-file', 'blob', diff.blob])
+    } catch {
+      // Then every token of the changed lines counts as new, as when only lines were compared.
+    }
+  }
+  return { lines: diff.lines, ranges: changedRanges(before, code, diff.hunks) }
+}
+
+export function parseDiff(diff: string, root: string): Map<string, FileDiff> {
+  const result = new Map<string, FileDiff>()
+  let current: FileDiff | undefined
+  let blob: string | undefined
+  // The lines of the hunk being read: its text can look like a header (`--- a` removed as `---- a`).
+  let removed = 0
+  let added = 0
   for (const line of diff.split('\n')) {
+    if (removed > 0 && line.startsWith('-')) {
+      removed--
+      continue
+    }
+    if (added > 0 && line.startsWith('+')) {
+      added--
+      continue
+    }
+    if (line.startsWith('\\')) continue // \ No newline at end of file
+    removed = added = 0
+    if (line.startsWith('diff ')) {
+      current = undefined
+      blob = undefined
+      continue
+    }
+    const index = /^index ([0-9a-f]+)\.\./.exec(line)
+    if (index) {
+      blob = /^0+$/.test(index[1]!) ? undefined : index[1]
+      continue
+    }
     if (line.startsWith('+++ ')) {
-      const target = line.slice(4)
+      const target = unquote(line.slice(4))
       if (target === '/dev/null') {
         current = undefined
         continue
       }
-      const file = path.resolve(root, target.replace(/^b\//, ''))
-      current = new Set()
-      result.set(file, current)
+      current = { lines: new Set(), hunks: [], blob }
+      result.set(path.resolve(root, target.replace(/^b\//, '')), current)
       continue
     }
-    const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line)
+    const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line)
     if (hunk && current) {
-      const start = Number(hunk[1])
-      const count = hunk[2] === undefined ? 1 : Number(hunk[2])
-      for (let i = 0; i < count; i++) current.add(start + i)
+      const count = (value: string | undefined) => (value === undefined ? 1 : Number(value))
+      const oldCount = count(hunk[2])
+      const newStart = Number(hunk[3])
+      const newCount = count(hunk[4])
+      current.hunks.push({ oldStart: Number(hunk[1]), oldCount, newStart, newCount })
+      for (let i = 0; i < newCount; i++) current.lines.add(newStart + i)
+      removed = oldCount
+      added = newCount
     }
   }
-  for (const [file, lines] of result) if (lines.size === 0) result.delete(file)
+  // A file whose hunks only delete lines stays: the deletion can still change an expression around it.
+  for (const [file, { hunks }] of result) if (hunks.length === 0) result.delete(file)
   return result
+}
+
+/** A path as git writes it in a header: C-quoted when it has special characters, and followed by a tab when it has a space. */
+function unquote(name: string): string {
+  name = name.replace(/\t$/, '')
+  if (!name.startsWith('"') || !name.endsWith('"')) return name
+  const escapes: Record<string, string> = { a: '\x07', b: '\b', t: '\t', n: '\n', v: '\v', f: '\f', r: '\r', '"': '"', '\\': '\\' }
+  return name.slice(1, -1).replace(/\\([0-7]{3}|.)/g, (_, escape: string) =>
+    escape.length === 3 ? String.fromCharCode(Number.parseInt(escape, 8)) : (escapes[escape] ?? escape))
 }

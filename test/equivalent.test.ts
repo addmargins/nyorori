@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest'
 import { normalize } from '../src/mutate/equivalent.ts'
 import { generate } from '../src/mutate/generate.ts'
 import type { EquivalentMutant } from '../src/types.ts'
+import { addedLines } from './changes.ts'
 
 function all(code: string): Set<number> {
   return new Set(code.split('\n').map((_, i) => i + 1))
@@ -10,7 +11,7 @@ function all(code: string): Set<number> {
 const label = (m: EquivalentMutant) => `${m.line} ${m.operator} ${m.description}`
 
 function split(code: string, file = 'file.js'): { kept: string[]; equivalent: string[] } {
-  const result = generate(file, code, all(code), 1)
+  const result = generate(file, code, addedLines(code, all(code)), 1)
   return { kept: result.mutants.map(label), equivalent: result.equivalent.map(label) }
 }
 
@@ -48,7 +49,7 @@ describe('TCE drops mutants that minify to the original', () => {
 
   test('removes emptied sites and keeps ids contiguous per site', () => {
     const code = ['const DEBUG = false', 'export function f(i) {', '  if (DEBUG) { i++ }', '  return i > 0 ? i : -i', '}'].join('\n')
-    const result = generate('file.js', code, all(code), 7)
+    const result = generate('file.js', code, addedLines(code, all(code)), 7)
     expect(result.equivalent.map(label)).toEqual(['3 Condition `DEBUG` → `false`', '3 Update `++` → `--`'])
     expect(result.equivalent[0]).not.toHaveProperty('id')
     expect(result.mutants.map((m) => m.id)).toEqual([7, 8, 9, 10, 11, 12])
