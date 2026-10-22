@@ -30,7 +30,7 @@ jobs:
         #   exclude: |
         #     scripts/**
         #   max-mutants: 300
-        #   types: false # tsrs 없이 문법으로만 문자열 `+`를 가림
+        #   types: false # TypeScript 없이 문법으로만 문자열 `+`를 가림
         #   predict: false # 살아남을 것으로 예측한 mutant도 실제로 실행
 ```
 
@@ -52,7 +52,7 @@ npx nyorori run --base origin/main
 | `--max-mutants <n>` | mutant가 n개를 넘으면 실행하지 않고 에러로 끝냄 |
 | `--json <file>` | 전체 결과를 JSON으로 저장 |
 | `--dry-run` | 테스트를 돌리지 않고 mutant 목록만 출력 |
-| `--no-types` | 문자열 `+`를 타입 정보 없이 문법으로만 가림(tsrs를 띄우지 않음). [문자열 `+`](#문자열-) 참고 |
+| `--no-types` | 문자열 `+`를 타입 정보 없이 문법으로만 가림(TypeScript를 띄우지 않음). [문자열 `+`](#문자열-) 참고 |
 | `--no-predict` | 기준 실행의 프로파일로 살아남는 것이 확실한 mutant도 실행하고, 예측이 틀린 mutant를 알림. [기준 실행의 프로파일](#기준-실행의-프로파일) 참고 |
 
 종료 코드는 세 가지입니다.
@@ -144,15 +144,16 @@ Vite에 영향을 주지 않는 `test` 옵션(`name`, `include`, `environment` �
   - 그런 식으로 초기화한 `const`
   - 타입 주석이 `string`이나 문자열 리터럴 타입(`'a' | 'b'`)인 매개변수와 변수. `x?: string`과 `string | undefined`는 제외합니다.
   - 다시 대입될 수 있는 `let`/`var`의 초기값, 함수 반환값, 객체 멤버, `x as string`, JSDoc은 보지 않습니다. 확실하지 않은 `+`는 변형합니다.
-- TypeScript 파일에서는 [tsrs](https://github.com/oxc-project/tsrs)(TypeScript 7 컴파일러의 Rust 포트)로 타입을 확인합니다. 그래서 `user.name + user.title`처럼 문법으로는 알 수 없는 `+`도 거르고, `a + b`(숫자)는 변형합니다.
-  - tsrs가 답하면 문법보다 그 답을 따릅니다.
+- 문법으로 알 수 없는 `+`는 TypeScript 7.1의 API(`typescript` 패키지, 지금은 beta)로 타입을 확인합니다. 그래서 `user.name + user.title`처럼 문법으로는 알 수 없는 `+`도 거르고, `a + b`(숫자)는 변형합니다.
   - 파일이 속한 `tsconfig.json`은 편집기처럼 찾습니다. `references`도 따라갑니다.
-  - 어느 tsconfig에도 속하지 않는 파일, `any`인 값, JavaScript 파일은 문법으로만 판단합니다.
+  - 어느 tsconfig에도 속하지 않는 파일과 `any`인 값은 문법으로만 판단합니다.
+  - JavaScript 파일은 그 프로젝트(`tsconfig.json`이나 `jsconfig.json`)가 `checkJs`와 `noImplicitAny`(또는 `strict`)를 켜서 TypeScript만큼 엄격하게 검사할 때만 타입을 씁니다. 그렇지 않은 JavaScript에서는 TypeScript가 초기값으로 추론한 타입을 다른 대입이나 호출이 아무 오류 없이 깨뜨릴 수 있습니다. 예를 들어 `let s = ''`인 `s`를 다른 함수가 `s = 1`로 바꿔도 TypeScript는 `s + n`을 문자열 연결로 봅니다.
 - 그렇게 남은 `+`도, 기준 실행의 모든 평가에서 피연산자 하나가 문자열이었다면 실행하지 않습니다. JavaScript와 TypeScript 모두 해당합니다.
   - 출력과 job summary에는 `N mutants skipped: string concatenation in every observed evaluation` 한 줄만 표시하고, `--json`에는 `skipped`로 남깁니다. CI 결과에는 영향이 없습니다.
   - 문자열 피연산자가 없는 평가가 하나라도 있으면 그대로 실행하고, 실행되지 않은 `+`는 NoCoverage입니다.
-- tsrs는 optional dependency이고, 바이너리는 macOS(Apple Silicon)와 Linux(x64, arm64)용만 있습니다.
-  - Windows와 Intel Mac에서도 설치는 되지만 타입 정보 없이 실행됩니다.
+- TypeScript가 답하지 못하면 문법으로만 판단합니다.
+  - TypeScript의 네이티브 바이너리는 Windows, macOS(Intel, Apple Silicon), Linux를 포함한 21개 플랫폼용이 있습니다. 바이너리가 없는 플랫폼에서도 설치는 되지만 타입 정보 없이 실행됩니다.
+  - 요청마다 시간 제한이 있습니다(프로세스 시작과 파일 열기는 30초, 그 밖의 요청은 5초). 시간을 넘기거나 오류가 나면 TypeScript 프로세스를 끝내고, 남은 파일은 문법으로 판단합니다.
   - 타입 정보 없이 판단한 TypeScript 파일이 있으면 출력에 그 이유를 한 줄로 알립니다. `--json`에는 `types`로 남습니다.
 
 ## Equivalent mutant 억제

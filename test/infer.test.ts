@@ -88,17 +88,14 @@ describe('without types, the syntax mutates a `+` whose operands may not be stri
 describe('with a type oracle', () => {
   const annotated = ['function f(s: string, n: number) {', '  return s + n', '}']
 
-  test('its answer wins over the syntax', () => {
-    expect(mutated(annotated, 'f.ts', oracle('numeric'))).toEqual(['return s + n'])
+  test('it answers where the syntax does not know', () => {
     expect(mutated(['function f(s, n) {', '  return s + n', '}'], 'f.ts', oracle('string'))).toEqual([])
+    expect(mutated(['function f(s, n) {', '  return s + n', '}'], 'f.ts', oracle('numeric'))).toEqual(['return s + n'])
   })
 
-  test('the syntax decides where it does not know', () => {
-    expect(mutated(annotated, 'f.ts', oracle('unknown'))).toEqual([])
-  })
-
-  test('is not asked about a string literal operand, or a `+` off the changed lines', () => {
+  test('is not asked where the syntax knows: a string operand, or a `+` off the changed lines', () => {
     const types = oracle('numeric')
+    expect(mutated(annotated, 'f.ts', types)).toEqual([])
     const code = "function f(s, n) {\n  return 'a' + n\n  return s + n\n}"
     generate('f.ts', code, new Set([1, 2]), 1, types)
     expect(types.plus).not.toHaveBeenCalled()

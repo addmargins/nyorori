@@ -19,7 +19,7 @@ PR이 **추가하거나 바꾼 코드**에만 mutation을 넣고, 그 PR 시점�
 |---|---|
 | AST 처리 | `oxc-parser` npm 패키지(voidzero의 Rust 파서) 위에 TS로 구현 |
 | equivalent 자동 판별 | TCE: `oxc-transform` + `oxc-minify`. 버전은 `oxc-parser`와 같게 고정 |
-| 문자열 `+` 판별 | TS 파일은 `tsrs`(TypeScript 7 컴파일러의 Rust 포트)의 unstable API로 타입을 본다. optionalDependency로 버전을 정확히 고정한다. 쓸 수 없거나 답하지 못하면, 문자열인 것이 확실한 피연산자만 알아보는 문법 규칙으로 돌아간다 |
+| 문자열 `+` 판별 | 문자열인 것이 확실한 피연산자만 알아보는 문법 규칙이 먼저 본다. 문법이 모르는 `+`는 TypeScript 7.1 API(`typescript@7.1.0-beta`, 정확히 고정)로 타입을 본다. JavaScript는 TypeScript만큼 엄격하게 검사하는 프로젝트(`checkJs`와 `noImplicitAny`)에서만 본다. 답하지 못하거나 시간을 넘기면 문법 규칙의 판단을 따른다 |
 | 이 PR이 새로 추가한 억제 | `warn`: 통과시키되 경고 어노테이션과 요약 맨 위에 표시 |
 | NoCoverage | Survived와 똑같이 CI 실패 |
 | 실행 시간 프로파일링 | 기준 실행에만 probe를 넣은 계측을 쓴다. mutant 실행은 probe 없는 계측을 쓴다 |
@@ -33,10 +33,10 @@ nyorori run --base <ref>
   2. 세션 시작     Vitest를 띄운 별도 프로세스(session)를 시작한다
                   세션이 Vitest 설정으로 대상 파일을 거른다
                   (테스트 파일, coverage.exclude, --exclude 제외)
-  3. mutant 생성   oxc-parser로 파싱 → 바뀐 줄에 앵커가 걸린 노드에만 mutant를 만든다
-                  → 정적 equivalent 필터 (L1: 휴리스틱, TCE)
-                  TS 파일의 `+`는 tsrs에 타입을 묻고, 답이 없으면 문법 규칙으로 판단한다
-                  tsrs 프로세스는 이 단계에서만 떠 있다
+  3. mutant 생성   먼저 문법 규칙이 모르는 바뀐 줄의 `+`를 모아 TypeScript에 한꺼번에 묻는다
+                  TypeScript 프로세스는 이때만 떠 있다
+                  oxc-parser로 파싱 → 바뀐 줄에 앵커가 걸린 노드에만 mutant를 만든다
+                  → 정적 equivalent 필터 (L1: 휴리스틱, TCE). `+`는 문법 규칙, 그다음 TypeScript의 답으로 판단한다
                   → 억제 주석 읽기 (L2)
   4. 계측          모든 mutant를 파일에 한꺼번에 넣는다 (mutant schemata)
                   파일마다 두 벌을 만든다: probe 없는 계측(plain)과 probe를 넣은 계측(profiled)
@@ -167,13 +167,13 @@ mutant 생성은 `oxc-parser`가 주는 타입 있는 AST(`@oxc-project/types`)�
 src/
 ├─ cli.ts                인자 처리, 출력, exit code
 ├─ git.ts                merge-base, git diff → 바뀐 줄
-├─ mutate/generate.ts    oxc-parser AST 순회(visitorKeys, ScopeTracker) → 지점과 mutant, L1 휴리스틱, L2 억제 주석
+├─ mutate/generate.ts    oxc-parser AST 순회(visitorKeys, ScopeTracker) → 지점과 mutant, L1 휴리스틱, L2 억제 주석, 타입에 물을 것(typeQuestions)
 ├─ mutate/equivalent.ts  L1 TCE: oxc-transform + oxc-minify 결과가 원본과 같은 mutant를 버림
-├─ mutate/typecheck.ts   tsrs 어댑터: `+`가 문자열 연결인지 숫자 덧셈인지 타입으로 답함
+├─ mutate/typecheck.ts   TypeScript 7 API 어댑터: 생성 전에 `+`가 문자열 연결인지 숫자 덧셈인지 타입으로 미리 답함
 ├─ mutate/infer.ts       문자열 `+`의 문법 규칙: 식이 문자열인 것이 확실한지 AST와 스코프로 답함
 ├─ mutate/instrument.ts  schemata 삽입, probe 삽입(profiled), 소스맵, 계측 결과 파싱 확인
 ├─ mutate/profile.ts     probe 기록의 형식과 판정 규칙: 살아남는 것이 확실한 mutant, 문자열 `+`
-├─ run.ts                오케스트레이션: 세션 관리, 기준 실행, mutant별 실행, 판정
+├─ run.ts                오케스트레이션: 세션 관리, 타입 미리 묻기, 기준 실행, mutant별 실행, 판정
 ├─ session.ts            별도 프로세스에서 Vitest Node API 실행 (플러그인, setup 파일, provide)
 ├─ vitest.ts             프로젝트가 쓰는 Vitest 찾기 (Vite+ 포함)
 ├─ protocol.ts           CLI ↔ 세션 IPC 메시지
@@ -194,45 +194,90 @@ GitHub Action에서는 `::error file=…,line=…` 워크플로 명령을 쓴다
 그래서 토큰 권한 없이도 문제가 된 mutant가 PR diff의 해당 줄에 바로 표시된다.
 merge-base를 구하려면 `actions/checkout`에 `fetch-depth: 0`이 필요하다. merge-base가 없으면 이것을 안내하고 exit 2로 끝낸다.
 
-### 타입 정보 (tsrs)
+### 타입 정보 (TypeScript 7 API)
 
-`a.name + b.title`처럼 멤버나 반환값끼리 잇는 `+`가 문자열 연결인지는 문법만으로 알 수 없다. 그래서 TS 파일의 `+`는 `tsrs`에 타입을 묻는다(L1 참고).
-`tsrs`는 TypeScript 7 컴파일러와 언어 서버를 Rust로 옮긴 것이고, TypeScript 7의 IPC API를 `tsrs/unstable/sync`로 그대로 제공한다.
-동기 API라서 동기로 도는 mutant 생성 안에서 바로 물을 수 있다.
+`a.name + b.title`처럼 멤버나 반환값끼리 잇는 `+`가 문자열 연결인지는 문법만으로 알 수 없다. 그래서 문법 규칙이 모르는 `+`는 TypeScript에 타입을 묻는다(L1 참고).
+TypeScript 7은 Go로 다시 쓴 컴파일러이고, 별도 프로세스와 IPC로 통신하는 API를 `typescript/async`와 `typescript/sync`로 제공한다. 7.1에서 `unstable/` 접두어가 빠졌다.
+nyorori는 비동기 API를 쓴다. 동기 API는 응답을 기다리는 동안 이벤트 루프를 막으므로 시간 제한을 걸 수 없다.
 
-- **설치.** `optionalDependencies`에 버전을 정확히 고정한다(`0.18.0-ts7.1.0-dev.20260929`).
-  - JS 패키지는 모든 플랫폼에 설치되고, 네이티브 바이너리(약 29MB, lib `.d.ts` 포함 32MB)는 `@tsrs/<플랫폼>` optional 패키지에 따로 있다.
-  - 바이너리가 없는 플랫폼에서도 설치는 실패하지 않는다. `npm install --os=win32`에서는 `tsrs`만 설치되고 바이너리 패키지는 빠졌다. `--omit=optional`이면 `tsrs` 자체가 없다.
-  - npm 10의 lockfile에는 libc가 기록되지 않아서, `npm ci`(Action의 설치 단계)는 Linux x64에서 glibc용과 musl용 바이너리를 모두 받는다(54MB). oxc 바인딩도 같다. 실행할 때는 맞는 쪽만 쓴다.
-- **지연 로딩.** 바뀐 줄에 `+`가 있는 TS 파일(`.ts`, `.tsx`, `.mts`, `.cts`)을 처음 만났을 때에만 모듈을 읽고 프로세스를 띄운다.
-  - 모듈은 ESM이지만 생성이 동기이므로 `createRequire`로 require한다(Node 22.12 이상의 `require(esm)`). 읽는 데만 75~95ms가 든다.
-  - 그런 `+`가 없으면 tsrs는 읽지도 않는다.
+- **설치.** `typescript@7.1.0-beta`를 `dependencies`에 정확히 고정한다.
+  - nyorori 자신을 빌드하는 `tsc`도 이 패키지라서 버전은 하나다. Action의 `npm ci`가 `prepare`로 `dist/`를 빌드하므로 어차피 설치되어야 한다.
+  - JS 패키지는 모든 플랫폼에 설치되고, 네이티브 바이너리는 `@typescript/typescript-<플랫폼>-<아키텍처>` optional 패키지에 따로 있다. 21개 플랫폼(win32 x64/arm64, darwin x64/arm64, linux x64/arm64/arm 등)용이 있고, `npm ci`는 맞는 것 하나만 받는다.
+  - 바이너리 패키지가 없으면(지원하지 않는 플랫폼, 다른 플랫폼에서 만든 `node_modules`) 첫 요청이 `Unable to resolve @typescript/typescript-linux-x64. …`로 실패하고 문법 규칙으로 돌아간다. 바이너리 패키지를 지운 `npm ci` 결과로 확인했다.
+  - `npm ci --omit=optional`로는 nyorori를 설치할 수 없다. 빌드에 쓰는 `tsc`가 바로 그 네이티브 바이너리이고, oxc의 바인딩도 optional이다. typescript@7.0.2를 쓰던 이전에도 같았다.
+- **미리 묻기.** mutant 생성(`generate()`)은 동기이고 API는 비동기다. 그래서 `run.ts`가 생성 전에 물을 것을 모아 한 번에 묻고, `generate()`는 답을 맵에서 찾기만 한다.
+  - 물을 것은 `typeQuestions()`가 모은다. `generate()`의 계획 단계(파싱, 스코프 순회, 지점 수집)를 그대로 돌리면서 타입을 기록만 하는 오라클을 넘긴다. 그래서 묻는 `+`는 생성이 실제로 묻게 될 것과 정확히 같다. 바뀐 줄에 있고, 변형하는 코드(함수 안, 전역 `console` 호출의 인자 밖)에 있고, 문법 규칙이 문자열로 정하지 못한 `+`다.
+  - 파싱과 순회를 한 번 더 하는 비용은 626줄 파일 전체를 바뀐 것으로 쳤을 때 25~40ms였다. TCE는 하지 않는다.
+  - 다음 단계에서 `a?.b`, `a ?? b`의 `a`가 null이 될 수 있는지도 같은 배치로 묻게 된다. 그때는 `FileQuestions`에 종류를 더하고, 파일마다 노드를 이어 붙여 한 번의 `getTypeAtLocation`으로 묻는다.
+- **지연 시작.** 물을 `+`가 있는 파일이 있을 때만 모듈을 읽고 프로세스를 띄운다.
+  - 파일 위쪽 디렉터리 어디에도 `tsconfig.json`이나 `jsconfig.json`이 없으면 TypeScript를 띄우지 않는다. 그런 파일은 inferred 프로젝트로 갈 수밖에 없어서 어차피 타입을 쓰지 않는다. express, undici, fastify에서는 그래서 TypeScript가 뜨지 않는다.
 - **프로젝트 찾기.** 파일마다 snapshot을 `openFiles: [file]`로 갱신하고 `getDefaultProjectForFile`로 프로젝트를 받는다.
-  - 편집기가 파일을 열 때처럼 tsrs가 위쪽 디렉터리에서 그 파일을 포함하는 `tsconfig.json`을 찾고, `references`도 따라간다. Vite 템플릿처럼 루트 `tsconfig.json`이 `files: []`와 references만 가진 경우에도 `tsconfig.app.json`을 찾는다.
-  - 한 번 읽은 프로젝트는 tsrs가 다시 쓴다. 같은 프로젝트의 두 번째 파일은 3~6ms면 열린다.
-  - 어느 tsconfig에도 속하지 않는 파일은 기본 옵션의 inferred 프로젝트로 간다. 이것은 타입 정보가 없는 것으로 친다.
-- **질의.** oxc-parser와 tsrs의 위치는 둘 다 UTF-16 오프셋이라 그대로 쓴다. 한글이나 BMP 밖의 문자가 앞에 있어도 맞는 것을 확인했다.
+  - 편집기가 파일을 열 때처럼 TypeScript가 위쪽 디렉터리에서 그 파일을 포함하는 `tsconfig.json`(없으면 `jsconfig.json`)을 찾고, `references`도 따라간다. Vite 템플릿처럼 루트 `tsconfig.json`이 `files: []`와 references만 가진 경우에도 `tsconfig.app.json`을 찾는다.
+  - 한 번 읽은 프로젝트는 다시 쓴다. 같은 프로젝트의 두 번째 파일은 몇 ms면 열린다.
+  - 어느 config에도 속하지 않는 파일은 기본 옵션의 inferred 프로젝트(`configFileName`이 없음)로 간다. 이것은 타입 정보가 없는 것으로 친다. 아무 프로젝트도 이 파일을 검사하지 않으므로 타입 주석도 검사된 적이 없다.
+- **JavaScript.** 프로젝트가 JavaScript를 TypeScript만큼 엄격하게 검사할 때만 답을 쓴다. `checkJs: true`이고, `noImplicitAny`가 켜져 있거나(`strict: true` 포함) 하는 경우다(아래 "JavaScript에서의 타입" 참고).
+  - `getCompilerOptions()`는 config에 쓰인 그대로의 옵션을 준다. TypeScript 7은 `strict`의 기본값이 켜짐이지만, 프로젝트가 CI에서 쓰는 것은 더 오래된 TypeScript일 수 있으므로 기본값으로는 치지 않는다.
+  - JavaScript 파일이 타입 없이 판단되는 것은 보통이므로 `untyped`에 넣지 않는다. 아무 파일도 타입을 쓰지 못했을 때만 `reason`에 그 이유가 남는다.
+- **질의.** oxc-parser와 TypeScript의 위치는 둘 다 UTF-16 오프셋이라 그대로 쓴다. 한글이나 BMP 밖의 문자가 앞에 있어도 맞는 것을 확인했다.
   - 피연산자 첫 토큰의 위치로 타입을 물으면 틀린다. `name.length + 1`에서는 `name`(문자열)을, `n.toFixed(1) + n`에서는 `n`(숫자)을 보게 된다.
-  - 그래서 tsrs의 AST에서 `getTokenAtPosition(sourceFile, left.end)`로 `+` 토큰을 찾고, 그 부모인 `BinaryExpression` 노드 자체를 묻는다. 왼쪽 피연산자가 끝나는 곳에서 `+` 토큰의 leading trivia가 시작하기 때문이다.
-  - 두 피연산자의 끝 위치가 oxc의 것과 다르면 묻지 않는다. 예를 들어 BOM이 있는 파일은 tsrs가 BOM을 빼고 읽으므로 한 칸씩 어긋나고, 문법 규칙으로 돌아간다.
-  - 식 전체와 두 피연산자의 타입을 `checker.getTypeAtLocation`으로 한 번에 묻는다.
-- **수명.** 생성이 끝나면 `close()`로 프로세스를 끝낸다. 그래서 Vitest가 테스트를 돌리는 동안에는 떠 있지 않다.
-  - 생성 중 예외가 나도 `run()`의 `finally`가 닫는다. CLI 프로세스가 끝날 때는 tsrs가 등록한 `exit` 훅이 남은 프로세스를 죽인다.
-  - 프로세스는 `unref()`되어 있어서 이벤트 루프를 붙잡지 않는다.
-- **실패.** 다음 경우에는 그 뒤로 tsrs를 쓰지 않고, 프로세스를 끝내고, 문법 규칙으로 돌아간다. 이유는 보고서에 남긴다.
-  - 모듈이 없다(`--omit=optional`).
-  - 바이너리가 없다(지원하지 않는 플랫폼, 다른 플랫폼에서 만든 `node_modules`).
-  - 바이너리를 실행할 수 없다.
-  - 요청이 하나라도 실패한다. unstable API가 한 번 틀리면 그 뒤의 답도 믿지 않는다.
-  - 실행할 수 없는 바이너리(EACCES 등)는 다음 tick에 child process의 `'error'` 이벤트를 낸다. 리스너가 없으면 CLI가 죽고 exit 1(발견 있음)처럼 보이게 된다. 그래서 tsrs 클라이언트 내부의 child(`client.channel.child`)에 빈 리스너를 단다. 실패는 그 뒤의 요청이 EPIPE로 알린다.
+  - 그래서 `program.getSourceFile`로 받은 AST에서 `getTokenAtPosition(sourceFile, left.end)`로 `+` 토큰을 찾고, 그 부모인 `BinaryExpression` 노드 자체를 묻는다. 왼쪽 피연산자가 끝나는 곳에서 `+` 토큰의 leading trivia가 시작하기 때문이다.
+  - 두 피연산자의 끝 위치가 oxc의 것과 다르면 묻지 않는다. 예를 들어 BOM이 있는 파일은 TypeScript가 BOM을 빼고 읽으므로 한 칸씩 어긋나고, 문법 규칙으로 돌아간다.
+  - 파일 하나의 모든 `+`에 대해 식 전체와 두 피연산자의 타입을 `checker.getTypeAtLocation`으로 한 번에 묻는다. 결과가 `any`일 때만 union의 구성원을 한 번 더 묻는다. 이것도 클라이언트가 한 요청으로 묶는다.
+- **시간 제한.** 모든 요청을 타이머와 경주시킨다. 플래그가 아니라 상수다.
+  - 모듈 읽기, 프로세스 시작과 첫 snapshot: 30초. 파일 열기(프로젝트 읽기): 30초. 그 밖의 요청 하나(프로젝트 조회, AST, 타입 배치): 5초. 정상 종료: 2초.
+  - 프로세스가 스스로 끝나도 진행 중인 요청을 바로 실패시킨다. JSON-RPC 계층은 연결이 끊겨도 대기 중인 요청을 거절하지 않기 때문이다.
+  - 시간을 넘기거나, 오류가 나거나, 프로세스가 끝나면 그 뒤로 TypeScript에 묻지 않고, 프로세스를 죽이고, 남은 파일은 모두 문법 규칙으로 판단한다. 이유는 보고서에 남긴다. 한 번 틀린 beta API의 그 뒤 답은 믿지 않는다.
+  - 답하지 않는 가짜 API를 넣은 테스트로, CLI가 5초 제한 뒤에 문법 규칙으로 끝까지 실행되는 것을 확인한다(`test/e2e.test.ts`). 단위 테스트는 시작과 파일 열기에서 멈추는 가짜 API, 입력을 읽기만 하고 답하지 않는 프로세스를 쓴다(`test/typecheck.test.ts`).
+- **프로세스 수명.** 생성 전에 묻기가 끝나면 프로세스를 끝낸다. 그래서 Vitest가 테스트를 돌리는 동안에는 떠 있지 않다.
+  - 클라이언트는 첫 요청 때 프로세스를 띄우고 그 `ChildProcess`를 내놓지 않는다. 그런데 `close()`는 snapshot을 놓아 주는 요청을 먼저 보내고 나서야 표준 입력을 닫는다. 멈춘 프로세스에서는 이 요청이 끝나지 않으므로 `close()`로는 끝낼 수 없다.
+  - 그래서 Node가 만드는 모든 자식 프로세스를 알리는 diagnostics channel `child_process`를 시작하는 동안만 구독해서 그 프로세스를 잡는다. 인자에 `--api`가 있는 것이다.
+  - 정상일 때는 `close()`를 2초 안에 기다린 뒤 SIGKILL한다. 실패했을 때는 `close()`를 부르지 않고 바로 SIGKILL한다. 멈췄거나 끝난 프로세스에 요청을 더 보내지 않으려는 것이다.
+  - 채널로 프로세스를 잡지 못하면 죽일 수 없다. 그래도 CLI는 끝난다. CLI가 끝나며 파이프가 닫히면 멈추지 않은 프로세스는 스스로 끝난다.
+  - 바이너리가 없거나(ENOENT) 실행할 수 없는(EACCES) 경우는 클라이언트가 첫 요청의 실패로 알린다. tsrs 때처럼 내부 필드에 리스너를 달 필요가 없다.
+- **처리되지 않은 rejection.** 클라이언트가 쓰는 JSON-RPC 계층(`vscode-jsonrpc`)은 쓰기에 실패한 요청을 거절하고 나서, async Promise executor 안에서 같은 오류를 다시 던진다. 그래서 끝난 프로세스에 보낸 요청마다 처리되지 않은 rejection이 하나씩 남고, Node의 기본 동작으로는 CLI가 exit 1(발견 있음)로 죽는다.
+  - 시작 직후 끝나는 바이너리로 재현했다. 10번 모두 exit 1로 죽었다. 아래 리스너를 단 뒤로는 10번 모두 끝까지 돌았다.
+  - 그래서 TypeScript에 보낸 요청이 모두 끝날 때까지 `unhandledRejection` 리스너를 단다. 쓰기 실패(`EPIPE`, `ERR_STREAM_DESTROYED`, `ERR_STREAM_WRITE_AFTER_END`)만 무시한다. 요청 자체도 거절되므로 그것으로 문법 규칙으로 돌아간다.
+  - 다른 rejection은 그대로 다시 던진다. 다른 리스너가 없을 때 Node가 하는 일과 같다.
+  - Vitest는 자기 리스너를 달기 때문에 이것을 볼 수 없다. 그래서 테스트는 별도의 Node 프로세스에서 확인한다.
 - **보고.**
-  - `--json`의 `types`에 `{ backend: 'tsrs', files, untyped }` 또는 `{ backend: 'none', reason, untyped }`를 남긴다. `untyped`는 바뀐 줄에 `+`가 있는데 타입 없이 판단한 TS 파일과 그 이유다.
-  - 그런 파일이 있을 때만 텍스트 출력에 한 줄을 쓴다. 문법 규칙이 가리지 못한 문자열 `+`가 왜 변형됐는지 알 수 있게 하려는 것이다.
-  - `--no-types`로 끄면 tsrs를 읽지 않고, 이 줄도 쓰지 않는다.
+  - `--json`의 `types`에 `{ backend: 'typescript', files, untyped }` 또는 `{ backend: 'none', reason, untyped }`를 남긴다. `files`는 타입으로 답한 파일 수이고, `untyped`는 바뀐 줄에 물을 `+`가 있는데 타입 없이 판단한 TS 파일과 그 이유다.
+  - 그런 TS 파일이 있을 때만 텍스트 출력에 한 줄을 쓴다. 문법 규칙이 가리지 못한 문자열 `+`가 왜 변형됐는지 알 수 있게 하려는 것이다.
+  - `--no-types`로 끄면 TypeScript를 읽지 않고, 이 줄도 쓰지 않는다.
   - step summary와 어노테이션은 바꾸지 않는다.
-- **비용.** 이 저장소의 `src/mutate/generate.ts`(467줄, `+` 16개, 프로그램 파일 282개)를 기준으로 쟀다.
-  - 모듈 로딩 약 75ms, 프로세스 시작과 프로젝트 열기와 첫 질의 약 85ms, 그 뒤의 `+` 하나에 약 0.7ms, 같은 프로젝트의 다른 파일 하나에 4~6ms, 종료 약 10ms였다.
-  - CLI `--dry-run` 전체로는 1.09초에서 1.36초로, 실행 한 번에 0.2~0.3초가 늘었다. mutant 실행 시간에 비하면 작다.
+- **비용.** 이 저장소의 `src/mutate/generate.ts`(626줄, 바뀐 줄로 친 파일 전체, 물을 `+` 14개, 프로그램 파일 약 290개)를 기준으로 쟀다.
+  - 물을 것 모으기 25~40ms, 모듈 읽기 약 90ms, 프로세스 시작과 첫 snapshot 약 30ms, 프로젝트 읽기 250~280ms, AST 받기 약 10ms, 타입 배치 한 번 17~29ms, 종료 4~10ms였다.
+  - CLI `--dry-run` 전체로는 중앙값 1.62초에서 2.20초로, 실행 한 번에 약 0.55초가 늘었다. tsrs는 같은 측정(그때 467줄)에서 1.09초에서 1.36초로 0.2~0.3초가 늘었다. 차이는 대부분 프로젝트 읽기다. tsrs는 같은 프로젝트를 약 70ms에 읽었다. 그래도 mutant 실행 시간에 비하면 작다.
+  - `tsconfig.json`이 있지만 JavaScript를 포함하지 않는 JavaScript 저장소(axios)에서는 TypeScript를 띄우고 나서야 inferred 프로젝트임을 안다. `lib/`의 72개 파일을 모두 바뀐 것으로 치면 0.5초가 들고 답은 하나도 쓰지 않는다.
+
+#### JavaScript에서의 타입
+
+inferred 프로젝트(config가 없는 JavaScript)에서도 TypeScript 7은 `allowJs`로 JavaScript를 읽고 초기값과 JSDoc으로 타입을 추론한다. 이 답을 문자열 `+`에 써도 되는지 세 가지로 확인했다. 측정 스크립트는 커밋하지 않았다.
+
+1. **실제 JavaScript 저장소.** express, axios, undici, fastify의 `lib/`에서, 문법 규칙이 모르는 `+`(생성이 묻는 것) 중 TypeScript가 문자열이라고 답한 것을 손으로 확인했다.
+
+   | 저장소 | `+` | 문법이 모르는 것 | 그중 TypeScript가 문자열 | JSDoc을 지우면 |
+   |---|---|---|---|---|
+   | express | 40 | 6 | 0 | 0 |
+   | axios | 209 | 53 | 4 | 4 |
+   | undici | 285 | 265 | 6 | 5 |
+   | fastify | 87 | 10 | 0 | 0 |
+
+   - 코드를 읽어 보니 10개 모두 늘 문자열이다. `URL`의 `pathname + search`(lib 타입) 5개, 정규식 `exec` 결과로 초기화한 `const` 2개, 문자열 배열 리터럴의 `forEach` 매개변수, 다른 모듈의 문자열 상수, JSDoc 매개변수였다.
+   - 얻는 것은 전체 `+` 621개 중 10개(1.6%), 문법이 모르는 334개 중 3%다. 그중 테스트가 실행하는 것은 기준 실행의 프로파일로도 건너뛴다.
+2. **TypeScript 주석이 있는 정답.** hono와 nyorori의 TS 소스에서 `node:module`의 `stripTypeScriptTypes`로 타입만 지워(위치는 그대로) JavaScript를 만들었다. 이것을 inferred 프로젝트로 읽은 답을, 원래 TS를 tsconfig로 읽은 답과 비교했다.
+   - hono: 문법이 모르는 `+` 74개 중 TypeScript가 JavaScript에서 문자열이라고 한 것은 2개이고, 둘 다 TS 정답도 문자열이었다. 숫자 36개도 모두 맞았다. 나머지 36개는 "모름"이었다. nyorori: 문자열이라는 답은 없었고, 숫자 10개가 모두 맞았다.
+3. **틀리는 경우를 찾는 예제.** 실행하면 숫자가 되는데 TypeScript가 문자열이라고 답하는 JavaScript를 만들었다. 다음 8가지 모두 inferred 프로젝트에서 문자열이라는 답이 나왔다.
+   - 모듈의 `let s = ''`를 다른 함수가 숫자로 바꾼 뒤의 `s + n`
+   - 기본값이 문자열인 매개변수(`f(s = '')`, 구조 분해 기본값 포함)에 숫자를 넘긴 호출
+   - 생성자에서 `this.text = ''`로 초기화하고 다른 메서드에서 숫자를 넣은 필드
+   - `{ prefix: '' }` 객체의 속성, `['a']` 배열에 나중에 넣은 숫자
+   - JSDoc `@param {string}`인 매개변수에 숫자를 넘긴 호출
+   - `var v = ''` 뒤에 `any`인 값을 대입한 `v`
+   - `checkJs`만 켜고 `noImplicitAny`를 끈 프로젝트에서도 같았고, `tsc`는 아무 오류도 내지 않았다. 매개변수가 `any`라서 어떤 대입도 허용되기 때문이다.
+   - `checkJs`와 `strict`를 켜면 타입 없는 매개변수가 오류가 되므로 JSDoc 타입을 달게 된다. 그러면 7가지가 타입 오류(TS2322, TS2345)가 된다. 남은 하나는 `any`라고 밝힌 값을 대입하는 경우로, TS 파일에도 같은 구멍이 있다(아래 문법 규칙의 "가정"). 그래서 이때는 TS 파일과 같은 정도로 답을 믿을 수 있다.
+
+그래서 JavaScript는 `checkJs`와 `noImplicitAny`(또는 `strict`)를 켠 프로젝트에서만 타입을 쓴다. 위 네 저장소는 이 조건에 맞지 않아 얻는 것이 없다. 실제 코드에서 틀린 답은 찾지 못했지만, 틀리는 방식이 흔한 JavaScript 패턴이고, 얻는 것(1.6%)이 작기 때문이다.
+어느 tsconfig에도 속하지 않는 TS 파일도 같은 이유로 타입을 쓰지 않는다. 그 주석을 검사하는 프로젝트가 없다.
 
 ## 실행 시간 프로파일링
 
@@ -303,7 +348,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
   - getter, Proxy, `valueOf`/`toString`, `Symbol.hasInstance`는 여전히 코드를 실행할 수 있다. 이들이 테스트가 보는 상태를 바꾸지 않는다고 가정한다.
   - 조건이 throw한 평가(`o.a.b`에서 `o.a`가 undefined인 경우 등)는 기록되지 않는다. 고정된 값은 throw하지 않으므로, 평가 횟수가 N과 다르면 예측하지 않는다.
   - 조건 값이 `true`/`false`가 아닌 값이었으면 이유를 `always truthy`/`always falsy`로 쓴다.
-- 문자열 `+`: 기록된 모든 평가에 문자열 피연산자(빈 문자열 포함)가 있었으면 `+`→`-` mutant를 실행하지 않는다. 문자열 피연산자가 없는 평가가 하나라도 있으면 그대로 실행한다. 실행되지 않은 `+`는 NoCoverage다. 생성 단계의 규칙(리터럴, tsrs, 문법 규칙)이 먼저 적용된다.
+- 문자열 `+`: 기록된 모든 평가에 문자열 피연산자(빈 문자열 포함)가 있었으면 `+`→`-` mutant를 실행하지 않는다. 문자열 피연산자가 없는 평가가 하나라도 있으면 그대로 실행한다. 실행되지 않은 `+`는 NoCoverage다. 생성 단계의 규칙(리터럴과 문법 규칙, TypeScript)이 먼저 적용된다.
 
 ### 계측 전환
 
@@ -365,16 +410,17 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 - 조건이 이미 `true`/`false` 리터럴이면 Condition mutant를 만들지 않는다. BooleanLiteral mutant와 겹치기 때문이다.
 - `x * 1`, `x / 1`은 `*`↔`/` 변형을 만들지 않는다.
 - 문자열 연결 `+`는 변형하지 않는다. 문자열 변형은 2차로 미뤘다. 바뀐 줄의 `+`는 다음 순서로 판단한다.
-  1. 피연산자 하나가 문자열 리터럴이나 템플릿 리터럴이면 문자열 연결이다(`"a" + x`). 타입 검사기도 달리 답할 수 없으므로 tsrs를 띄우지 않는다.
-  2. TS 파일이면 tsrs에 타입을 묻는다("타입 정보 (tsrs)" 참고). 답이 있으면 그것을 따른다.
+  1. 문법 규칙(아래)이 피연산자 하나가 문자열인 것이 확실하다고 하면 문자열 연결이다. 리터럴(`"a" + x`)이 여기에 든다. 타입 검사기도 달리 답할 수 없으므로 TypeScript에 묻지 않는다.
+     - 이전에는 tsrs가 먼저 답하고 문법 규칙은 그 뒤였다. 문법 규칙이 문자열이라고 한 `+`에 TypeScript가 다르게 답한 것은 측정한 저장소 어디에도 없었다(아래 "측정"). 그래서 순서를 바꿔 물을 것을 줄였다.
+  2. 그 밖의 `+`는 TypeScript에 묻는다("타입 정보 (TypeScript 7 API)" 참고). 답이 있으면 그것을 따른다.
      - 식 전체의 타입이 문자열 계열이면 변형하지 않는다. 체커가 정한 결과라서 문자열 변수, 템플릿 리터럴 타입, 문자열 enum, `string`으로 제한된 타입 매개변수, branded string이 모두 들어간다.
      - 식 전체의 타입이 `number`나 `bigint`이면 변형한다. 숫자 리터럴 타입과 숫자 enum이 여기에 든다.
      - 타입 오류 때문에 식 전체가 `any`인데 피연산자 하나가 문자열을 포함하는 union이면(`string | undefined` + 숫자) 문자열 연결로 본다.
-  3. tsrs가 답하지 못하면 문법 규칙(아래)으로 판단한다. `any`, 타입 오류, tsconfig에 속하지 않는 파일, tsrs를 쓸 수 없는 경우, `--no-types`, JS 파일이 그렇다. 피연산자 하나가 문자열인 것이 확실할 때만 문자열 연결로 보고, 그 밖의 `+`는 변형한다.
+  3. TypeScript가 답하지 못하면 변형한다. `any`, 타입 오류, tsconfig에 속하지 않는 파일, 엄격하게 검사되지 않는 JS 파일, TypeScript를 쓸 수 없거나 시간을 넘긴 경우, `--no-types`가 그렇다.
   - 생성 단계에서 남은 `+`는 기준 실행에서 한 번 더 거른다. 실행된 모든 평가에서 피연산자 하나가 문자열이었으면 그 mutant는 실행하지 않는다("실행 시간 프로파일링" 참고). JS와 TS 모두 해당한다.
-  - tsrs가 틀리면 다음 둘 중 하나가 된다.
+  - TypeScript가 틀리면 다음 둘 중 하나가 된다.
     - 숫자 `+`를 문자열로 보면 mutant를 놓친다.
-    - 문자열 `+`를 숫자로 보면 변형된다. 리터럴이 붙지 않은 `+`에서는 tsrs의 답이 문법 규칙보다 먼저다.
+    - 문자열 `+`를 숫자로 보면 변형된다. 문법 규칙이 모르는 `+`라서, TypeScript가 없을 때와 같다.
 
 **문자열 `+`의 문법 규칙.** `src/mutate/infer.ts`가 파일 하나의 AST와 스코프만 보고, 식이 늘 문자열로 평가되는지(아니면 throw하는지) 정한다. 문자열이라고 잘못 답하면 숫자 `+`의 mutant를 놓치므로, 확실한 경우에만 문자열이라고 답한다.
 
@@ -404,7 +450,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
   - JSDoc. 검사되지 않는 주석이다.
 - 가정
   - 내장 객체를 덮어쓰지 않는다(TCE의 "minifier의 가정"과 같다). 사용자 객체의 `Symbol.replace`/`Symbol.split`은 TypeScript lib 타입대로 문자열/배열을 돌려준다고 본다.
-  - 타입 주석을 믿는다. `any`로 바꾼 값이나 `strictNullChecks: false`에서의 null처럼 주석과 다른 값이 들어올 수 있다. 그래도 주석이 문자열이라고 밝힌 `+`이고, tsrs도 같게 답한다.
+  - 타입 주석을 믿는다. `any`로 바꾼 값이나 `strictNullChecks: false`에서의 null처럼 주석과 다른 값이 들어올 수 있다. 그래도 주석이 문자열이라고 밝힌 `+`이고, TypeScript도 같게 답한다.
   - console 필터처럼, sloppy mode에서 블록 안 함수 선언이 바깥으로 호이스팅되는 경우(Annex B)는 보지 못한다.
   - 어느 경우든 틀리는 방향은 mutant를 놓치는 쪽이다.
 
@@ -536,16 +582,17 @@ return age >= 18
 - **Vitest의 임시 디렉터리.** 실행이 정상적으로 끝나면 CLI가 세션에 `vitest.close()`를 요청하므로, Vitest가 `os.tmpdir()`에 만드는 임시 디렉터리도 지워진다(5초 안에 답이 없으면 SIGKILL). 무한 루프 때문에 강제 종료한 세션의 임시 디렉터리는 남는다.
 - **스냅샷 테스트.** `update: false`로 실행하므로, mutant가 스냅샷을 바꾸면 killed가 된다.
 - **flaky 테스트.** 실행한 mutant는 우연히 killed로 판정되는 방향이라서 판정이 느슨해질 뿐, 거짓 실패는 만들지 않는다. 기준 실행이 실패하면 전체를 중단한다. 프로파일 예측은 다르다(아래 "프로파일 예측" 참고).
-- **tsrs 의존.**
-  - API가 unstable이다. 같은 TypeScript 7 API라도 typescript@7.0.2와 메서드 이름이 다르다. tsrs는 `createSnapshot`/`getConfiguredProject`, 7.0.2는 `updateSnapshot`/`getProject`다.
+- **TypeScript 7.1 beta API 의존.**
+  - 7.1 정식판 전의 beta(`7.1.0-beta`, 2026-10-20)다. 정식판까지 API가 바뀔 수 있다. 7.0.2의 `unstable/` API와도 이미 다르다(`updateSnapshot`/`getProject` → `createSnapshot`/`Snapshot.update`/`getDefaultProjectForFile`).
   - 그래서 버전을 정확히 고정하고, 올릴 때는 `test/typecheck.test.ts`로 확인한다. 쓰는 것은 다음과 같다.
-    - `tsrs/unstable/sync`: `API`, `createSnapshot`, `Snapshot.update({ openFiles })`, `getDefaultProjectForFile`, `Project.configFileName`, `program.getSourceFile`, `checker.getTypeAtLocation`, `Type.flags`/`isUnionType`/`getTypes`, `TypeFlags`
-    - `tsrs/unstable/ast`: `getTokenAtPosition`, `isBinaryExpression`, `SyntaxKind`
-    - 공개되지 않은 클라이언트 내부 필드 `client.channel.child`. 구조가 바뀌면 이 보호만 조용히 빠진다.
-  - 버전 이름(`0.18.0-ts7.1.0-dev.20260929`)대로 TypeScript 7.1 개발판을 따라가는 0.x 버전이다.
-  - 바이너리는 macOS arm64와 Linux x64/arm64(glibc, musl)용만 있다. Windows와 Intel macOS에서는 설치는 되지만 타입 정보 없이 돈다.
-  - 통신이 동기라서, tsrs가 답하지 않고 멈추면 CLI도 멈춘다. 시간 제한을 걸 수 없다.
-  - 프로젝트를 여는 비용은 프로그램 크기에 비례한다. 큰 monorepo에서는 references를 따라 여러 프로젝트를 읽을 수 있다.
+    - `typescript/async`: `API`, `createSnapshot`, `Snapshot.update({ openFiles })`, `getDefaultProjectForFile`, `Project.configFileName`, `program.getCompilerOptions`, `program.getSourceFile`, `checker.getTypeAtLocation`, `Type.flags`/`isUnionType`/`getTypes`, `TypeFlags`, `API.close`
+    - `typescript/ast`: `getTokenAtPosition`, `isBinaryExpression`, `SyntaxKind`
+    - Node의 diagnostics channel `child_process`. Node 문서에서 기본 제공 채널은 experimental이다. 바뀌면 프로세스를 죽이는 보호만 빠진다.
+    - 클라이언트 안의 `vscode-jsonrpc`가 쓰기 실패를 처리되지 않은 rejection으로 남기는 동작. 고쳐지면 그 리스너는 할 일이 없어진다.
+  - `typescript`는 런타임 의존성이자 nyorori의 빌드 도구라서, 올리면 둘 다 바뀐다. nyorori의 코드는 7.1.0-beta로 타입 검사와 빌드가 된다.
+  - TypeScript 7은 `strict`의 기본값이 켜짐이고, `getCompilerOptions()`는 config에 쓰인 옵션만 준다. 다음 단계에서 `strictNullChecks`를 볼 때도 기본값을 어떻게 칠지 정해야 한다.
+  - 바이너리는 21개 플랫폼용이 있다. 이 저장소에서 확인한 것은 Linux x64뿐이다. Windows와 macOS에서 실제로 도는지는 확인하지 않았다.
+  - 프로젝트를 여는 비용은 프로그램 크기에 비례하고, tsrs보다 느렸다. 첫 프로젝트를 여는 데 이 저장소에서 약 3.5배, hono에서 약 7배가 걸렸다. 큰 monorepo에서는 references를 따라 여러 프로젝트를 읽을 수 있다. 파일 열기 하나가 30초를 넘으면 나머지는 문법 규칙으로 판단한다.
 - **프로파일 예측.**
   - 결정적이지 않은 테스트에서는 예측이 틀릴 수 있다. 이때는 테스트가 잡을 mutant를 Survived로 보고하므로 CI를 거짓으로 실패시킨다. 원래의 flaky 테스트 위험과 방향이 반대다. `--no-predict`로 돌리면 확인할 수 있다.
   - Condition 예측의 부수 효과 판정은 문법만 본다. getter나 Proxy가 상태를 바꾸면 틀릴 수 있다.

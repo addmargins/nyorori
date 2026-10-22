@@ -3,10 +3,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { changedLines, gitRoot, mergeBase } from './git.ts'
-import { generate, ParseError, type PlannedMutant } from './mutate/generate.ts'
+import { generate, ParseError, typeQuestions, type PlannedMutant } from './mutate/generate.ts'
 import { instrument, InstrumentError } from './mutate/instrument.ts'
 import { mergeProfile, predict, type ProbeRecord } from './mutate/profile.ts'
-import { TsrsTypes } from './mutate/typecheck.ts'
+import { askTypes, typesNotAsked, type TypeOracle } from './mutate/typecheck.ts'
 import type { ModuleResult, Request, Response, SpecRef } from './protocol.ts'
 import type {
   EquivalentMutant,
@@ -31,7 +31,7 @@ export interface RunOptions {
   timeout: number
   maxMutants?: number
   dryRun: boolean
-  /** Ask tsrs for operand types to tell string `+` from numeric `+`. */
+  /** Ask TypeScript for operand types to tell string `+` from numeric `+`. */
   types: boolean
   /** Report mutants the baseline profile shows to survive without running them. Off, they run and wrong predictions are reported. */
   predict: boolean
@@ -73,7 +73,6 @@ export async function run(options: RunOptions): Promise<Report> {
     .filter((file) => SOURCE.test(file) && !DECLARATION.test(file) && !file.split(path.sep).includes('node_modules'))
     .filter((file) => existsSync(file))
     .sort()
-  const types = options.types ? new TsrsTypes(root) : undefined
   const report: Report = {
     gitRoot: repo,
     base,
@@ -83,7 +82,7 @@ export async function run(options: RunOptions): Promise<Report> {
     skipped: [],
     suppressions: [],
     problems: [],
-    types: types?.usage() ?? { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
+    types: options.types ? typesNotAsked() : { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
     dryRun: options.dryRun,
   }
   if (candidates.length === 0) return report
@@ -97,8 +96,15 @@ export async function run(options: RunOptions): Promise<Report> {
     const plans: FilePlan[] = []
     const mutants: Mutant[] = []
     const planned = new Map<number, PlannedMutant>()
-    for (const file of session.eligible) {
-      const code = readFileSync(file, 'utf8')
+    const sources = session.eligible.map((file) => ({ file, code: readFileSync(file, 'utf8') }))
+    let types: TypeOracle | undefined
+    if (options.types) {
+      // Generation is synchronous, so the type checker answers everything it will ask beforehand.
+      const answers = await askTypes(root, sources.map(({ file, code }) => typeQuestions(file, code, changed.get(file)!)))
+      report.types = answers.usage
+      types = answers
+    }
+    for (const { file, code } of sources) {
       let generated: ReturnType<typeof generate>
       try {
         generated = generate(file, code, changed.get(file)!, mutants.length + 1, types)
@@ -123,11 +129,6 @@ export async function run(options: RunOptions): Promise<Report> {
         throw error
       }
       plans.push({ file, original: code, instrumented: instrumented.code, map: instrumented.map, profiled })
-    }
-    if (types) {
-      // Mutants exist now; the type checker's process should not sit beside the test runs.
-      types.close()
-      report.types = types.usage()
     }
     if (options.maxMutants !== undefined && mutants.length > options.maxMutants) {
       throw new RunError(`${mutants.length} mutants exceed --max-mutants ${options.maxMutants}. Split the PR or raise the limit.`)
@@ -227,7 +228,6 @@ export async function run(options: RunOptions): Promise<Report> {
     }
     return report
   } finally {
-    types?.close()
     await session?.close()
     rmSync(setupDir, { recursive: true, force: true })
   }

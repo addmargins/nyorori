@@ -1,7 +1,9 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import module from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { describe, expect, test } from 'vitest'
 import type { Report } from '../src/run.ts'
 
@@ -33,11 +35,16 @@ function project(name: string, base: Files, head: Files): string {
 }
 
 function nyorori(dir: string, ...args: string[]): { status: number | null; output: string; report?: Report; leftovers: string[] } {
+  return nyororiNode([], dir, ...args)
+}
+
+/** The same, with options for Node itself. */
+function nyororiNode(node: string[], dir: string, ...args: string[]): ReturnType<typeof nyorori> {
   // Keep the outer Vitest's worker settings away from the nested one.
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('VITEST') && key !== 'NODE_OPTIONS' && key !== 'GITHUB_ACTIONS'))
   // A private TMPDIR shows whether the run removed its temporary directories.
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'nyorori-e2e-'))
-  const result = spawnSync(process.execPath, [CLI, 'run', '--base', 'HEAD~1', '--json', 'report.json', ...args], { cwd: dir, encoding: 'utf8', env: { ...env, TMPDIR: tmp } })
+  const result = spawnSync(process.execPath, [...node, CLI, 'run', '--base', 'HEAD~1', '--json', 'report.json', ...args], { cwd: dir, encoding: 'utf8', env: { ...env, TMPDIR: tmp } })
   const leftovers = readdirSync(tmp)
   rmSync(tmp, { recursive: true, force: true })
   const reportFile = path.join(dir, 'report.json')
@@ -200,39 +207,98 @@ test('double', () => { expect(double(3)).toBe(6) })
     expect(output).toContain('2 mutants dropped as equivalent (TCE)')
   })
 
-  test('does not mutate a `+` that joins string variables, by their types', ({ skip }) => {
-    const tsconfig = '{ "compilerOptions": { "strict": true, "module": "nodenext", "noEmit": true }, "include": ["src"] }\n'
+  describe('types', () => {
+    const TSCONFIG = '{ "compilerOptions": { "strict": true, "module": "nodenext", "noEmit": true }, "include": ["src"] }\n'
     // Destructured, so only the types tell that `first + last` joins strings.
-    const dir = project('types', { 'tsconfig.json': tsconfig, 'src/name.ts': 'export {}\n' }, {
-      'src/name.ts': `export function fullName({ first, last }: { first: string; last: string }): string {
+    const NAME = `export function fullName({ first, last }: { first: string; last: string }): string {
   return first + last
 }
 
 export function total(a: number, b: number): number {
   return a + b
 }
-`,
-      'test/name.test.ts': `import { expect, test } from 'vitest'
+`
+    const NAME_TEST = `import { expect, test } from 'vitest'
 import { fullName, total } from '../src/name'
 test('fullName', () => { expect(fullName({ first: 'Ada ', last: 'Lovelace' })).toBe('Ada Lovelace') })
 test('total', () => { expect(total(2, 3)).toBe(5) })
-`,
-    })
-    const { status, report, output } = nyorori(dir)
-    const { types } = report!
-    if (types.backend === 'none') skip(types.reason.startsWith('tsrs is unavailable'), `tsrs cannot run here: ${types.reason}`)
-    expect(status, output).toBe(0)
-    expect(types).toEqual({ backend: 'tsrs', files: 1, untyped: [] })
-    expect(statuses(report!)).toEqual([
-      'src/name.ts:1 FunctionBody body → `return`: Killed',
-      'src/name.ts:5 FunctionBody body → `return`: Killed',
-      'src/name.ts:6 Arithmetic `+` → `-`: Killed',
-    ])
-    expect(output).not.toContain('without type information')
+`
+    const arithmetic = (report: Report) => report.results.filter((r) => r.operator === 'Arithmetic').map((r) => r.line)
 
-    const syntactic = nyorori(dir, '--no-types', '--dry-run').report!
-    expect(syntactic.types).toEqual({ backend: 'none', reason: 'disabled with --no-types', untyped: [] })
-    expect(syntactic.results.filter((r) => r.operator === 'Arithmetic').map((r) => r.line)).toEqual([2, 6])
+    test('does not mutate a `+` that joins string variables, by their types', ({ skip }) => {
+      const dir = project('types', { 'tsconfig.json': TSCONFIG, 'src/name.ts': 'export {}\n' }, { 'src/name.ts': NAME, 'test/name.test.ts': NAME_TEST })
+      const { status, report, output } = nyorori(dir)
+      const { types } = report!
+      if (types.backend === 'none') skip(types.reason.startsWith('TypeScript is unavailable'), `TypeScript cannot run here: ${types.reason}`)
+      expect(status, output).toBe(0)
+      expect(types).toEqual({ backend: 'typescript', files: 1, untyped: [] })
+      expect(statuses(report!)).toEqual([
+        'src/name.ts:1 FunctionBody body → `return`: Killed',
+        'src/name.ts:5 FunctionBody body → `return`: Killed',
+        'src/name.ts:6 Arithmetic `+` → `-`: Killed',
+      ])
+      expect(output).not.toContain('without type information')
+
+      const syntactic = nyorori(dir, '--no-types', '--dry-run').report!
+      expect(syntactic.types).toEqual({ backend: 'none', reason: 'disabled with --no-types', untyped: [] })
+      expect(arithmetic(syntactic)).toEqual([2, 6])
+    })
+
+    test('does the same in JavaScript that TypeScript checks as strictly as TypeScript', ({ skip }) => {
+      const jsconfig = '{ "compilerOptions": { "checkJs": true, "strict": true, "module": "nodenext", "noEmit": true }, "include": ["src"] }\n'
+      const dir = project('types-js', { 'jsconfig.json': jsconfig, 'src/name.js': 'export {}\n' }, {
+        'src/name.js': `/** @param {{ first: string, last: string }} name */
+export function fullName(name) {
+  return name.first + name.last
+}
+
+/**
+ * @param {number} a
+ * @param {number} b
+ */
+export function total(a, b) {
+  return a + b
+}
+`,
+      })
+      const { status, report, output } = nyorori(dir, '--dry-run')
+      const { types } = report!
+      if (types.backend === 'none') skip(types.reason.startsWith('TypeScript is unavailable'), `TypeScript cannot run here: ${types.reason}`)
+      expect(status, output).toBe(0)
+      expect(types).toEqual({ backend: 'typescript', files: 1, untyped: [] })
+      expect(arithmetic(report!)).toEqual([11])
+    })
+
+    test('falls back to the syntax, and still finishes, when TypeScript never answers', ({ skip }) => {
+      skip(!('registerHooks' in module), 'needs module.registerHooks (Node 22.15)')
+      // Outside the project, so they are not changed files themselves.
+      const fakes = path.join(REPO, '.tmp', 'e2e-types-fake')
+      rmSync(fakes, { recursive: true, force: true })
+      mkdirSync(fakes, { recursive: true })
+      writeFileSync(path.join(fakes, 'typescript.mjs'), `// Starts, then never says which project a file is in.
+const never = () => new Promise(() => {})
+const snapshot = { update: async () => snapshot, getDefaultProjectForFile: never }
+export class API {
+  createSnapshot = async () => snapshot
+  close = never
+}
+export const TypeFlags = {}
+`)
+      writeFileSync(path.join(fakes, 'hook.mjs'), `import { registerHooks } from 'node:module'
+const fake = new URL('./typescript.mjs', import.meta.url).href
+registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescript/async' ? { url: fake, shortCircuit: true } : next(specifier, context)) })
+`)
+      const dir = project('types-hang', { 'tsconfig.json': TSCONFIG, 'src/name.ts': 'export {}\n' }, { 'src/name.ts': NAME, 'test/name.test.ts': NAME_TEST })
+      const started = performance.now()
+      const { status, report, output } = nyororiNode(['--import', pathToFileURL(path.join(fakes, 'hook.mjs')).href], dir, '--dry-run')
+      // Five seconds of them are the time limit for one request.
+      expect(performance.now() - started).toBeLessThan(20_000)
+      expect(status, output).toBe(0)
+      const reason = 'TypeScript did not answer within 5 s (opening src/name.ts)'
+      expect(report!.types).toEqual({ backend: 'none', reason, untyped: [{ file: path.join(report!.gitRoot, 'src', 'name.ts'), reason }] })
+      expect(arithmetic(report!)).toEqual([2, 6])
+      expect(output).toContain(`1 TypeScript file without type information for \`+\` (${reason}); string concatenation there may be mutated`)
+    })
   })
 
   test('stops with exit code 2 when the tests already fail without mutants', () => {

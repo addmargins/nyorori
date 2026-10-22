@@ -82,11 +82,11 @@ export interface UntypedFile {
 
 /**
  * Whether operand types told string concatenation apart from arithmetic.
- * `files` counts the TypeScript files whose `+` on changed lines were answered
- * from types; `reason` says why no file was.
+ * `files` counts the files whose `+` on changed lines were answered from
+ * types; `reason` says why no file was.
  */
 export type TypesUsage =
-  | { backend: 'tsrs'; files: number; untyped: UntypedFile[] }
+  | { backend: 'typescript'; files: number; untyped: UntypedFile[] }
   | { backend: 'none'; reason: string; untyped: UntypedFile[] }
 
 /** What the CLI hands to the Vitest session for one source file. */

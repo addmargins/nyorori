@@ -15,7 +15,7 @@ test('equivalent mutants are counted, but neither annotated nor failing', () => 
     skipped: [],
     suppressions: [],
     problems: [],
-    types: { backend: 'tsrs', files: 1, untyped: [] },
+    types: { backend: 'typescript', files: 1, untyped: [] },
     dryRun: false,
   }
   expect(formatText(report)).toBe('nyorori: 1 mutant in 1 changed file: 1 Killed\n  2 mutants dropped as equivalent (TCE)')
@@ -25,7 +25,7 @@ test('equivalent mutants are counted, but neither annotated nor failing', () => 
 })
 
 test('TypeScript files judged without types get one line of text, and nothing else', () => {
-  const reason = 'tsrs is unavailable: Cannot find the optional dependency @tsrs/win32-x64'
+  const reason = 'TypeScript is unavailable: Unable to resolve @typescript/typescript-win32-x64'
   const report: Report = {
     gitRoot: '/repo',
     base: 'abc',

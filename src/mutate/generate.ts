@@ -7,6 +7,7 @@ import {
   type ExpressionStatement,
   type MemberExpression,
   type Node,
+  type ParseResult,
   type Span,
 } from 'oxc-parser'
 import { ScopeTracker, type ScopeTrackerNode } from 'oxc-walker'
@@ -14,7 +15,7 @@ import { isOperator, type EquivalentMutant, type Mutant, type Operator, type Sup
 import { dropEquivalent } from './equivalent.ts'
 import { Strings, type Bindings } from './infer.ts'
 import type { Probe, Rule } from './profile.ts'
-import type { TypeOracle } from './typecheck.ts'
+import type { FileQuestions, TypeOracle } from './typecheck.ts'
 
 /**
  * A place in the source that the instrumenter rewrites. An expression site
@@ -114,10 +115,53 @@ const SUPPRESS_RE = /^nyorori-ignore-next-line\s+([A-Za-z]+(?:\s*,\s*[A-Za-z]+)*
  * Builds the mutants whose anchor lies on one of `changed` lines, plus the
  * suppression comments that apply to them. Mutants that minify to the
  * original code are set aside in `equivalent`. Ids start at `firstId`.
- * `types` tells string `+` from numeric `+` by the operand types; where it
- * cannot, the syntax decides.
+ * Where the syntax cannot tell string `+` from numeric `+`, `types` answers
+ * from the operand types (see typeQuestions).
  */
 export function generate(file: string, code: string, changed: ReadonlySet<number>, firstId: number, types = NO_TYPES): GenerateResult {
+  const { parsed, lines, sites } = plan(file, code, changed, types)
+  const sorted = [...sites.values()].sort((a, b) => a.start - b.start || b.end - a.end)
+  // Before ids are assigned, so each remaining site keeps a contiguous id range.
+  const { sites: ordered, equivalent } = dropEquivalent(file, code, sorted)
+  const mutants: Mutant[] = []
+  let id = firstId
+  for (const site of ordered) {
+    for (const planned of site.mutants) {
+      planned.mutant.id = id++
+      mutants.push(planned.mutant)
+      // After TCE, so a probe whose first reader was dropped is keyed by the next one.
+      if (planned.profile && planned.profile.probe.key === 0) planned.profile.probe.key = planned.mutant.id
+    }
+  }
+
+  const { suppressions, problems } = readSuppressions(file, parsed.comments, lines, changed)
+  return { sites: ordered, mutants, equivalent, suppressions, problems }
+}
+
+/**
+ * What generate() will ask `types` about `file`: the `+` on changed lines of
+ * mutated code where the syntax cannot tell. The type checker answers them all
+ * in one pass before generation, which stays synchronous. A file that does not
+ * parse has no questions; generate() reports it.
+ */
+export function typeQuestions(file: string, code: string, changed: ReadonlySet<number>): FileQuestions {
+  const questions: FileQuestions = { file, plus: [] }
+  const recorder: TypeOracle = {
+    plus: (_, left, right) => {
+      questions.plus.push({ left: { start: left.start, end: left.end }, right: { start: right.start, end: right.end } })
+      return 'unknown'
+    },
+  }
+  try {
+    plan(file, code, changed, recorder)
+  } catch (error) {
+    if (!(error instanceof ParseError)) throw error
+  }
+  return questions
+}
+
+/** The sites and mutants of `file` before TCE and ids, the part of generate() that asks `types`. */
+function plan(file: string, code: string, changed: ReadonlySet<number>, types: TypeOracle): { parsed: ParseResult; lines: number[]; sites: Map<string, Site> } {
   const parsed = parseSync(file, code)
   if (parsed.errors.length > 0) {
     throw new ParseError(parsed.errors[0]!.message)
@@ -167,18 +211,15 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
     code.slice(site.start, from) + insert + code.slice(to, site.end)
 
   /**
-   * String `+` is not mutated (string mutations are deferred). The operand
-   * types settle it where they are known; otherwise the syntax does, where it
-   * is certain that an operand is a string (infer.ts).
+   * String `+` is not mutated (string mutations are deferred). The syntax
+   * settles it where it is certain that an operand is a string (infer.ts);
+   * the checker could not answer otherwise there, so only the rest is asked.
    */
   function isConcatenation(left: Node, right: Node, at: number): boolean {
     // Only a `+` that can become a mutant is worth the question.
     if (!changed.has(position(at).line)) return false
-    // The checker cannot answer otherwise for a literal, so it is not started for one.
-    if (isStringLiteral(left) || isStringLiteral(right)) return true
-    const kind = types.plus(file, left, right)
-    if (kind !== 'unknown') return kind === 'string'
-    return strings.isString(left) || strings.isString(right)
+    if (strings.isString(left) || strings.isString(right)) return true
+    return types.plus(file, left, right) === 'string'
   }
 
   function condition(test: Expression | null, values: string[]): void {
@@ -331,22 +372,7 @@ export function generate(file: string, code: string, changed: ReadonlySet<number
     const statement = site.kind === 'expression' ? statements.get(site.start) : undefined
     if (statement) site.statement = { start: statement.start, end: statement.end }
   }
-  const sorted = [...sites.values()].sort((a, b) => a.start - b.start || b.end - a.end)
-  // Before ids are assigned, so each remaining site keeps a contiguous id range.
-  const { sites: ordered, equivalent } = dropEquivalent(file, code, sorted)
-  const mutants: Mutant[] = []
-  let id = firstId
-  for (const site of ordered) {
-    for (const planned of site.mutants) {
-      planned.mutant.id = id++
-      mutants.push(planned.mutant)
-      // After TCE, so a probe whose first reader was dropped is keyed by the next one.
-      if (planned.profile && planned.profile.probe.key === 0) planned.profile.probe.key = planned.mutant.id
-    }
-  }
-
-  const { suppressions, problems } = readSuppressions(file, parsed.comments, lines, changed)
-  return { sites: ordered, mutants, equivalent, suppressions, problems }
+  return { parsed, lines, sites }
 }
 
 function readSuppressions(
@@ -469,11 +495,6 @@ function isBooleanLiteral(node: Node): boolean {
 function isNumber(node: Node, value: number): boolean {
   node = unwrap(node)
   return node.type === 'Literal' && node.value === value
-}
-
-function isStringLiteral(node: Node): boolean {
-  node = unwrap(node)
-  return (node.type === 'Literal' && typeof node.value === 'string') || node.type === 'TemplateLiteral'
 }
 
 function isUndefined(node: Node): boolean {
