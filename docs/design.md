@@ -221,6 +221,11 @@ es-toolkit과 i18next의 upstream PR 13개를 다시 돌려 보니, 고친 코�
     - 5개는 잡혔다: `shuffle`, `remove`, `clone`의 ArrayBuffer, `cloneDeepWith`, i18next의 `codes.slice()`.
     - 8개는 살아남았고 실제 테스트 공백이다. `toFilled`가 입력을 바꾸고, `dropRight`와 `takeRightWhile`이 입력을 그대로 돌려주고, typed array와 DataView clone이 버퍼를 공유하고, compat `mergeWith`가 입력 배열의 빈칸을 채우고, i18next가 캐시 배열을 그대로 내준다. fp `windowed`의 `emit(buffer.slice())`는 확인하지 않았다.
     - equivalent는 2개였다. `partial`과 `partialRight`의 `partialArgs.slice().map(…)`이다. 지금 규칙은 정확히 이 둘만 뺀다.
+  - `Array.from(x)`와 `structuredClone(x)`는 사본으로 보지 않는다. 바로 읽고 버리는 `Array.from(x)`도, 지역 `const`에 담아 읽기만 하는 사본도 빼 보았지만 받아들이지 않았다. 같은 방법으로 es-toolkit과 i18next의 `src`에서 빠질 mutant를 하나씩 넣고 `vitest related`를 돌렸다.
+    - 바로 읽고 버리는 `Array.from(x)`는 es-toolkit에서 5개를 뺐다. 대개 변환이었다. compat의 `findIndex`, `indexOf`, `join`은 array-like 테스트만 잡았고, `pullAllBy`는 array-like `values`를 테스트하지 않아 살아남았다(실제 공백). `createPadding`은 문자열에 `.join`을 불러 타입으로만 잡혔다.
+    - 지역 `const` 사본 규칙은 두 저장소에서 아무것도 빼지 않았다. 그런 사본은 모두 제자리에서 바뀌거나, 돌려주거나, 넘기거나, 스냅샷이었다(`remove`, `shuffle`, `difference`, `cloneDeepWith`, `omit`).
+    - 둘을 합치면 es-toolkit 2099의 `const parts = Array.from(strings)`(equivalent)도 빠지지만, 위의 4개도 같이 빠진다. 인자의 타입이 `ArrayLike<string>`으로 `join`·`findIndex`·`indexOf`와 같아서, 문법이나 타입으로는 구별할 수 없다. 이 mutant는 억제 주석으로 다룬다.
+    - `structuredClone`은 깊은 사본이라 `includes`·`indexOf`의 동일성 비교와 `map`이 넘기는 원소가 원본과 다르다. 읽고 버려도 equivalent가 아니다.
   - 결과가 문자열이나 배열이어도 receiver의 일부를 꺼내는 조회(`charAt`, `at`)와 다른 종류로 바꾸는 것(`split`, `join`)은 넣지 않았다.
 - 그 밖의 메서드 호출에는 만들지 않는다. 조건과 조회(`set.has(v)`, `xs.includes(x)`, `s.indexOf('(')`, `map.get(k)`, `xs.join('')`, `re.test(s)`), 그리고 사용자 메서드다. 첫 인자도 receiver도 결과와 다른 종류의 값이어서, 테스트가 타입만 보고 잡는다. 그 호출이 조건이면 Condition과 Negation이, 값을 버리는 문이면 CallStatement가 변형한다.
 - receiver가 다음 이름이면 메서드 이름과 상관없이 만들지 않는다. 모듈이나 클래스는 문자열이나 배열이 아니다. `path.normalize(p)`가 `path`가 되지 않는다.
