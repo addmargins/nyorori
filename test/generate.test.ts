@@ -118,6 +118,33 @@ describe('calls', () => {
     expect(only('CallUnwrap', code, new Set([6]))).toEqual(['6:6 CallUnwrap `o.trim()` → `o`'])
   })
 
+  test('CallUnwrap leaves out a copy that is only read and dropped', () => {
+    const code = [
+      'export function f(s, xs, o, g) {',
+      '  const a = [xs.slice(), xs.slice(0), xs.concat(), s.slice()]',
+      '  const b = [xs.slice().map(g), (xs.slice(0)).join(), xs.concat().indexOf(s), (o?.xs.slice()).filter(g)]',
+      '  const c = [xs.slice().sort(), xs.slice().forEach(g), xs.slice(1).map(g)]',
+      '  return [a, b, c]',
+      '}',
+    ].join('\n')
+    expect(only('CallUnwrap', code)).toEqual([
+      // Kept, returned or passed on, a copy is not the input: the caller may change it.
+      '2:17 CallUnwrap `xs.slice()` → `xs`',
+      '2:29 CallUnwrap `xs.slice(0)` → `xs`',
+      '2:42 CallUnwrap `xs.concat()` → `xs`',
+      '2:54 CallUnwrap `s.slice()` → `s`',
+      // Read once and dropped, it reads the same as its receiver; the transforms on it keep theirs.
+      '3:25 CallUnwrap `xs.slice().map(g)` → `xs.slice()`',
+      '3:95 CallUnwrap `(o?.xs.slice()).filter(g)` → `(o?.xs.slice())`',
+      // Sorted in place, or looped over by code that may change the original.
+      '4:25 CallUnwrap `xs.slice().sort()` → `xs.slice()`',
+      '4:17 CallUnwrap `xs.slice()` → `xs`',
+      '4:36 CallUnwrap `xs.slice()` → `xs`',
+      '4:68 CallUnwrap `xs.slice(1).map(g)` → `xs.slice(1)`',
+      '4:59 CallUnwrap `xs.slice(1)` → `xs`',
+    ])
+  })
+
   test('CallUnwrap leaves predicates, lookups and other methods alone: either value would only have the wrong type', () => {
     const code = [
       "import path from 'node:path'",

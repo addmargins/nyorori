@@ -234,10 +234,17 @@ function plan(file, code, changes, types) {
     // Calls whose value an expression statement drops. CallStatement removes
     // them; CallUnwrap would only remove them too, with the first argument evaluated.
     const discarded = new Set();
+    // Receivers that a method only reads before they are dropped (`….map(f)`).
+    // A copy there changes nothing, so it gets no CallUnwrap.
+    const readOnce = new Set();
     const isGlobalConsoleCall = (node) => isConsoleCall(node) && !scopes.isDeclared('console');
     function mutate(node, parent) {
-        if (node.type === 'CallExpression')
-            references.add(unwrapReference(node.callee));
+        if (node.type === 'CallExpression') {
+            const callee = unwrapReference(node.callee);
+            references.add(callee);
+            if (callee.type === 'MemberExpression' && READS.has(methodName(node) ?? ''))
+                readOnce.add(unwrapReference(callee.object));
+        }
         else if (node.type === 'TaggedTemplateExpression')
             references.add(unwrapReference(node.tag));
         else if (node.type === 'UnaryExpression' && node.operator === 'delete')
@@ -385,6 +392,9 @@ function plan(file, code, changes, types) {
                 const kept = unwrapped(node);
                 if (!kept)
                     break;
+                // A copy that is only read and dropped (`xs.slice().map(f)`) reads the same as its receiver.
+                if (kept.receiver && isCopy(node) && readOnce.has(site))
+                    break;
                 const shown = showCall(node);
                 const to = kept.receiver ? shown.receiver : snippet(text(kept.node));
                 add(site, 'expression', calleeAnchor(node), 'CallUnwrap', text(kept.node), `\`${shown.call}\` → \`${to}\``);
@@ -445,7 +455,7 @@ function plan(file, code, changes, types) {
             if (declaration.type === 'Import' || declaration.type === 'Identifier' || isModule(declaration))
                 return undefined;
         }
-        const method = !callee.computed && callee.property.type === 'Identifier' ? callee.property.name : undefined;
+        const method = methodName(call);
         return method !== undefined && TRANSFORMS.has(method) ? { node: object, receiver: true } : undefined;
     }
     /**
@@ -705,6 +715,36 @@ const TRANSFORMS = new Set([
     'filter', 'flat', 'flatMap', 'map', 'reverse', 'sort', 'toReversed', 'toSorted',
 ]);
 /**
+ * Array methods that read their receiver without changing it and give back a
+ * new array or a value: a copy that only one of them reads is dropped right
+ * after, so it changes nothing (`xs.slice().map(f)`). Not `forEach`, `some`,
+ * `every`, `find` or `reduce`: a loop over a copy is usually there because its
+ * body changes the original (`listeners.slice().forEach((l) => l())`, where a
+ * listener can unsubscribe). Iterators (`values()`) read their receiver later.
+ */
+const READS = new Set([
+    'at', 'concat', 'filter', 'flat', 'flatMap', 'includes', 'indexOf', 'join', 'lastIndexOf', 'map', 'slice',
+    'toReversed', 'toSorted', 'toSpliced', 'with',
+]);
+/**
+ * `xs.slice()`, `xs.slice(0)` and `xs.concat()` copy their receiver. Unwrapped,
+ * the code works on the receiver itself: a function changes or returns its
+ * input (`toFilled`, `dropRight`), a clone shares it, a cache hands it out.
+ * Only a copy that is read once and dropped reads the same (see READS).
+ */
+function isCopy(call) {
+    const method = methodName(call);
+    const [first, ...rest] = call.arguments;
+    if (method === 'concat')
+        return !first;
+    return method === 'slice' && rest.length === 0 && (!first || isNumber(first, 0));
+}
+/** The name of the method a call makes: `sort` in `xs.sort()`, none in `xs[k]()`. */
+function methodName(call) {
+    const callee = unwrapReference(call.callee);
+    return callee.type === 'MemberExpression' && !callee.computed && callee.property.type === 'Identifier' ? callee.property.name : undefined;
+}
+/**
  * The argument a call passes on, which CallUnwrap puts in its place. None when
  * it is spread, or a callback: the result of a call that takes a callback is
  * hardly ever that function, or acts the same as it (`useCallback(fn, deps)`),
@@ -729,8 +769,7 @@ function isModule(declaration) {
 }
 const RECEIVER_METHODS = new Set(['call', 'apply', 'bind']);
 function isReceiverCall(call) {
-    const callee = unwrapReference(call.callee);
-    return callee.type === 'MemberExpression' && !callee.computed && callee.property.type === 'Identifier' && RECEIVER_METHODS.has(callee.property.name);
+    return RECEIVER_METHODS.has(methodName(call) ?? '');
 }
 /**
  * The call an expression statement makes (`f(x)`, `await f(x)`, `a?.f(x)`),

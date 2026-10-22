@@ -214,6 +214,13 @@ es-toolkit과 i18next의 upstream PR 13개를 다시 돌려 보니, 고친 코�
   - 배열: `map`, `filter`, `flat`, `flatMap`, `sort`, `reverse`, `toSorted`, `toReversed`. `sort`와 `reverse`는 receiver 자신을 돌려준다.
   - 둘 다: `slice`, `concat`
   - 바뀌는 것은 receiver이므로, 인자가 없거나(`s.trim()`) 콜백이나 spread를 받아도(`xs.filter((x) => x.ok)`, `[a].concat(...xs)`) 만든다.
+  - 사본(`xs.slice()`, `xs.slice(0)`, `xs.concat()`)을 바로 읽기만 하고 버리면 만들지 않는다: `xs.slice().map(f)`. 사본을 읽는 메서드는 receiver를 바꾸지 않고 새 배열이나 값을 돌려주는 `map`, `filter`, `flat`, `flatMap`, `slice`, `concat`, `toSorted`, `toReversed`, `toSpliced`, `with`, `at`, `includes`, `indexOf`, `lastIndexOf`, `join`이다. 이 경우 사본은 바로 버려지므로 receiver를 써도 같은 값을 읽는다.
+  - `forEach`, `some`, `every`, `find`, `reduce`로 도는 사본에는 만든다. 이런 사본은 대개 몸체가 원본을 바꾸기 때문에 있다(`listeners.slice().forEach((l) => l())`에서 listener가 구독을 끊는다). iterator(`values()`)는 receiver를 나중에 읽는다.
+  - 그 밖의 사본, 즉 변수에 담거나, 돌려주거나, 넘기거나, 제자리에서 바꾸는 사본에는 만든다. mutant는 입력 자체를 쓰는 코드다. 함수가 입력을 바꾸거나 그대로 돌려주고, clone이 버퍼를 공유하고, 캐시가 내부 배열을 내준다.
+  - 처음에는 반대로, 사본을 바로 제자리에서 바꿀 때(`xs.slice().sort()`)만 만들려고 했다. 그 전에 es-toolkit과 i18next의 `src` 전체에서 그 규칙이 빼는 사본 15개에 mutant를 하나씩 넣고 관련 테스트(`vitest related`)를 돌렸다. 바로 제자리에서 바꾸는 사본은 하나도 없어서 15개가 모두 빠질 참이었다.
+    - 5개는 잡혔다: `shuffle`, `remove`, `clone`의 ArrayBuffer, `cloneDeepWith`, i18next의 `codes.slice()`.
+    - 8개는 살아남았고 실제 테스트 공백이다. `toFilled`가 입력을 바꾸고, `dropRight`와 `takeRightWhile`이 입력을 그대로 돌려주고, typed array와 DataView clone이 버퍼를 공유하고, compat `mergeWith`가 입력 배열의 빈칸을 채우고, i18next가 캐시 배열을 그대로 내준다. fp `windowed`의 `emit(buffer.slice())`는 확인하지 않았다.
+    - equivalent는 2개였다. `partial`과 `partialRight`의 `partialArgs.slice().map(…)`이다. 지금 규칙은 정확히 이 둘만 뺀다.
   - 결과가 문자열이나 배열이어도 receiver의 일부를 꺼내는 조회(`charAt`, `at`)와 다른 종류로 바꾸는 것(`split`, `join`)은 넣지 않았다.
 - 그 밖의 메서드 호출에는 만들지 않는다. 조건과 조회(`set.has(v)`, `xs.includes(x)`, `s.indexOf('(')`, `map.get(k)`, `xs.join('')`, `re.test(s)`), 그리고 사용자 메서드다. 첫 인자도 receiver도 결과와 다른 종류의 값이어서, 테스트가 타입만 보고 잡는다. 그 호출이 조건이면 Condition과 Negation이, 값을 버리는 문이면 CallStatement가 변형한다.
 - receiver가 다음 이름이면 메서드 이름과 상관없이 만들지 않는다. 모듈이나 클래스는 문자열이나 배열이 아니다. `path.normalize(p)`가 `path`가 되지 않는다.
@@ -576,7 +583,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 - `x.length >= 0` 같은 항상 참인 조건은 `true`로 바꾸지 않는다.
 - 조건이 이미 `true`/`false` 리터럴이면 Condition mutant를 만들지 않는다. BooleanLiteral mutant와 겹치기 때문이다.
 - 같은 지점의 mutant끼리 대체 텍스트가 같으면 하나만 만든다. `if (check(true))`의 CallUnwrap `→ true`는 Condition `→ true`와 같다.
-- `CallUnwrap`은 첫 인자가 콜백인 함수 호출, 변환이 아닌 메서드 호출, `.call`/`.apply`/`.bind`, 다른 호출의 callee인 호출, 값을 버리는 호출 문은 만들지 않는다. `CallStatement`는 `super(…)`를 지우지 않는다("호출과 정규식" 참고).
+- `CallUnwrap`은 첫 인자가 콜백인 함수 호출, 변환이 아닌 메서드 호출, 바로 읽고 버리는 사본(`xs.slice().map(f)`), `.call`/`.apply`/`.bind`, 다른 호출의 callee인 호출, 값을 버리는 호출 문은 만들지 않는다. `CallStatement`는 `super(…)`를 지우지 않는다("호출과 정규식" 참고).
 - `Regex`는 `^`·`$`가 없는 패턴의 `m`, `.`가 없는 패턴의 `s`를 빼지 않는다. 빼도 같은 정규식이다. 컴파일되지 않는 mutant도 만들지 않는다.
 - `x * 1`, `x / 1`, `x * 1n`, `x / 1n`은 `*`↔`/` 변형을 만들지 않는다.
   - bigint에서도 `x * 1n`과 `x / 1n`은 같은 값이다. `x`가 bigint가 아니면 둘 다 같은 메시지의 TypeError를 던진다(Symbol이면 `Cannot convert a Symbol value to a number`, 그 밖에는 `Cannot mix BigInt and other types, use explicit conversions`). 0n, 음수, 2^100 크기의 bigint, 수, `-0`, NaN, 문자열, null, undefined, boolean, 객체, bigint를 주는 `valueOf`, Symbol, `Object(3n)`의 21가지로 확인했다. `valueOf`도 양쪽에서 한 번씩 불린다.
@@ -840,7 +847,8 @@ return age >= 18
 - **호출과 정규식 연산자.**
   - `CallUnwrap`은 타입을 보지 않는다. 메서드 이름으로 receiver를 고르므로, 이름이 같은 다른 객체의 메서드도 receiver로 바뀐다("호출과 정규식" 참고). 지역 변수에 담은 모듈(`const { posix } = path`의 `posix.normalize(p)`)은 알아보지 못해 `posix`로 바꾼다.
   - 전역 내장 객체의 정적 조건(`Object.hasOwn(o, k)`→`o`, `Array.isArray(x)`→`x`)은 함수 호출처럼 첫 인자로 바꾸므로, 결과가 다른 종류의 값이 된다. 조건에서는 그 값의 truthiness를 보는 mutant라서 Condition과 겹칠 수 있다.
-  - 값을 그대로 돌려주는 호출(`Object.freeze(x)`, Vue의 `markRaw(x)`, 정체성만 다른 메모이즈)과, 사본을 고치지 않는 곳의 사본(`xs.slice()`)은 살아남아 억제 주석이 필요할 수 있다.
+  - 값을 그대로 돌려주는 호출(`Object.freeze(x)`, Vue의 `markRaw(x)`, 정체성만 다른 메모이즈)과, 고치지도 내주지도 않는 사본(`const c = xs.slice()` 뒤에 읽기만 하는 코드, es-toolkit 2099의 `Array.from(strings)`)은 살아남아 억제 주석이 필요할 수 있다. 바로 읽고 버리는 사본(`xs.slice().map(f)`)에는 만들지 않는다("호출과 정규식" 참고).
+  - 문자열 사본(`s.slice()`)은 언제나 equivalent지만, 타입을 보지 않으므로 배열 사본과 구별하지 못한다.
   - 기본 import한 모듈의 함수(`path.dirname(f)`)에는 만들지 않으므로, 그런 함수를 더한 수정은 놓친다.
   - 정규식 mutant는 CLI를 돌리는 Node가 컴파일하는지로 거른다. 세션은 같은 Node로 뜨므로 테스트도 같은 엔진에서 돈다.
 - **브라우저 모드.** 지원하지 않는다.
