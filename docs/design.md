@@ -276,7 +276,7 @@ src/
 ├─ vitest.ts             프로젝트가 쓰는 Vitest 찾기 (Vite+ 포함)
 ├─ protocol.ts           CLI ↔ 세션 IPC 메시지
 └─ report.ts             텍스트, GitHub 어노테이션, step summary
-action.yml               composite action: npm ci 후 dist/cli.js 실행
+action.yml               composite action: 런타임 의존성만 설치하고 커밋된 dist/cli.js 실행
 ```
 
 - 세션은 프로젝트가 쓰는 Vitest를 찾아 import한다. 그래서 프로젝트가 고정한 버전과 설정을 그대로 쓴다.
@@ -292,6 +292,17 @@ GitHub Action에서는 `::error file=…,line=…` 워크플로 명령을 쓴다
 그래서 토큰 권한 없이도 문제가 된 mutant가 PR diff의 해당 줄에 바로 표시된다.
 merge-base를 구하려면 `actions/checkout`에 `fetch-depth: 0`이 필요하다. merge-base가 없으면 이것을 안내하고 exit 2로 끝낸다.
 
+### Action 패키징
+
+Action은 저장소를 받은 그대로 실행된다. 그래서 `dist/`를 커밋하고, Action은 `npm ci --omit=dev --ignore-scripts`로 런타임 의존성만 설치한다.
+
+- 전에는 devDependencies(Vitest, happy-dom 등)까지 받고 `prepare`로 `tsc` 빌드를 했다. 실제 실행에서 4~15초인 nyorori 단계 중 2.4~6.6초가 이 설치와 빌드였다. 빈 npm 캐시로 재면 설치가 4.7초에서 1.8초로 줄었다(각각 8번의 중앙값).
+- 런타임 의존성에는 설치 스크립트가 없다. oxc와 TypeScript의 네이티브 바이너리는 플랫폼별 optional 패키지로 미리 빌드되어 있다.
+- 번들하지 않는다. rolldown으로 묶어 봐도 CLI 시작이 10ms쯤 빨라질 뿐이었고, 설치 시간 차이는 네트워크 편차 안이었다. 설치 시간의 대부분은 어차피 외부에 두어야 하는 네이티브 패키지다(TypeScript 바이너리만 28MB). `tsc` 출력은 `src/`의 구조를 따르므로, CLI가 경로로 fork하는 `session.js`도 `cli.js` 옆에 있다.
+- `node_modules`를 `actions/cache`로 캐시하지 않는다. npm 캐시가 차 있어도 설치는 1.4초로 0.5초쯤 빨라질 뿐인데, 캐시를 받아 푸는 시간(gzip으로 23MB)과 캐시가 없을 때 올리는 시간이 든다. `hashFiles()`가 workspace 밖에 있는 Action의 lockfile을 읽지 못하므로 키도 따로 만들어야 한다.
+- `prepare`는 없앴다. clone에도 `dist/`가 있고 테스트는 `src/`를 직접 실행한다. 남겨 두면 `npm ci`가 커밋된 파일을 다시 쓴다.
+- CI는 `dist/`를 다시 빌드해서 커밋된 것과 다르면 실패한다. `npm run build`는 `dist/`를 지우고 다시 만든다. `tsc` 출력에는 시각이나 절대 경로가 없어서 몇 번을 빌드해도 같다.
+
 ### 타입 정보 (TypeScript 7 API)
 
 `a.name + b.title`처럼 멤버나 반환값끼리 잇는 `+`가 문자열 연결인지는 문법만으로 알 수 없다. 그래서 문법 규칙이 모르는 `+`는 TypeScript에 타입을 묻는다(L1 참고).
@@ -300,10 +311,10 @@ TypeScript 7은 Go로 다시 쓴 컴파일러이고, 별도 프로세스와 IPC�
 nyorori는 비동기 API를 쓴다. 동기 API는 응답을 기다리는 동안 이벤트 루프를 막으므로 시간 제한을 걸 수 없다.
 
 - **설치.** `typescript@7.1.0-beta`를 `dependencies`에 정확히 고정한다.
-  - nyorori 자신을 빌드하는 `tsc`도 이 패키지라서 버전은 하나다. Action의 `npm ci`가 `prepare`로 `dist/`를 빌드하므로 어차피 설치되어야 한다.
+  - nyorori 자신을 빌드하는 `tsc`도 이 패키지라서 버전은 하나다.
   - JS 패키지는 모든 플랫폼에 설치되고, 네이티브 바이너리는 `@typescript/typescript-<플랫폼>-<아키텍처>` optional 패키지에 따로 있다. 21개 플랫폼(win32 x64/arm64, darwin x64/arm64, linux x64/arm64/arm 등)용이 있고, `npm ci`는 맞는 것 하나만 받는다.
   - 바이너리 패키지가 없으면(지원하지 않는 플랫폼, 다른 플랫폼에서 만든 `node_modules`) 첫 요청이 `Unable to resolve @typescript/typescript-linux-x64. …`로 실패하고 문법 규칙으로 돌아간다. 바이너리 패키지를 지운 `npm ci` 결과로 확인했다.
-  - `npm ci --omit=optional`로는 nyorori를 설치할 수 없다. 빌드에 쓰는 `tsc`가 바로 그 네이티브 바이너리이고, oxc의 바인딩도 optional이다. typescript@7.0.2를 쓰던 이전에도 같았다.
+  - `npm ci --omit=optional`로는 nyorori를 쓸 수 없다. oxc의 바인딩이 optional이고, 빌드에 쓰는 `tsc`도 바로 그 네이티브 바이너리다. typescript@7.0.2를 쓰던 이전에도 같았다.
 - **미리 묻기.** mutant 생성(`generate()`)은 동기이고 API는 비동기다. 그래서 `run.ts`가 생성 전에 물을 것을 모아 한 번에 묻고, `generate()`는 답을 맵에서 찾기만 한다.
   - 물을 것은 `typeQuestions()`가 모은다. `generate()`의 계획 단계(파싱, 스코프 순회, 지점 수집)를 그대로 돌리면서 타입을 기록만 하는 오라클을 넘긴다. 그래서 묻는 `+`는 생성이 실제로 묻게 될 것과 정확히 같다. 범위 안에 있고, 변형하는 코드(함수 안, 전역 `console` 호출의 인자 밖)에 있고, 문법 규칙이 문자열로 정하지 못한 `+`다.
   - 파싱과 순회를 한 번 더 하는 비용은 626줄 파일 전체를 바뀐 것으로 쳤을 때 25~40ms였다. TCE는 하지 않는다.

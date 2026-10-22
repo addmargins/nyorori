@@ -231,3 +231,15 @@ return age >= 18
   - 형식이 틀린 주석
   - 억제할 mutant가 없는 새 주석. 들여쓰기만 바꾼 줄처럼 대상 줄에서 공백이나 주석만 바꿨다면 실패하지 않습니다.
   - 테스트가 이미 잡는 mutant를 억제하는 주석
+
+## 개발
+
+```sh
+npm ci
+npm run typecheck
+npm test
+```
+
+- Action은 커밋된 `dist/`를 그대로 실행합니다. 런타임 의존성만 설치하고(`npm ci --omit=dev --ignore-scripts`) 빌드하지 않습니다.
+- `src/`를 바꿨다면 커밋하기 전에 `npm run build`로 `dist/`를 다시 만들어 같이 커밋하세요. CI는 `dist/`를 다시 빌드해서 커밋된 것과 다르면 실패합니다.
+- 테스트는 `src/`를 직접 실행하므로 `dist/`가 필요 없습니다.

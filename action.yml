@@ -32,7 +32,9 @@ runs:
   steps:
     - name: Install nyorori
       shell: bash
-      run: npm ci --prefix "$GITHUB_ACTION_PATH" --no-audit --no-fund --loglevel=error
+      # dist/ is committed, so only the runtime dependencies are installed and nothing is built.
+      # None of them has an install script: the native parts come as prebuilt platform packages.
+      run: npm ci --omit=dev --ignore-scripts --prefix "$GITHUB_ACTION_PATH" --no-audit --no-fund --loglevel=error
     - name: Run nyorori
       shell: bash
       working-directory: ${{ inputs.working-directory }}
