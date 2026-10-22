@@ -11,7 +11,7 @@ import type { Reporter, TestModule, TestProject, TestSpecification, Vitest } fro
 import { SLOTS } from './mutate/profile.ts'
 import { PROVIDE, type ModuleResult, type Request, type Response, type SpecRef } from './protocol.ts'
 import type { FilePlan } from './types.ts'
-import { findVitest, ProjectError } from './vitest.ts'
+import { checkVitestVersion, findVitest, ProjectError } from './vitest.ts'
 
 // The probe buffer goes back as the records of the probes that ran, keyed by probe key.
 const SETUP = `import { inject, afterAll } from 'vitest'
@@ -59,6 +59,7 @@ function send(message: Response): void {
 async function init(root: string, candidates: string[], exclude: string[], dir: string): Promise<string[]> {
   const vitestDir = findVitest(root)
   const pkg = JSON.parse(readFileSync(path.join(vitestDir, 'package.json'), 'utf8'))
+  checkVitestVersion(pkg.version)
   const entry = pkg.exports['./node'].default ?? pkg.exports['./node']
   const { createVitest } = (await import(pathToFileURL(path.join(vitestDir, entry)).href)) as typeof import('vitest/node')
 
@@ -92,7 +93,9 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
       fsModuleCache: false,
       related: candidates,
       update: false,
-      bail: 1,
+      // No bail: cancelling a run makes test files that never started report
+      // their state from an earlier run, and can abort the next run, so a
+      // killed mutant could pass as Survived and the other way round.
       passWithNoTests: true,
       coverage: { enabled: false },
       provide: { [PROVIDE.active]: 0, [PROVIDE.limit]: 0, [PROVIDE.collect]: false, [PROVIDE.probes]: 0 },
@@ -103,6 +106,9 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
   // would fail the PR with false NoCoverage. Stop before judging anything.
   for (const project of vitest.projects) {
     const name = project.name ? `Vitest project "${project.name}"` : 'The Vitest config'
+    if (project.config.browser.enabled) {
+      throw new ProjectError(`${name} runs its tests in browser mode, which nyorori does not support yet.`)
+    }
     if (!project.vite.config.plugins.includes(plugin)) {
       // Vitest gives such a project its own Vite server and does not pass it the root's plugins.
       throw new ProjectError(
@@ -130,13 +136,13 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
 }
 
 function toRef(spec: TestSpecification): SpecRef {
-  return { project: spec.project.name, moduleId: spec.moduleId }
+  return { project: spec.project.name, moduleId: spec.moduleId, pool: spec.pool }
 }
 
 function fromRef(ref: SpecRef): TestSpecification {
   const project = vitest!.projects.find((p: TestProject) => p.name === ref.project)
   if (!project) throw new Error(`Unknown Vitest project "${ref.project}"`)
-  return project.createSpecification(ref.moduleId)
+  return project.createSpecification(ref.moduleId, undefined, ref.pool)
 }
 
 /**
@@ -178,7 +184,7 @@ async function run(active: number, limit: number, collect: boolean, profile: num
       error = failure?.message ?? 'failed'
     }
     return {
-      spec: toRef(module.project.createSpecification(module.moduleId)),
+      spec: { project: module.project.name, moduleId: module.moduleId, pool: poolOf(refs, module) },
       passed,
       hits: meta.nyororiHits ?? {},
       profile: meta.nyororiProfile ?? {},
@@ -187,7 +193,7 @@ async function run(active: number, limit: number, collect: boolean, profile: num
       error,
     }
   })
-  return { type: 'result', modules, unhandledErrors: result.errors.map(String), wall }
+  return { type: 'result', modules, unhandledErrors: result.errors.map(describeError), wall }
 }
 
 process.on('message', async (request: Request) => {
@@ -221,3 +227,19 @@ process.on('disconnect', () => {
   if (setupDir) rmSync(setupDir, { recursive: true, force: true })
   process.exit(0)
 })
+
+function poolOf(refs: SpecRef[], module: TestModule): string {
+  const ref = refs.find((r) => r.project === module.project.name && r.moduleId === module.moduleId)
+  if (!ref) throw new Error(`Vitest reported ${module.moduleId}, which this run did not ask for`)
+  return ref.pool
+}
+
+/** Vitest's serialized errors may have no prototype, so `String(error)` can throw. */
+function describeError(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'message' in error) return String(error.message)
+  try {
+    return JSON.stringify(error) ?? String(error)
+  } catch {
+    return 'unknown error'
+  }
+}

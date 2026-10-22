@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import os from 'node:os'
 import path from 'node:path'
 import { afterAll, describe, expect, test } from 'vitest'
-import { findVitest } from '../src/vitest.ts'
+import { checkVitestVersion, findVitest } from '../src/vitest.ts'
 
 const trees: string[] = []
 afterAll(() => {
@@ -91,5 +91,17 @@ describe('findVitest', () => {
   test('fails with a clear message when neither is installed', () => {
     const root = tree({ 'package.json': { devDependencies: { vitest: '5.0.5' } } })
     expect(() => findVitest(root)).toThrow(`Cannot find vitest from ${root}. Install vitest (or vite-plus) in the project first.`)
+  })
+})
+
+describe('checkVitestVersion', () => {
+  test('accepts Vitest 5 and later', () => {
+    for (const version of ['5.0.0', '5.0.5', '5.1.0-beta.1', '6.0.0']) expect(() => checkVitestVersion(version)).not.toThrow()
+  })
+
+  test('rejects older or unreadable versions', () => {
+    for (const version of ['4.1.11', '4.0.14', '3.2.7', 'next']) {
+      expect(() => checkVitestVersion(version)).toThrow(`nyorori needs Vitest 5 or later; this project uses Vitest ${version}.`)
+    }
   })
 })

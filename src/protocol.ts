@@ -4,6 +4,8 @@ import type { FilePlan } from './types.ts'
 export interface SpecRef {
   project: string
   moduleId: string
+  /** With `typecheck.enabled`, a test file may belong to the `typescript` pool instead of a runtime one. */
+  pool: string
 }
 
 export type Request =

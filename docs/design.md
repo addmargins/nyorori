@@ -50,7 +50,7 @@ nyorori run --base <ref>
                   모든 실행에서 원본과 같게 동작한 mutant는 살아남는 것이 확실하다고 표시한다
                   그중 타입으로도 null이 될 수 없는 값을 지키는 `?.`·`??`는 unnecessary로 따로 둔다
   7. mutant 실행   세션이 plain 계측으로 바꾸고 계측한 파일을 무효화한다
-                  mutant마다 provide(id) → 그 지점을 실행한 테스트 파일만, bail: 1로 실행
+                  mutant마다 provide(id) → 그 지점을 실행한 테스트 파일만 끝까지 실행 (bail 없음)
                   살아남는 것이 확실한 mutant와 unnecessary는 실행하지 않는다 (--no-predict면 실행한다)
   8. 보고          stdout, ::error 어노테이션, $GITHUB_STEP_SUMMARY, --json
                   Survived, NoCoverage, 억제 주석 문제가 있으면 exit 1
@@ -683,7 +683,8 @@ return age >= 18
 - **브라우저 모드.** 지원하지 않는다.
 - **실행 시간.**
   - mutant 수 × 관련 테스트 시간만큼 걸린다.
-  - hit 기반 테스트 선택과 `bail: 1`, 프로파일로 살아남는 것이 확실한 mutant를 실행하지 않는 것으로 줄이고, `--max-mutants`로 상한을 둔다.
+  - hit 기반 테스트 선택과, 프로파일로 살아남는 것이 확실한 mutant를 실행하지 않는 것으로 줄이고, `--max-mutants`로 상한을 둔다.
+  - `bail: 1`은 쓰지 않는다. 한 파일이 실패해 실행이 중간에 멈추면, 아직 시작하지 않은 파일이 이전 실행의 상태를 보고하거나 다음 실행까지 취소되어, 테스트가 잡는 mutant가 Survived로 나오는 일이 실제 저장소(chroma.js, axios)에서 재현됐다. 그래서 mutant마다 그 지점을 실행한 파일을 모두 끝까지 돌린다.
   - mutant는 아직 하나씩 순서대로 실행한다.
 
 ## 다음 단계

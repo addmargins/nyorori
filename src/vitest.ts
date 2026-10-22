@@ -24,6 +24,12 @@ export function findVitest(root: string): string {
   throw new ProjectError(`Cannot find vitest from ${root}. Install vitest (or vite-plus) in the project first.`)
 }
 
+/** nyorori relies on Vitest 5's Node API; older versions fail in ways that look like test results. */
+export function checkVitestVersion(version: string): void {
+  const major = Number(/^(\d+)\./.exec(version)?.[1])
+  if (!(major >= 5)) throw new ProjectError(`nyorori needs Vitest 5 or later; this project uses Vitest ${version}.`)
+}
+
 function resolvePackage(require: NodeJS.Require, name: string): string | undefined {
   try {
     return path.dirname(require.resolve(`${name}/package.json`))

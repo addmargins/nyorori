@@ -671,4 +671,27 @@ export function total(item) {
       expect(statuses(report!), output).toEqual(expected)
     })
   })
+
+  test('gives the same verdicts on every run when a mutant fails one of several test files in parallel', () => {
+    // A fast file kills most mutants while slow files are still running; a run
+    // that stops early left stale or pending states that turned kills into survivors.
+    const slow = "import { it, expect } from 'vitest'\nimport { f } from '../src/lib.js'\nfor (let i = 0; i < 20; i++) {\n  it('slow ' + i, async () => {\n    await new Promise((r) => setTimeout(r, 25))\n    expect(f(5, 2)).toBe(3)\n    expect(f(4, 4)).toBe(20)\n  })\n}\n"
+    const dir = project('parallel', {
+      'src/lib.js': 'export function f(a, b) {\n  return a\n}\n',
+      'test/a.test.js': "import { it, expect } from 'vitest'\nimport { f } from '../src/lib.js'\nit('a', () => {\n  expect(f(5, 2)).toBe(3)\n  expect(f(2, 5)).toBe(3)\n  expect(f(0, 0)).toBe(100)\n  expect(f(4, 4)).toBe(20)\n  expect(f(-1, -1)).toBe(-5)\n})\n",
+      'test/b.test.js': slow,
+      'test/c.test.js': slow,
+      'test/d.test.js': slow,
+    }, {
+      'src/lib.js': 'export function f(a, b) {\n  if (a > b) return a - b\n  if (a < b) return b - a\n  if (a === 0 && b === 0) return 100\n  return a * 2 + b * 3\n}\n',
+    })
+    // No test has exactly one zero, so `&&` → `||` is the only real survivor.
+    for (let i = 0; i < 2; i++) {
+      const { status, report, output } = nyorori(dir, '--no-predict')
+      expect(status, output).toBe(1)
+      expect(report!.results.filter((r) => r.status !== 'Killed').map((r) => `${r.line} ${r.operator} ${r.description}: ${r.status}`)).toEqual([
+        '4 Logical `&&` → `||`: Survived',
+      ])
+    }
+  })
 })
