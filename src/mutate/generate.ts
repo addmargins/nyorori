@@ -96,8 +96,9 @@ const FUNCTIONS = new Set<Node['type']>(['FunctionDeclaration', 'FunctionExpress
 /**
  * Where a node sits. Module-level code runs once at import time, and the
  * arguments of a global `console` call are only logged; neither is mutated.
+ * An async function awaits what it returns.
  */
-type Context = 'module' | 'function' | 'console'
+type Context = 'module' | 'function' | 'async' | 'console'
 
 const BINARY: Record<string, [Operator, string]> = {
   '<': ['ComparisonBoundary', '<='],
@@ -314,9 +315,13 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
   // Receivers that a method only reads before they are dropped (`….map(f)`).
   // A copy there changes nothing, so it gets no CallUnwrap.
   const readOnce = new Set<Node>()
+  // Values that the code around them converts as a global call would: a test
+  // as `Boolean(x)`, a template expression as `String(x)`, an awaited value as
+  // `Promise.resolve(x)`. That call there changes nothing (see convert).
+  const converted = new Map<Node, 'Boolean' | 'String' | 'Promise'>()
   const isGlobalConsoleCall = (node: Node) => isConsoleCall(node) && !scopes.isDeclared('console')
 
-  function mutate(node: Node, parent: Node | null): void {
+  function mutate(node: Node, parent: Node | null, context: Context): void {
     if (node.type === 'CallExpression') {
       const callee = unwrapReference(node.callee)
       references.add(callee)
@@ -324,6 +329,7 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
     } else if (node.type === 'TaggedTemplateExpression') references.add(unwrapReference(node.tag))
     else if (node.type === 'UnaryExpression' && node.operator === 'delete') references.add(unwrapReference(node.argument))
     else if (node.type === 'NewExpression') constructed.add(unwrapReference(node.callee))
+    convert(node, parent, context)
     switch (node.type) {
       case 'BinaryExpression': {
         const entry = BINARY[node.operator]
@@ -437,6 +443,9 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
         if (discarded.has(site) || references.has(site) || constructed.has(site)) break
         // `super(x)` → `x` leaves `this` uninitialised; `require('x')` → `'x'` and a global console call say nothing.
         if (node.callee.type === 'Super' || isName(node.callee, 'require') || isGlobalConsoleCall(node)) break
+        // Where the code converts the value anyway, the call changes nothing:
+        // `if (Boolean(x))`, `` `${String(x)}` ``, `await Promise.resolve(x)`.
+        if (isConversion(node, converted.get(site))) break
         // The first argument of `f.call(that, x)`, `.apply` and `.bind` is the receiver, not a value the call passes on.
         if (isReceiverCall(node)) break
         // Inside a chain, a `?.` before the call skips the links after it; parentheses around the call would cut them off.
@@ -472,6 +481,60 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
         break
       }
     }
+  }
+
+  /**
+   * Records the values that `node` converts (see converted). A test, the
+   * operand of `!`, and both operands of an `&&` or `||` whose own value is
+   * used that way are used only for their truthiness. An untagged template
+   * converts its expressions with ToString. `await`, and an async function
+   * returning a value, resolve it to a promise.
+   */
+  function convert(node: Node, parent: Node | null, context: Context): void {
+    switch (node.type) {
+      case 'IfStatement':
+      case 'ConditionalExpression':
+      case 'WhileStatement':
+      case 'DoWhileStatement':
+      case 'ForStatement':
+        if (node.test) converted.set(unwrap(node.test), 'Boolean')
+        break
+      case 'UnaryExpression':
+        if (node.operator === '!') converted.set(unwrap(node.argument), 'Boolean')
+        break
+      case 'LogicalExpression':
+        // Not `??`: `Boolean(x) ?? y` is never `y`, but `x ?? y` is when `x` is null.
+        if (node.operator !== '??' && converted.get(node) === 'Boolean') {
+          converted.set(unwrap(node.left), 'Boolean')
+          converted.set(unwrap(node.right), 'Boolean')
+        }
+        break
+      case 'TemplateLiteral':
+        // A tag gets the values themselves.
+        if (parent?.type !== 'TaggedTemplateExpression') for (const expression of node.expressions) converted.set(unwrap(expression), 'String')
+        break
+      case 'AwaitExpression':
+        converted.set(unwrap(node.argument), 'Promise')
+        break
+      case 'ReturnStatement':
+        if (node.argument && context === 'async') converted.set(unwrap(node.argument), 'Promise')
+        break
+      case 'ArrowFunctionExpression':
+        if (node.async && node.expression) converted.set(unwrap(node.body), 'Promise')
+        break
+    }
+  }
+
+  /**
+   * Whether `call` is the conversion of the unshadowed global `global`, with
+   * one argument: `Boolean(x)`, `String(x)`, `Promise.resolve(x)`. Unwrapped,
+   * a call with more would no longer evaluate the others.
+   */
+  function isConversion(call: CallExpression, global: string | undefined): boolean {
+    if (global === undefined || call.arguments.length !== 1 || scopes.isDeclared(global)) return false
+    const callee = unwrapReference(call.callee)
+    if (global !== 'Promise') return isName(callee, global)
+    return callee.type === 'MemberExpression' && methodName(call) === 'resolve' && isName(unwrapReference(callee.object), global)
   }
 
   /**
@@ -538,8 +601,8 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
   walk<Context>(parsed.program, null, 'module', scopes, (node, parent, context) => {
     if (node.type === 'ExpressionStatement') statements.set(node.start, node)
     if (context === 'console') return context
-    const inner = context === 'function' || FUNCTIONS.has(node.type) ? 'function' : 'module'
-    if (inner === 'function') mutate(node, parent)
+    const inner = 'async' in node && node.async ? 'async' : FUNCTIONS.has(node.type) ? 'function' : context
+    if (inner !== 'module') mutate(node, parent, context)
     // A `console` declared in an enclosing scope (a parameter, an import, ...) is the code's own object.
     return isGlobalConsoleCall(node) ? 'console' : inner
   })

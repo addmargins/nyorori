@@ -241,6 +241,18 @@ es-toolkit과 i18next의 upstream PR 13개를 다시 돌려 보니, 고친 코�
   - 다른 호출, `new`, tagged template의 callee이거나 `delete`의 대상인 호출: `f(x)(y)`→`x(y)`는 `x`가 함수가 아니라는 것만 확인한다. `delete (x)`는 strict mode에서 문법 오류다.
   - `f.call(that, x)`, `.apply`, `.bind`: 첫 인자는 넘기는 값이 아니라 `this`다.
   - 식 문이 값을 버리는 호출: `CallStatement`가 맡는다. 첫 인자를 평가한다는 것 말고는 같은 mutant다.
+  - 둘레의 코드가 같은 변환을 어차피 하는 값의 변환 호출. 셋 다 가려지지 않은 전역이고 인자가 하나일 때만이다. 인자가 더 있으면 mutant는 나머지를 평가하지 않는다.
+    - truthiness만 쓰는 값의 `Boolean(x)`: `if`, `while`, `do…while`, `for`, `?:`의 조건, `!`의 피연산자, 그리고 그 값을 truthiness로만 쓰는 `&&`·`||`의 피연산자다. 괄호는 벗긴다. `if (a && Boolean(x))`→`if (a && x)`는 같은 분기로 간다.
+      - `??`의 피연산자는 아니다. `Boolean(x)`는 nullish가 아니어서 `Boolean(x) ?? y`는 `y`가 되지 않지만, `x ?? y`는 `x`가 null이면 `y`다. 돌려주거나 담거나 넘기는 `Boolean(x)`에도 만든다.
+      - `test/generate.test.ts`의 자리에서는 이 mutant를 이전에도 TCE가 버렸다. minifier가 조건 안의 `Boolean(x)`를 `x`로 줄인다. 이제는 만들지 않으므로 압축할 일도 없다.
+    - tagged가 아닌 템플릿의 식인 `String(x)`: `` `${String(x)}` ``. 템플릿도 `String()`처럼 ToString으로 바꾼다.
+      - tagged template에는 만든다. tag는 값을 그대로 받는다.
+      - 문자열 `+`(`'' + String(x)`)에도 만든다. `+`의 ToPrimitive는 `valueOf`를 먼저 부르므로 `'' + obj`는 `String(obj)`와 다를 수 있다.
+    - `await`의 피연산자, async 함수의 `return` 값, async 화살표 함수의 식 본문인 `Promise.resolve(x)`. 괄호만 벗긴다.
+      - `await`는 PromiseResolve를 스스로 하므로 `await Promise.resolve(x)`와 `await x`는 같다. async 함수도 돌려주는 값으로 자기 promise를 resolve한다.
+      - 그 밖의 `Promise.resolve(x)`에는 만든다. async가 아닌 함수가 돌려주면 호출자는 promise 자체를 받는다.
+    - Symbol을 넣은 템플릿과 microtask 시점은 받아들인 차이다("남은 위험" 참고).
+    - es-toolkit과 i18next의 `src`에는 이 자리의 변환 호출이 없어서, 모든 줄을 바뀐 것으로 쳐도 mutant는 그대로였다. upstream PR 13개의 계획도 같다.
 - 같은 지점의 다른 mutant와 대체 텍스트가 같으면 만들지 않는다. `if (check(true))`의 `→ true`는 Condition이 이미 만든다.
 - 이전에는 인자가 있는 모든 호출을 첫 인자로 바꿨다. upstream PR 13개를 다시 돌렸을 때 그 `CallUnwrap` 29개를 보고 지금 규칙으로 바꿨다.
   - 함수 호출과 정적 호출은 잘 들었다. `toInteger(fromIndex)`→`fromIndex`, `normalizeZero(value)`→`value`, `getValue(element)`→`element`, `Number.isNaN(value)`→`value`, `this.formatLanguageCode(fc)`→`fc`가 모두 잡혔고, `Object.assign(parts, { raw: parts })`→`parts`는 실제로 빠진 테스트를 드러냈다.
@@ -583,7 +595,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 - `x.length >= 0` 같은 항상 참인 조건은 `true`로 바꾸지 않는다.
 - 조건이 이미 `true`/`false` 리터럴이면 Condition mutant를 만들지 않는다. BooleanLiteral mutant와 겹치기 때문이다.
 - 같은 지점의 mutant끼리 대체 텍스트가 같으면 하나만 만든다. `if (check(true))`의 CallUnwrap `→ true`는 Condition `→ true`와 같다.
-- `CallUnwrap`은 첫 인자가 콜백인 함수 호출, 변환이 아닌 메서드 호출, 바로 읽고 버리는 사본(`xs.slice().map(f)`), `.call`/`.apply`/`.bind`, 다른 호출의 callee인 호출, 값을 버리는 호출 문은 만들지 않는다. `CallStatement`는 `super(…)`를 지우지 않는다("호출과 정규식" 참고).
+- `CallUnwrap`은 첫 인자가 콜백인 함수 호출, 변환이 아닌 메서드 호출, 바로 읽고 버리는 사본(`xs.slice().map(f)`), `.call`/`.apply`/`.bind`, 다른 호출의 callee인 호출, 값을 버리는 호출 문, 둘레의 코드가 어차피 하는 변환(`if (Boolean(x))`, `` `${String(x)}` ``, `await Promise.resolve(x)`)은 만들지 않는다. `CallStatement`는 `super(…)`를 지우지 않는다("호출과 정규식" 참고).
 - `Regex`는 `^`·`$`가 없는 패턴의 `m`, `.`가 없는 패턴의 `s`를 빼지 않는다. 빼도 같은 정규식이다. 컴파일되지 않는 mutant도 만들지 않는다.
 - `x * 1`, `x / 1`, `x * 1n`, `x / 1n`은 `*`↔`/` 변형을 만들지 않는다.
   - bigint에서도 `x * 1n`과 `x / 1n`은 같은 값이다. `x`가 bigint가 아니면 둘 다 같은 메시지의 TypeError를 던진다(Symbol이면 `Cannot convert a Symbol value to a number`, 그 밖에는 `Cannot mix BigInt and other types, use explicit conversions`). 0n, 음수, 2^100 크기의 bigint, 수, `-0`, NaN, 문자열, null, undefined, boolean, 객체, bigint를 주는 `valueOf`, Symbol, `Object(3n)`의 21가지로 확인했다. `valueOf`도 양쪽에서 한 번씩 불린다.
@@ -849,6 +861,8 @@ return age >= 18
   - 전역 내장 객체의 정적 조건(`Object.hasOwn(o, k)`→`o`, `Array.isArray(x)`→`x`)은 함수 호출처럼 첫 인자로 바꾸므로, 결과가 다른 종류의 값이 된다. 조건에서는 그 값의 truthiness를 보는 mutant라서 Condition과 겹칠 수 있다.
   - 값을 그대로 돌려주는 호출(`Object.freeze(x)`, Vue의 `markRaw(x)`, 정체성만 다른 메모이즈)과, 고치지도 내주지도 않는 사본(`const c = xs.slice()` 뒤에 읽기만 하는 코드, es-toolkit 2099의 `Array.from(strings)`)은 살아남아 억제 주석이 필요할 수 있다. 바로 읽고 버리는 사본(`xs.slice().map(f)`)에는 만들지 않는다("호출과 정규식" 참고).
   - 문자열 사본(`s.slice()`)은 언제나 equivalent지만, 타입을 보지 않으므로 배열 사본과 구별하지 못한다.
+  - `` `${String(x)}` ``에는 만들지 않는다. `x`가 Symbol이면 `` `${x}` ``는 TypeError를 던지고 `String(x)`는 던지지 않으므로, 그 mutant는 Symbol을 넣는 테스트가 잡을 수 있었다. 템플릿에 Symbol을 넣는 코드는 드물어서 받아들였다.
+  - async 함수가 돌려주는 `Promise.resolve(x)`에도 만들지 않는다. `x`가 native promise가 아니면 `return x`와는 함수의 promise가 resolve되는 microtask 시점만 다르다. 그 순서에 기대는 테스트만 잡을 수 있으므로 받아들였다. `await Promise.resolve(x)`와 `await x`는 시점까지 같다.
   - 기본 import한 모듈의 함수(`path.dirname(f)`)에는 만들지 않으므로, 그런 함수를 더한 수정은 놓친다.
   - 정규식 mutant는 CLI를 돌리는 Node가 컴파일하는지로 거른다. 세션은 같은 Node로 뜨므로 테스트도 같은 엔진에서 돈다.
 - **브라우저 모드.** 지원하지 않는다.

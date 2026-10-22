@@ -192,6 +192,70 @@ describe('calls', () => {
     expect(only('CallUnwrap', code)).toEqual([])
   })
 
+  test('CallUnwrap leaves a conversion that the code around it makes anyway', () => {
+    const code = [
+      'export async function f(x, y) {',
+      // Used only for its truthiness: a test, the operand of `!`, and `&&` or `||` inside those.
+      '  if (Boolean(x) || (y && !Boolean(y))) return',
+      '  while ((Boolean(x))) x--',
+      '  for (; Boolean(y);) y--',
+      '  do x++; while (!(Boolean(x) && Boolean(y)))',
+      '  const a = Boolean(x) ? y : x',
+      // A template converts with ToString, as `String` does.
+      '  const s = `${String(x)}-${(String(y))}`',
+      // `await`, and an async function returning a value, resolve it as `Promise.resolve` does.
+      '  const v = await Promise.resolve(x)',
+      '  return (Promise.resolve([a, s, v]))',
+      '}',
+      'export const g = async (x) => Promise.resolve(x)',
+    ].join('\n')
+    expect(only('CallUnwrap', code)).toEqual([])
+    // Not made at all. TCE dropped the `Boolean` ones before: the minifier reads `if (Boolean(x))` as `if (x)`.
+    expect(generate('file.js', code, addedLines(code, all(code)), 1).equivalent).toEqual([])
+  })
+
+  test('CallUnwrap keeps a conversion whose value is used otherwise, or of a shadowed global', () => {
+    const code = [
+      'export async function f(x, y, tag) {',
+      // Returned, kept by `??` (`x ?? y` is `y` when `x` is null), or stored by `&&`.
+      '  if (Boolean(x) ?? y) return Boolean(x)',
+      '  const b = Boolean(y) && x',
+      // A tag gets the values themselves; `+` tries `valueOf` before `toString`.
+      "  const s = [tag`${String(x)}`, '' + String(y)]",
+      // Not awaited, or with a second argument that `await x` would not evaluate.
+      '  const p = [Promise.resolve(x), await Promise.resolve(x, y)]',
+      '  return [b, s, p]',
+      '}',
+      // Not async: the caller gets the promise itself.
+      'export function g(x) {',
+      '  return Promise.resolve(x)',
+      '}',
+    ].join('\n')
+    expect(only('CallUnwrap', code)).toEqual([
+      '2:7 CallUnwrap `Boolean(x)` → `x`',
+      '2:31 CallUnwrap `Boolean(x)` → `x`',
+      '3:13 CallUnwrap `Boolean(y)` → `y`',
+      '4:20 CallUnwrap `String(x)` → `x`',
+      '4:38 CallUnwrap `String(y)` → `y`',
+      '5:22 CallUnwrap `Promise.resolve(x)` → `x`',
+      '5:48 CallUnwrap `Promise.resolve(x, y)` → `x`',
+      '9:18 CallUnwrap `Promise.resolve(x)` → `x`',
+    ])
+    // A name the code declares is its own function, whatever it does.
+    const shadowed = [
+      "import * as Promise from './promise'",
+      'export async function f(x, Boolean, String) {',
+      '  if (Boolean(x)) return `${String(x)}`',
+      '  return Promise.resolve(x)',
+      '}',
+    ].join('\n')
+    expect(only('CallUnwrap', shadowed)).toEqual([
+      '3:7 CallUnwrap `Boolean(x)` → `x`',
+      '3:29 CallUnwrap `String(x)` → `x`',
+      '4:18 CallUnwrap `Promise.resolve(x)` → `x`',
+    ])
+  })
+
   test('call descriptions show the call around its callee, hiding a long receiver behind `…`', () => {
     const code = [
       'export function f(array, values, code, items, unescapedValues, match, options) {',

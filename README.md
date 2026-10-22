@@ -195,6 +195,7 @@ Vite에 영향을 주지 않는 `test` 옵션(`name`, `include`, `environment` �
   - receiver가 import(`import * as` 제외)나 `require`로 받은 이름, 클래스, 위 목록에 없는 전역(`Buffer`, `$` 등)이면 메서드 이름과 상관없이 만들지 않습니다. 모듈이나 클래스는 문자열이나 배열이 아니기 때문입니다(`path.normalize(p)`).
   - receiver가 정말 문자열이나 배열인지는 보지 않고 메서드 이름으로 정합니다. 그래서 `map` 같은 이름의 메서드가 있는 사용자 객체도 receiver로 바뀝니다.
   - 다음도 만들지 않습니다: `super(…)`, `require(…)`, 전역 `console` 호출, `.call`/`.apply`/`.bind`, 다른 호출이나 `new`의 callee인 호출, optional chain 안에서 `?.` 뒤에 오는 호출(`a?.b(x).c`), 값을 버리는 호출 문(`CallStatement`가 맡음)
+  - 둘레의 코드가 같은 변환을 어차피 하는 곳의 변환 호출에도 만들지 않습니다. 가려지지 않은 전역에 인자가 하나일 때만입니다. 조건, `!`, 그 값을 truthiness로만 쓰는 `&&`·`||` 안의 `Boolean(x)`, tagged가 아닌 템플릿의 `` `${String(x)}` ``, `await`하거나 async 함수가 돌려주는 `Promise.resolve(x)`입니다. `Boolean(x) ?? y`, 돌려주거나 담는 `Boolean(x)`, tagged template, `'' + String(x)`, async가 아닌 함수가 돌려주는 `Promise.resolve(x)`에는 만듭니다. `x`가 Symbol이면 `` `${x}` ``는 throw하고, async 함수가 `return x`하면 resolve되는 microtask 시점이 다르지만, 이 차이는 받아들였습니다.
 - 호출 mutant의 설명은 호출을 callee 중심으로 짧게 보여 줍니다. 40자를 넘으면 20자보다 긴 receiver는 `…`로, 인자는 뒤를 잘라 표시합니다. 예: `` `….map(normalizeZero)` → `…` ``, `` `code?.replace(/_/g, '-')` → `code` ``
 - `CallStatement`는 `super(…)`와 전역 `console` 호출을 지우지 않습니다.
 - 정규식 mutant는 모두 `new RegExp`로 컴파일되는지 확인하고, 되지 않으면 버립니다. `^`·`$`가 없는 패턴의 `m`, `.`가 없는 패턴의 `s`는 빼도 같으므로 빼지 않습니다.
