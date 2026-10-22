@@ -117,6 +117,8 @@ export function untested(n: number): number {
       'src/age.ts:5 FunctionBody body → `return`: Killed',
       'src/age.ts:6 Condition `isAdult(age)` → `true`: Killed',
       'src/age.ts:6 Condition `isAdult(age)` → `false`: Killed',
+      // label(3) would be 'adult'.
+      'src/age.ts:6 CallUnwrap `isAdult(age)` → `age`: Killed',
       'src/age.ts:10 FunctionBody body → `return`: Killed',
       'src/age.ts:12 Condition `i < n` → `false`: Killed',
       'src/age.ts:12 ComparisonBoundary `<` → `<=`: Killed',
@@ -127,6 +129,70 @@ export function untested(n: number): number {
     ])
     expect(report!.results[0]!.tests).toEqual(['test/age.test.ts'])
     expect(output).toContain('Survived   src/age.ts:2:14  ComparisonBoundary  `>=` → `>`')
+    // --json says why each failing mutant fails: the profile's reason, or the words of the text output.
+    expect(report!.results.filter((r) => r.reason).map((r) => `${r.line} ${r.status}: ${r.reason}`)).toEqual([
+      '2 Survived: no test has `age === 18`',
+      '16 NoCoverage: no test runs this code',
+      '17 NoCoverage: no test runs this code',
+    ])
+  })
+
+  test('mutates the wrapper calls, call statements and regex flags that fixes add', () => {
+    // The kinds of fixes that got no mutant at all when upstream PRs were replayed.
+    const base = `export function first(values) {
+  return values[0]
+}
+
+export function unmatched(expected, actual) {
+  const rest = new Set(expected)
+  for (const key of actual) {
+    if (!rest.has(key)) return null
+  }
+  return [...rest]
+}
+
+export function stripTags(html) {
+  return html.replace(/<[^>]*>/, '')
+}
+
+export function hasTodo(text) {
+  return /todo/.test(text)
+}
+`
+    const head = base
+      .replace('  return values[0]', '  return normalizeZero(values[0])')
+      .replace('    if (!rest.has(key)) return null\n', '    if (!rest.has(key)) return null\n    rest.delete(key)\n')
+      .replace('/<[^>]*>/,', '/<[^>]*>/g,')
+      .replace('/todo/.test', '/todo/i.test')
+    const dir = project('calls-regex', {
+      'src/zero.js': 'export function normalizeZero(x) {\n  return Object.is(x, -0) ? 0 : x\n}\n',
+      'src/fix.js': base,
+    }, {
+      'src/fix.js': `import { normalizeZero } from './zero.js'\n\n${head}`,
+      'test/fix.test.js': `import { expect, test } from 'vitest'
+import { first, hasTodo, stripTags, unmatched } from '../src/fix.js'
+
+test('first', () => { expect(Object.is(first([-0]), 0)).toBe(true) })
+test('unmatched', () => { expect(unmatched(['a', 'b'], ['a'])).toEqual(['b']) })
+test('stripTags', () => { expect(stripTags('<b>bold</b>')).toBe('bold') })
+// Lowercase only: no test checks what the \`i\` flag is for.
+test('hasTodo', () => { expect(hasTodo('todo: x')).toBe(true); expect(hasTodo('done')).toBe(false) })
+`,
+    })
+    const { status, report, output } = nyorori(dir)
+    expect(status, output).toBe(1)
+    expect(statuses(report!)).toEqual([
+      'src/fix.js:4 CallUnwrap `normalizeZero(values[0])` → `values[0]`: Killed',
+      'src/fix.js:11 CallStatement `rest.delete(key)` removed: Killed',
+      "src/fix.js:17 CallUnwrap `html.replace(/<[^>]*>/g, '')` → `/<[^>]*>/g`: Killed",
+      'src/fix.js:17 Regex `[^>]` → `[>]`: Killed',
+      'src/fix.js:17 Regex `/…/g` → `/…/`: Killed',
+      'src/fix.js:21 CallUnwrap `/todo/i.test(text)` → `text`: Killed',
+      'src/fix.js:21 Regex `/…/i` → `/…/`: Survived',
+    ])
+    expect(report!.results.at(-1)).toMatchObject({ reason: 'every test still passes with this change' })
+    expect(report!.results.at(-1)).not.toHaveProperty('predicted')
+    expect(output).toContain('Survived   src/fix.js:21:16  Regex  `/…/i` → `/…/`  (every test still passes with this change)')
   })
 
   test('a reasoned suppression turns a survivor into a reported, passing Ignored', () => {
@@ -439,6 +505,7 @@ registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescrip
       'src/age.ts:5 FunctionBody body → `return`: Killed',
       'src/age.ts:6 Condition `isAdult(age)` → `true`: Killed',
       'src/age.ts:6 Condition `isAdult(age)` → `false`: Killed',
+      'src/age.ts:6 CallUnwrap `isAdult(age)` → `age`: Killed',
       'src/age.ts:10 FunctionBody body → `return`: Killed',
       'src/age.ts:12 Condition `i < n` → `false`: Killed',
       'src/age.ts:12 ComparisonBoundary `<` → `<=`: Killed',
@@ -561,13 +628,18 @@ afterAll(() => {
       'src/shop.js:22 Condition `x < lo` → `true`: Killed',
       'src/shop.js:22 Condition `x < lo` → `false`: Killed',
       'src/shop.js:22 ComparisonBoundary `<` → `<=`: Survived',
+      // Calls and statements are never predicted: a call can have side effects, whatever it returns.
+      'src/shop.js:23 CallUnwrap `Math.min(x, hi)` → `x`: Survived',
       // A test with a call is never predicted; this one runs, and survives.
       'src/shop.js:27 Condition `Array.isArray(list)` → `true`: Survived',
       'src/shop.js:27 Condition `Array.isArray(list)` → `false`: Killed',
+      'src/shop.js:27 CallUnwrap `Array.isArray(list)` → `list`: Survived',
+      'src/shop.js:32 CallStatement `handlers.onMessage?.(msg)` removed: Killed',
       'src/shop.js:32 OptionalChaining `?.` → `(none)`: Survived',
       'src/shop.js:37 Condition `options.verbose` → `true`: Killed',
       'src/shop.js:37 Condition `options.verbose` → `false`: Survived',
     ]
+    // The profile's reasons; the other survivors get the words of the text output.
     const reasons = [
       'src/shop.js:14:32 `item.fee` was always 0',
       'src/shop.js:18:14 no test makes `user` null or undefined here',
@@ -575,8 +647,9 @@ afterAll(() => {
       'src/shop.js:32:21 no test makes `handlers.onMessage` null or undefined here',
       'src/shop.js:37:7 the condition was always falsy in tests',
     ]
+    const GENERIC = new Set(['every test still passes with this change', 'no test runs this code'])
     const reasonsOf = (report: Report) =>
-      report.results.filter((r) => r.reason).map((r) => `${path.relative(report.gitRoot, r.file)}:${r.line}:${r.column} ${r.reason}`)
+      report.results.filter((r) => r.reason && !GENERIC.has(r.reason)).map((r) => `${path.relative(report.gitRoot, r.file)}:${r.line}:${r.column} ${r.reason}`)
 
     test('reports survivors from the profile without running them, and skips string `+`', () => {
       const dir = project('profile', { 'src/shop.js': SHOP_BASE }, { 'src/shop.js': SHOP, 'test/shop.test.js': SHOP_TEST })
@@ -584,8 +657,9 @@ afterAll(() => {
       expect(status, output).toBe(1)
       expect(statuses(report!)).toEqual(expected)
       expect(reasonsOf(report!)).toEqual(reasons)
-      // Every mutant with a reason was judged from the profile alone.
-      expect(report!.results.filter((r) => r.predicted).map((r) => r.id)).toEqual(report!.results.filter((r) => r.reason).map((r) => r.id))
+      // Every mutant with a reason from the profile was judged from the profile alone, and every failing one has a reason.
+      expect(report!.results.filter((r) => r.predicted).map((r) => r.id)).toEqual(report!.results.filter((r) => r.reason && !GENERIC.has(r.reason)).map((r) => r.id))
+      expect(report!.results.filter((r) => (r.status === 'Survived' || r.status === 'NoCoverage') && !r.reason)).toEqual([])
       expect(report!.skipped.map((m) => `${path.relative(report!.gitRoot, m.file)}:${m.line} ${m.operator} ${m.description}: ${m.reason}`)).toEqual([
         'src/shop.js:2 Arithmetic `+` → `-`: string concatenation in every observed evaluation',
       ])

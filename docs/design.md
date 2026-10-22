@@ -148,8 +148,62 @@ TCE로 버린 mutant와, 실행 시간에 문자열 연결로 확인되어 건�
 | `Condition` | `if`/삼항의 조건 → `true`, `false`. 루프 조건 → `false` (`true`는 무한 루프만 만듦) |
 | `FunctionBody` | 블록 본문 → 즉시 `return`. 화살표 함수의 식 본문 → `undefined` |
 | `OptionalChaining` | `a?.b`→`a.b`, `a?.[i]`→`a[i]`, `f?.()`→`f()` |
+| `CallUnwrap` | 인자가 있는 호출 → 첫 인자. `toInteger(x)`→`x`, `obj.get(key, d)`→`key` |
+| `CallStatement` | 값을 버리는 호출 문 → 호출 제거. `unmatched.delete(key)`→`undefined`, `await save(x)`→`await undefined` |
+| `Regex` | 정규식 리터럴: flag 하나 제거, 최상위 `^`·`$` 제거, 문자 클래스 부정(`[abc]`↔`[^abc]`), `\d`↔`\D`, `\w`↔`\W`, `\s`↔`\S` |
 
 문자열 리터럴→`""`과 배열/객체 리터럴 비우기는 오탐이 많아 2차로 미룬다.
+
+#### 호출과 정규식
+
+es-toolkit과 i18next의 upstream PR 13개를 다시 돌려 보니, 고친 코드에 mutant가 하나도 생기지 않는 경우가 많았다. 그러면 녹색 결과는 그 수정에 대해 아무것도 말하지 않는다.
+- 값을 감싸는 호출을 더한 수정: `normalizeZero(x)`, `toInteger(fromIndex)`, `getValue(element)`
+- 호출 문을 더한 수정: `unmatched.delete(key)`
+- 정규식 리터럴을 바꾼 수정: `/s`나 `/g` flag를 더함
+
+그래서 세 연산자를 더했다. 셋 다 다른 연산자처럼 함수 안의 코드에만 만들고, 타입 위치는 들어가지 않는다.
+
+**`CallUnwrap`.** 인자가 하나 이상이고 첫 인자가 spread가 아닌 호출을 첫 인자로 바꾼다. 감싸는 호출을 지운 코드다.
+- 메서드 호출(`a.b(x)`)도 포함한다. 감싸는 함수는 import한 함수(`toInteger`)일 수도, 클래스 기반 코드의 메서드나 헬퍼 객체의 함수(`this.getValue(x)`, `Math.trunc(x)`, `path.resolve(p)`)일 수도 있다. 어느 메서드가 값을 감싸는 것인지는 타입 없이는 알 수 없다. 이 저장소의 `src`에서는 `CallUnwrap`의 절반쯤이 메서드 호출이다. `map.get(k)`→`k`나 `s.slice(0, n)`→`0`처럼 대개 결과를 확인하는 테스트가 바로 잡으므로, 거짓 실패보다는 실행 비용이 는다.
+- 앵커는 callee의 이름이다(`a.b(x)`의 `b`, `f(x)`의 `f`). 체인의 다음 줄에 더한 `.b(x)`도 그 줄에 걸린다.
+- optional chain의 끝인 호출(`a?.b(x)`)은 체인 전체를 지점으로 삼는다. 둘은 범위가 같다. 체인 안에서 `?.` 뒤에 오는 호출(`a?.b(x).c`의 `a?.b(x)`)은 만들지 않는다. 괄호로 감싸면 체인이 거기서 끊겨, `a`가 null일 때 원본 분기도 `.c`에서 throw하게 된다. `?.` 앞의 호출(`f(x)?.y`의 `f(x)`)은 감싸도 같다.
+- 만들지 않는 것
+  - `super(x)`: `this`가 초기화되지 않는다. `import(x)`는 호출 노드가 아니다. `require('x')`→`'x'`는 아무것도 확인하지 않는다.
+  - 전역 `console` 호출과 그 인자(console 필터와 같다)
+  - 다른 호출, `new`, tagged template의 callee이거나 `delete`의 대상인 호출: `f(x)(y)`→`x(y)`는 `x`가 함수가 아니라는 것만 확인한다. `delete (x)`는 strict mode에서 문법 오류다.
+  - 첫 인자가 함수 리터럴인 호출(`xs.map((v) => …)`, `useCallback(() => …, deps)`): 결과가 그 함수인 API는 거의 없고, 있으면 같은 함수처럼 동작한다. 결과를 쓰는지만 확인하는 mutant가 된다.
+  - `f.call(that, x)`, `.apply`, `.bind`: 첫 인자는 넘기는 값이 아니라 `this`다.
+  - 식 문이 값을 버리는 호출: `CallStatement`가 맡는다. 첫 인자를 평가한다는 것 말고는 같은 mutant다.
+- 같은 지점의 다른 mutant와 대체 텍스트가 같으면 만들지 않는다. `if (check(true))`의 `→ true`는 Condition이 이미 만든다.
+
+**`CallStatement`.** 식 문의 식이 호출이면(괄호와 TS 단언은 벗긴다) 그 호출을 `undefined`로 바꾼다. 부수 효과가 일어나지 않는다.
+- `await f(x)`는 호출만 바꿔 `await undefined`가 된다. 문이 한 틱 기다리는 것은 그대로다.
+- `a?.b(x)`처럼 optional chain의 끝인 호출은 체인 전체를 바꾼다. 같은 범위의 OptionalChaining과 한 지점이 된다.
+- `super(x)`(파생 클래스의 생성자가 `this`에서 throw함)와 전역 `console` 호출은 만들지 않는다.
+- 지점이 문 맨 앞이므로 계측은 문을 블록으로 감싼다(`Site.statement`). 앞 줄에 세미콜론이 없어도 `(`가 앞 줄과 이어지지 않는다.
+- 결과를 쓰지 않는 순수한 호출(`Math.abs(x)`)은 minifier가 원본에서도 지우므로 TCE가 버린다.
+
+**`Regex`.** 정규식 리터럴 하나에 다음을 하나씩 만든다. 설명은 `` `/…/gi` → `/…/i` ``, `` `^` removed ``, `` `[abc]` → `[^abc]` ``, `` `\d` → `\D` ``처럼 짧게 쓴다.
+- flag 하나 제거. `m`은 `^`·`$`만, `s`는 `.`만 읽으므로, 클래스 밖에 그것이 없으면 빼도 같아서 만들지 않는다.
+- 그룹 밖의 `^`나 `$` 제거
+- 문자 클래스 부정: `[abc]`↔`[^abc]`, `[]`↔`[^]`. `v` flag에서는 중첩된 클래스 중 바깥 것만
+- `\d`↔`\D`, `\w`↔`\W`, `\s`↔`\S`. 클래스 안의 것도 바꾼다.
+- 패턴은 한 번 훑어서 읽는다. 이스케이프는 두 글자로 건너뛴다. `\u{41}`, `\p{L}`, `\k<name>`처럼 더 긴 이스케이프의 나머지에는 괄호, 대괄호, 앵커, `.`가 없다. 클래스 안의 `[`는 `v` flag에서만 중첩 클래스를 연다.
+- **모든 mutant를 CLI 프로세스에서 `new RegExp(pattern, flags)`로 컴파일해 보고, 실패하면 버린다.** oxc-parser는 정규식 리터럴의 패턴을 검사하지 않는다. `/a**/`, `/[z-a]/`, `/a{2,1}/`도 파싱된다(확인함). 그래서 잘못된 리터럴은 계측 결과의 파싱 확인을 통과하고, Vitest가 파일을 읽을 때 SyntaxError가 되어 기준 실행이 실패한다(exit 2). 예를 들어 `/[\p{L}--[a-z]]/v`에서 `v`를 빼면 범위 순서가 틀린 클래스가 되고, `[\q{ab}c]`는 `v`에서도 부정할 수 없다.
+- 원본이 이 Node에서 컴파일되지 않으면 그 리터럴은 변형하지 않는다. 엔진이 읽지 못하는 패턴을 추측으로 훑지 않으려는 것이다.
+- 패턴이 비면 `(?:)`로 쓴다. `//`는 주석이다. `*`로 시작하는 패턴은 `/*`가 되지만 늘 컴파일되지 않으므로 이미 버려진다.
+- 리터럴은 계측에서 늘 `(` 뒤에 온다(`(__nyorori_h(…) ? (/a/g) : … ? (/a/) : …)`). 그래서 대체 텍스트의 `/`가 나눗셈으로 읽히지 않는다. 문 맨 앞의 리터럴(블록 뒤의 `/x/.test(s) && …`)은 문 전체를 블록으로 감싼다. `n / /ab/.source.length`처럼 나눗셈 바로 뒤의 리터럴도 `test/instrument.test.ts`가 확인한다.
+- 모듈 최상위의 `const RE = /…/`는 다른 연산자처럼 대상이 아니다.
+
+**프로파일로 예측하지 않는다.** 셋 다 probe를 넣지 않고, 실행해서 판정한다.
+- 호출은 인자를 그대로 돌려주어도 부수 효과가 있을 수 있다. 기록하거나, 캐시에 넣거나, 상태를 바꾼다. 그래서 "모든 평가에서 결과가 첫 인자와 같았다"는 그 mutant가 살아남는다는 근거가 되지 못한다.
+- `CallStatement`는 값을 쓰지 않으니 기록할 값이 없다. 무엇이 달라지는지는 부수 효과에 있다.
+- 정규식은 값으로 비교할 수 없다. 리터럴이 만드는 것은 객체이고, 결과는 그 객체를 쓰는 곳(`test`, `replace`, `split`)에서 달라진다.
+
+**비용.** 이 저장소의 HEAD `src`(14개 파일, 2987줄)의 모든 줄을 바뀐 것으로 치고 `generate()`를 돌렸다(측정 스크립트는 커밋하지 않았다).
+- mutant가 1404개에서 2096개로 692개(49%) 늘었다. `CallUnwrap` 477개, `CallStatement` 196개, `Regex` 19개다.
+- `generate()` 전체는 중앙값 1.7~1.8초에서 2.4~2.5초가 됐다. 늘어난 mutant 하나에 약 1ms로, 대부분 TCE가 mutant마다 파일을 압축하는 비용이다.
+- 실제 PR에서는 바뀐 줄의 호출 수에 비례한다. 늘어나는 비용의 대부분은 mutant 실행이다.
 
 ## 구현 구조
 
@@ -174,6 +228,7 @@ src/
 ├─ mutate/equivalent.ts  L1 TCE: oxc-transform + oxc-minify 결과가 원본과 같은 mutant를 버림
 ├─ mutate/typecheck.ts   TypeScript 7 API 어댑터: 생성 전에 `+`가 문자열 연결인지, `?.`·`??`가 지키는 값이 null이 될 수 없는지 타입으로 미리 답함
 ├─ mutate/infer.ts       문자열 `+`의 문법 규칙: 식이 문자열인 것이 확실한지 AST와 스코프로 답함
+├─ mutate/regex.ts       정규식 리터럴의 mutant: 패턴 훑기, `new RegExp`로 컴파일 확인
 ├─ mutate/instrument.ts  schemata 삽입, probe 삽입(profiled), 소스맵, 계측 결과 파싱 확인
 ├─ mutate/profile.ts     probe 기록의 형식과 판정 규칙: 살아남는 것이 확실한 mutant, 문자열 `+`, 타입으로 불필요한 `?.`·`??`
 ├─ run.ts                오케스트레이션: 세션 관리, 타입 미리 묻기, 기준 실행, mutant별 실행, 판정
@@ -353,6 +408,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 | Condition → `true`/`false` | 조건에 부수 효과가 없고, 평가 횟수가 N이고, 늘 그 값의 truthiness였음 | `the condition was always true in tests` |
 
 - 기록이 없는 probe는 아무것도 정하지 않는다. 지점이 실행되지 않았으면 NoCoverage가 그대로 남는다.
+- `CallUnwrap`, `CallStatement`, `Regex`에는 규칙이 없다. 호출은 인자를 그대로 돌려주어도 부수 효과가 있을 수 있다("호출과 정규식" 참고).
 - OptionalChaining과 `??`의 규칙에는 TypeScript가 답한 값의 타입(`type`)이 붙을 수 있다. 그 값이 null이나 undefined가 될 수 없을 때다. 그러면 같은 조건에서 Survived 대신 unnecessary로 판정하고, 이유를 `` `user` is `User` by its type, which can't be null or undefined, and no test passed null or undefined``로 쓴다. 테스트가 null을 넣었으면 타입과 상관없이 실행한다(`predict()`의 `neverNullish`).
 - 호출 probe는 호출 횟수를 N과 비교한다. callee가 nullish였거나, 체인이 앞에서 멈췄거나, 그 전에 throw했으면 호출 횟수가 N보다 작으므로 예측하지 않는다.
 - 값 probe는 체인의 앞 링크가 멈춘 평가에서도 undefined를 기록한다. 그 평가에서는 mutant도 멈추므로 사실은 같지만, 예측하지 않는 쪽으로만 틀린다.
@@ -380,6 +436,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 ### 보고
 
 - 예측한 Survived에는 `reason`과 `predicted: true`가 붙는다. 텍스트 출력, 어노테이션, step summary(`Why` 열)는 `every test still passes with this change` 대신 이 이유를 보여 준다.
+- 예측하지 않은 Survived와 NoCoverage에도 `--json`에서 `reason`이 붙는다. 텍스트 출력과 같은 말, `every test still passes with this change`와 `no test runs this code`다. 그래서 `--json`만 읽어도 실패한 mutant마다 이유가 있다. 실행한 결과가 Survived라도 프로파일의 이유가 있으면(`--no-predict`) 그 이유를 둔다. 어노테이션은 전과 같다. dry run은 판정하지 않으므로 붙이지 않는다.
 - 문자열 `+`로 건너뛴 mutant는 `--json`의 `skipped`에 이유와 함께 남는다. 텍스트와 step summary에는 `N mutants skipped: string concatenation in every observed evaluation` 한 줄만 쓴다. 어노테이션은 만들지 않고 exit code에도 영향이 없다.
 - unnecessary는 `--json`의 `unnecessary`에 남는다. 보고 방식은 "타입으로 불필요한 방어 코드"의 "보고"를 본다.
 - 억제 주석
@@ -417,7 +474,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 
 **휴리스틱.** mutant를 만들 때 적용한다.
 
-- 전역 `console`의 `console.*` 호출이면 인자 안쪽은 건너뛴다.
+- 전역 `console`의 `console.*` 호출이면 인자 안쪽은 건너뛴다. 그 호출 자체에도 `CallUnwrap`과 `CallStatement`를 만들지 않는다.
   - 둘러싼 스코프 어디에서든 `console`을 선언했으면 그것은 코드 자신의 객체이므로 건너뛰지 않는다. 매개변수, 지역 변수, `catch` 매개변수, `import console from './logger'` 등이 그렇다.
   - `ScopeTracker`는 순회가 선언에 닿을 때 이름을 기록한다. 그래서 AST를 한 번 돌며 선언을 먼저 모으고, 두 번째 순회에서 mutant를 만든다. 이렇게 해야 쓰는 곳보다 아래에 있는 선언도 보인다. 호이스팅되는 `var`와 함수, 파일 아래쪽에서 정의한 모듈 상수가 그런 예다.
   - `declare const console: …` 같은 ambient 선언은 런타임에 아무것도 만들지 않으므로 선언으로 치지 않는다. 그 `console`은 여전히 전역이다. `import type`도 마찬가지다.
@@ -425,6 +482,9 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 - `!!x`에서는 바깥 `!`만 변형한다. 안쪽을 빼도 결과가 같은 `!x`이기 때문이다.
 - `x.length >= 0` 같은 항상 참인 조건은 `true`로 바꾸지 않는다.
 - 조건이 이미 `true`/`false` 리터럴이면 Condition mutant를 만들지 않는다. BooleanLiteral mutant와 겹치기 때문이다.
+- 같은 지점의 mutant끼리 대체 텍스트가 같으면 하나만 만든다. `if (check(true))`의 CallUnwrap `→ true`는 Condition `→ true`와 같다.
+- `CallUnwrap`은 콜백을 받는 호출, `.call`/`.apply`/`.bind`, 다른 호출의 callee인 호출, 값을 버리는 호출 문은 만들지 않는다. `CallStatement`는 `super(…)`를 지우지 않는다("호출과 정규식" 참고).
+- `Regex`는 `^`·`$`가 없는 패턴의 `m`, `.`가 없는 패턴의 `s`를 빼지 않는다. 빼도 같은 정규식이다. 컴파일되지 않는 mutant도 만들지 않는다.
 - `x * 1`, `x / 1`, `x * 1n`, `x / 1n`은 `*`↔`/` 변형을 만들지 않는다.
   - bigint에서도 `x * 1n`과 `x / 1n`은 같은 값이다. `x`가 bigint가 아니면 둘 다 같은 메시지의 TypeError를 던진다(Symbol이면 `Cannot convert a Symbol value to a number`, 그 밖에는 `Cannot mix BigInt and other types, use explicit conversions`). 0n, 음수, 2^100 크기의 bigint, 수, `-0`, NaN, 문자열, null, undefined, boolean, 객체, bigint를 주는 `valueOf`, Symbol, `Object(3n)`의 21가지로 확인했다. `valueOf`도 양쪽에서 한 번씩 불린다.
   - 리터럴의 값으로 비교하므로 `0x1n`도 같다.
@@ -680,6 +740,9 @@ return age >= 18
   - 프로젝트가 타입 검사를 하지 않으면(Vitest는 하지 않는다) 타입이 틀린 채로 남을 수 있다. 프로젝트의 TypeScript와 7.1의 판단이 다를 수도 있다. 그 차이를 nyorori가 알아보지는 않는다.
   - 좁혀진 타입을 쓴다. 함수 호출이 속성을 바꿔도 TypeScript는 좁히기를 유지한다(TypeScript #9998).
   - mapped type, 여러 선언을 합친 속성, 단언을 거친 값, 원소 접근은 보수적으로 뺀다. 그 안의 정말 불필요한 `?.`는 이전처럼 예측한 Survived로 실패한다.
+- **호출과 정규식 연산자.**
+  - `CallUnwrap`은 타입을 보지 않는다. 결과의 종류가 바뀌는 mutant(`xs.join(',')`→`','`)는 테스트가 바로 잡으므로 실행 비용만 든다. 값을 그대로 돌려주는 호출(`Object.freeze(x)`, Vue의 `markRaw(x)`, 정체성만 다른 메모이즈)은 살아남아 억제 주석이 필요할 수 있다.
+  - 정규식 mutant는 CLI를 돌리는 Node가 컴파일하는지로 거른다. 세션은 같은 Node로 뜨므로 테스트도 같은 엔진에서 돈다.
 - **브라우저 모드.** 지원하지 않는다.
 - **실행 시간.**
   - mutant 수 × 관련 테스트 시간만큼 걸린다.

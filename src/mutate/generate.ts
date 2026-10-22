@@ -15,6 +15,7 @@ import { isOperator, type EquivalentMutant, type Mutant, type Operator, type Sup
 import { dropEquivalent } from './equivalent.ts'
 import { Strings, type Bindings } from './infer.ts'
 import type { Probe, Rule } from './profile.ts'
+import { regexMutations } from './regex.ts'
 import type { FileQuestions, TypeOracle } from './typecheck.ts'
 
 /**
@@ -193,7 +194,8 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
       target = { start: site.start, end: site.end, kind, mutants: [] }
       sites.set(key, target)
     }
-    if (target.mutants.some((m) => m.replacement === replacement && m.mutant.operator === operator)) return undefined
+    // Another operator can reach the same code: `if (check(true))` → `true` by Condition and by CallUnwrap.
+    if (target.mutants.some((m) => m.replacement === replacement)) return undefined
     const planned: PlannedMutant = { mutant: { id: 0, file, line, column, operator, description }, replacement }
     target.mutants.push(planned)
     return planned
@@ -251,11 +253,18 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
   // `delete (o?.x)` would not delete. Parents are visited first, so the set is
   // filled before the chain is reached.
   const references = new Set<Node>()
+  // Callees of `new`: unwrapping a call there would construct its argument.
+  const constructed = new Set<Node>()
+  // Calls whose value an expression statement drops. CallStatement removes
+  // them; CallUnwrap would only remove them too, with the first argument evaluated.
+  const discarded = new Set<Node>()
+  const isGlobalConsoleCall = (node: Node) => isConsoleCall(node) && !scopes.isDeclared('console')
 
   function mutate(node: Node, parent: Node | null): void {
     if (node.type === 'CallExpression') references.add(unwrapReference(node.callee))
     else if (node.type === 'TaggedTemplateExpression') references.add(unwrapReference(node.tag))
     else if (node.type === 'UnaryExpression' && node.operator === 'delete') references.add(unwrapReference(node.argument))
+    else if (node.type === 'NewExpression') constructed.add(unwrapReference(node.callee))
     switch (node.type) {
       case 'BinaryExpression': {
         const entry = BINARY[node.operator]
@@ -310,6 +319,12 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
         break
       }
       case 'Literal': {
+        if ('regex' in node) {
+          for (const { at, literal, from, to } of regexMutations(node.regex.pattern, node.regex.flags)) {
+            add(node, 'expression', node.start + at, 'Regex', literal, to === '' ? `\`${from}\` removed` : `\`${snippet(from)}\` → \`${snippet(to)}\``)
+          }
+          break
+        }
         if (typeof node.value !== 'boolean') break
         const other = String(!node.value)
         add(node, 'expression', node.start, 'BooleanLiteral', other, `\`${node.value}\` → \`${other}\``)
@@ -345,6 +360,35 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
         }
         break
       }
+      case 'ExpressionStatement': {
+        const call = statementCall(node.expression)
+        if (!call) break
+        discarded.add(call.site)
+        // Without `super()` a derived constructor throws; a global console call only logs.
+        if (call.node.callee.type === 'Super' || isGlobalConsoleCall(call.node)) break
+        add(call.site, 'expression', calleeAnchor(call.node), 'CallStatement', 'undefined', `\`${snippet(text(call.node))}\` removed`)
+        break
+      }
+      case 'CallExpression': {
+        const [first] = node.arguments
+        if (!first || first.type === 'SpreadElement') break
+        // A call that ends an optional chain stands for the whole chain, which has the same span.
+        const site = parent?.type === 'ChainExpression' ? parent : node
+        // A call a statement drops is CallStatement's. One that is called, constructed, tagged
+        // or deleted is left alone: `f(x)(y)` → `x(y)` only tests that `x` is not a function.
+        if (discarded.has(site) || references.has(site) || constructed.has(site)) break
+        // `super(x)` → `x` leaves `this` uninitialised; `require('x')` → `'x'` and a global console call say nothing.
+        if (node.callee.type === 'Super' || isName(node.callee, 'require') || isGlobalConsoleCall(node)) break
+        // The first argument of `f.call(that, x)`, `.apply` and `.bind` is the receiver, not a value the call passes on.
+        if (isReceiverCall(node)) break
+        // The result of a call that takes a callback is hardly ever that function, or acts the
+        // same as it (`useCallback(fn, deps)`): the mutant would only check that the result is used.
+        if (first.type === 'FunctionExpression' || first.type === 'ArrowFunctionExpression') break
+        // Inside a chain, a `?.` before the call skips the links after it; parentheses around the call would cut them off.
+        if (site === node && optionalLinks(node).length > 0) break
+        add(site, 'expression', calleeAnchor(node), 'CallUnwrap', text(first), `\`${snippet(text(node))}\` → \`${snippet(text(first))}\``)
+        break
+      }
       case 'FunctionDeclaration':
       case 'FunctionExpression':
       case 'ArrowFunctionExpression': {
@@ -377,7 +421,7 @@ function plan(file: string, code: string, changed: ReadonlySet<number>, types: T
     const inner = context === 'function' || FUNCTIONS.has(node.type) ? 'function' : 'module'
     if (inner === 'function') mutate(node, parent)
     // A `console` declared in an enclosing scope (a parameter, an import, ...) is the code's own object.
-    return isConsoleCall(node) && !scopes.isDeclared('console') ? 'console' : inner
+    return isGlobalConsoleCall(node) ? 'console' : inner
   })
 
   for (const site of sites.values()) {
@@ -562,6 +606,35 @@ function isAlwaysTrue(node: Node): boolean {
 function isConsoleCall(node: Node): boolean {
   return node.type === 'CallExpression' && node.callee.type === 'MemberExpression' &&
     node.callee.object.type === 'Identifier' && node.callee.object.name === 'console'
+}
+
+function isName(node: Node, name: string): boolean {
+  return node.type === 'Identifier' && node.name === name
+}
+
+const RECEIVER_METHODS = new Set(['call', 'apply', 'bind'])
+
+function isReceiverCall(call: CallExpression): boolean {
+  const callee = unwrapReference(call.callee)
+  return callee.type === 'MemberExpression' && !callee.computed && callee.property.type === 'Identifier' && RECEIVER_METHODS.has(callee.property.name)
+}
+
+/**
+ * The call an expression statement makes (`f(x)`, `await f(x)`, `a?.f(x)`),
+ * and what CallStatement replaces: the call, or the optional chain it ends.
+ * Under `await` only the call goes, so the statement still waits.
+ */
+function statementCall(expression: Expression): { node: CallExpression; site: Node } | undefined {
+  let node = unwrapReference(expression)
+  if (node.type === 'AwaitExpression') node = unwrapReference(node.argument)
+  if (node.type === 'ChainExpression' && node.expression.type === 'CallExpression') return { node: node.expression, site: node }
+  return node.type === 'CallExpression' ? { node, site: node } : undefined
+}
+
+/** The callee's name, where a call shows on its line: `b` in `a\n  .b(x)`. */
+function calleeAnchor(call: CallExpression): number {
+  const callee = unwrapReference(call.callee)
+  return callee.type === 'MemberExpression' ? callee.property.start : callee.start
 }
 
 /**

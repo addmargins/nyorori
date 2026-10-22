@@ -70,14 +70,15 @@ function where(report: Report, file: string, line: number, column?: number): str
   return column === undefined ? `${relative}:${line}` : `${relative}:${line}:${column}`
 }
 
-const EXPLAIN: Record<string, string> = {
+/** Why a failing mutant goes unnoticed, when the profile says nothing more. run() gives it as the `reason`. */
+export const EXPLAIN: Readonly<Record<'Survived' | 'NoCoverage', string>> = {
   Survived: 'every test still passes with this change',
   NoCoverage: 'no test runs this code',
 }
 
 /** The profile's reason when it has one: it says what the tests never do. */
 function explain(r: MutantResult): string {
-  return r.reason ?? EXPLAIN[r.status]!
+  return r.reason ?? EXPLAIN[r.status as keyof typeof EXPLAIN]
 }
 
 export function formatText(report: Report): string {
@@ -136,7 +137,7 @@ export function formatAnnotations(report: Report): string[] {
     const title = r.status === 'Survived' ? 'nyorori: mutant survived' : 'nyorori: changed code is not tested'
     const advice = r.status === 'NoCoverage'
       ? `No test runs this code, so the ${r.operator} mutant (${r.description}) goes unnoticed. Add a test that exercises it.`
-      : r.reason
+      : r.reason !== undefined && r.reason !== EXPLAIN.Survived
         ? `No test fails when ${r.operator} changes this code (${r.description}): ${r.reason}. Add a test that checks this behavior.`
         : `No test fails when ${r.operator} changes this code (${r.description}). Add or strengthen a test that checks this behavior.`
     out.push(command('error', report, r.file, r.line, r.column, title, advice))

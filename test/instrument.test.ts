@@ -4,6 +4,7 @@ import { applyMutant } from '../src/mutate/equivalent.ts'
 import { generate } from '../src/mutate/generate.ts'
 import { instrument } from '../src/mutate/instrument.ts'
 import { SLOTS } from '../src/mutate/profile.ts'
+import { OPERATORS, type Operator } from '../src/types.ts'
 
 const SOURCE = `function compare(a, b) { return a >= b && a !== 3 }
 function arith(x) { return -x * 2 + x % 3 - (x / 4) }
@@ -32,8 +33,9 @@ describe('instrument', () => {
   const instrumented = instrument('file.js', SOURCE, sites).code
   const state = (active: number) => ({ active, limit: 0, hits: null, count: 0, exceeded: false })
 
-  test('covers every operator', () => {
-    expect(new Set(mutants.map((m) => m.operator)).size).toBe(11)
+  test('covers every operator but the call and regex ones, which have their own source below', () => {
+    const below = new Set<Operator>(['CallUnwrap', 'CallStatement', 'Regex'])
+    expect(new Set(mutants.map((m) => m.operator))).toEqual(new Set(OPERATORS.filter((operator) => !below.has(operator))))
   })
 
   test('with no active mutant, behaves like the original', () => {
@@ -249,5 +251,107 @@ describe('optional chains used as references', () => {
     const site = sites.find((s) => s.mutants.some((p) => p.mutant.id === id))!
     const planned = site.mutants.find((p) => p.mutant.id === id)!
     expect(evaluate(instrumented, state(id))).toBe(evaluate(applyMutant(source, site, planned), state(0)))
+  })
+})
+
+describe('calls and regular expressions', () => {
+  // No semicolons: every statement-level call and the regex statement follow a line a `(` would continue.
+  const source = `function normalizeZero(x) { return Object.is(x, -0) ? 0 : x }
+function toInteger(x) { return Math.trunc(Number(x)) }
+function toArray(x) { return [x, x] }
+function calls(o, x, key) {
+  const out = []
+  const log = []
+  out.push(normalizeZero(x) + 1)
+  out.push(o.get(key, 'd'), o.f?.(x), toInteger(x)?.toFixed(1))
+  if (o.has(key)) out.push('has')
+  log.push('a')
+  o.seen.delete(key)
+  o.cb?.(log, x)
+  toArray(x).forEach((y) => log.push(y))
+  return [out, log, [...o.seen]]
+}
+function regex(s, n) {
+  const out = []
+  if (n) { out.push(n) }
+  /^a[bc]\\d+$/gim.test(s) && out.push('match')
+  out.push(s.replace(/a.b/s, '-'), s.split(/,\\s*/).length, n / /ab/.source.length)
+  out.push([...s.matchAll(/[^,]/g)].length, /(x|^y)$/m.test(s), /\\W[\\d.]/.test(s), /[\\p{L}--[a-z]]/v.test(s))
+  return out
+}
+function main() {
+  const o = () => ({ get: (k, d) => k + d, f: (x) => x * 2, has: (k) => k === 'k', seen: new Set(['k', 'j']), cb: (log, x) => log.push('cb' + x) })
+  const out = []
+  for (const call of [() => calls(o(), 0, 'k'), () => calls(o(), -0, 'k'), () => calls(o(), -2.5, 'j'), () => calls({ ...o(), f: null, cb: undefined }, 3, 'k'), () => regex('ab12', 0), () => regex('a.b, Ab3\\nX', 2), () => regex('y', 1), () => regex('É x.', 3), () => regex('a\\nb,,AB12x\\ny', 0), () => regex('a\\nb\\nab1', 1)]) {
+    try { out.push(call()) } catch (e) { out.push('throws ' + e.constructor.name) }
+  }
+  return JSON.stringify(out)
+}`
+  const lines = source.split('\n')
+  const changed = new Set(lines.map((_, i) => i + 1).filter((line) => line < lines.indexOf('function main() {') + 1))
+  const { sites, mutants } = generate('file.js', source, changed, 1)
+  const plain = instrument('file.js', source, sites).code
+  const profiled = instrument('file.js', source, sites, { profile: true }).code
+  const state = (active: number) => ({ active, limit: 0, hits: null, count: 0, exceeded: false, prof: new Float64Array((mutants.length + 1) * SLOTS) })
+  const cases = sites.flatMap((site) => site.mutants.map((planned) => ({ site, planned, label: `${planned.mutant.id} ${planned.mutant.line}:${planned.mutant.column} ${planned.mutant.operator} ${planned.mutant.description}` })))
+
+  test('has every new operator, on statement starts too', () => {
+    const operators = new Set(mutants.map((m) => m.operator))
+    for (const operator of ['CallUnwrap', 'CallStatement', 'Regex'] as const) expect(operators).toContain(operator)
+    expect(sites.filter((site) => site.statement && site.mutants.some((m) => m.mutant.operator !== 'FunctionBody')).length).toBeGreaterThan(3)
+    // A regex literal opens the statement after a block.
+    expect(plain.split('\n').find((line) => line.includes('/^a[bc]\\d+$/gim.test(s)'))).toMatch(/^  \{ \(__nyorori_h\(/)
+  })
+
+  test('with no active mutant, behaves like the original', () => {
+    const original = evaluate(source, state(0))
+    expect(original).not.toContain('throws')
+    expect(evaluate(plain, state(0))).toBe(original)
+    expect(evaluate(profiled, state(0))).toBe(original)
+  })
+
+  test.each(cases)('mutant $label behaves like the source with only that change', ({ site, planned }) => {
+    const expected = evaluate(applyMutant(source, site, planned), state(0))
+    expect(evaluate(plain, state(planned.mutant.id))).toBe(expected)
+    expect(evaluate(profiled, state(planned.mutant.id))).toBe(expected)
+  })
+
+  describe('under await', () => {
+    const asyncSource = `async function save(store, x) {
+  await store.put(x)
+  await store.flush?.(x)
+  store.done(x)
+  return store.items
+}
+async function main() {
+  const store = () => ({ items: [], put(x) { return Promise.resolve().then(() => this.items.push(x)) }, flush(x) { this.items.push('flush' + x) }, done(x) { this.items.push('done' + x) } })
+  const out = []
+  for (const call of [() => save(store(), 1), () => save({ ...store(), flush: undefined }, 2)]) {
+    try { out.push(await call()) } catch (e) { out.push('throws ' + e.constructor.name) }
+  }
+  return JSON.stringify(out)
+}`
+    const result = generate('file.js', asyncSource, new Set([2, 3, 4]), 1)
+    const code = instrument('file.js', asyncSource, result.sites).code
+    const profiledCode = instrument('file.js', asyncSource, result.sites, { profile: true }).code
+    const run = (text: string, active: number): Promise<string> => vm.runInNewContext(`${text}\nmain()`, { __nyorori: state(active) })
+
+    test('removes only the call, so the statement still awaits', () => {
+      expect(result.mutants.filter((m) => m.operator === 'CallStatement').map((m) => `${m.line}:${m.column} ${m.description}`)).toEqual([
+        '2:15 `store.put(x)` removed',
+        '3:15 `store.flush?.(x)` removed',
+        '4:9 `store.done(x)` removed',
+      ])
+      expect(code).toContain('await (__nyorori_h(')
+    })
+
+    test.each(result.sites.flatMap((site) => site.mutants.map((planned) => ({ site, planned, label: `${planned.mutant.id} ${planned.mutant.operator} ${planned.mutant.description}` }))))(
+      'mutant $label behaves like the source with only that change',
+      async ({ site, planned }) => {
+        const expected = await run(applyMutant(asyncSource, site, planned), 0)
+        expect(await run(code, planned.mutant.id)).toBe(expected)
+        expect(await run(profiledCode, planned.mutant.id)).toBe(expected)
+      },
+    )
   })
 })

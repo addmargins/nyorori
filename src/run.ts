@@ -8,6 +8,7 @@ import { instrument, InstrumentError } from './mutate/instrument.ts'
 import { mergeProfile, predict, type ProbeRecord } from './mutate/profile.ts'
 import { askTypes, typesNotAsked, type TypeOracle } from './mutate/typecheck.ts'
 import type { ModuleResult, Request, Response, SpecRef } from './protocol.ts'
+import { EXPLAIN } from './report.ts'
 import type {
   EquivalentMutant,
   FilePlan,
@@ -236,6 +237,8 @@ export async function run(options: RunOptions): Promise<Report> {
         status = 'Ignored'
       }
       result.status = status
+      // The same words as the text output, so --json says why every failing mutant fails.
+      if (status === 'Survived' || status === 'NoCoverage') result.reason ??= EXPLAIN[status]
     }
     if (!options.predict) {
       // Run too, to check the category: the profile says they survive, whatever the types say.

@@ -3,11 +3,14 @@ import { describe, expect, test } from 'vitest'
 import { generate } from '../src/mutate/generate.ts'
 import { instrument } from '../src/mutate/instrument.ts'
 import { CLASS, mergeProfile, predict, SLOTS, type Prediction, type ProbeRecord, type Rule } from '../src/mutate/profile.ts'
+import type { Operator } from '../src/types.ts'
+
+const UNPROFILED = new Set<Operator>(['FunctionBody', 'CallUnwrap', 'CallStatement', 'Regex'])
 
 /**
  * Profiles `code` (every line mutated) in a baseline that calls each of
  * `calls`, as the session's setup file would, and returns what the profile
- * says about each mutant but FunctionBody: "<operator> <description>: <verdict> <reason>",
+ * says about each mutant it can settle: "<operator> <description>: <verdict> <reason>",
  * or ": run" when it settles nothing. Before returning, it runs every mutant
  * predicted to survive and checks the calls give exactly what the original gives.
  */
@@ -36,8 +39,8 @@ globalThis.main = main`
   mergeProfile(profile, records)
 
   const plain = instrument('file.js', source, sites).code
-  // The profile never settles FunctionBody, which every function here has.
-  const planned = sites.flatMap((site) => site.mutants).filter(({ mutant }) => mutant.operator !== 'FunctionBody')
+  // The profile never settles FunctionBody, which every function here has, nor the call and regex operators.
+  const planned = sites.flatMap((site) => site.mutants).filter(({ mutant }) => !UNPROFILED.has(mutant.operator))
   return planned.map(({ mutant, profile: probed }) => {
     const prediction: Prediction | undefined = probed && predict(probed.rule, profile.get(probed.probe.key), baseline.hits[mutant.id] ?? 0)
     if (prediction?.verdict === 'survives') expect(run(plain, state(mutant.id)), `${mutant.operator} ${mutant.description}`).toBe(original)

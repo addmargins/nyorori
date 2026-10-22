@@ -71,6 +71,8 @@ npx nyorori run --base origin/main
 | NoCoverage | 바뀐 코드를 실행하는 테스트가 없음 | 실패 |
 | Ignored | 억제 주석으로 제외 | 통과. 요약에 표시 |
 
+`--json`의 Survived와 NoCoverage 결과에는 모두 `reason`이 있습니다. [기준 실행의 프로파일](#기준-실행의-프로파일)이 이유를 알면 그 이유이고, 아니면 텍스트 출력과 같은 `every test still passes with this change`나 `no test runs this code`입니다. `--dry-run`은 판정하지 않으므로 `reason`이 없습니다.
+
 죽은 분기 안의 변경처럼 압축(`oxc-minify`)하면 원본과 같아지는 mutant는 실행하기 전에 버립니다(TCE).
 출력과 job summary에는 버린 개수만 표시하고, `--json`에는 `equivalent`로 남깁니다. CI 결과에는 영향이 없습니다.
 
@@ -105,6 +107,7 @@ mutant 없이 테스트를 돌리는 기준 실행에서, 바뀐 코드의 각 �
 - getter와 Proxy는 부수 효과가 없다고 봅니다.
 - mutant 실행에는 기록 코드가 들어가지 않은 계측을 씁니다. 그래서 기록 비용은 기준 실행에만 듭니다. 보통의 테스트에서는 수 % 이내였고, 바뀐 코드를 아주 많이 반복해서 부르는 테스트에서는 더 큽니다.
 - `--json`의 결과에는 이유가 `reason`으로, 실행하지 않은 것은 `predicted: true`로 남습니다.
+- 호출과 정규식 mutant(`CallUnwrap`, `CallStatement`, `Regex`)는 예측하지 않습니다.
 
 ### 타입으로 불필요한 방어 코드
 
@@ -171,6 +174,16 @@ Vite에 영향을 주지 않는 `test` 옵션(`name`, `include`, `environment` �
 | `Condition` | `if`/삼항의 조건 → `true`, `false`. 루프 조건 → `false` |
 | `FunctionBody` | 함수 본문 → 즉시 `return` |
 | `OptionalChaining` | `a?.b`→`a.b` |
+| `CallUnwrap` | 인자가 있는 호출 → 첫 인자. `toInteger(x)`→`x`, `obj.get(key, d)`→`key` |
+| `CallStatement` | 값을 버리는 호출 문 → 호출 제거. `unmatched.delete(key)`, `await save(x)`→`await undefined` |
+| `Regex` | 정규식 리터럴: flag 하나 제거(`/a/gi`→`/a/i`), 그룹 밖의 `^`·`$` 제거, `[abc]`↔`[^abc]`, `\d`↔`\D`, `\w`↔`\W`, `\s`↔`\S` |
+
+호출과 정규식 연산자는 값을 감싸는 함수를 더하거나(`normalizeZero(x)`), 호출 문을 더하거나(`set.delete(key)`), 정규식 flag를 더한 수정에도 mutant가 생기게 합니다.
+
+- `CallUnwrap`은 함수 호출과 메서드 호출 모두에 만듭니다. 다음은 만들지 않습니다: `super(…)`, `require(…)`, 전역 `console` 호출, 첫 인자가 spread이거나 함수 리터럴(콜백)인 호출, `.call`/`.apply`/`.bind`, 다른 호출이나 `new`의 callee인 호출, optional chain 안에서 `?.` 뒤에 오는 호출(`a?.b(x).c`), 값을 버리는 호출 문(`CallStatement`가 맡음)
+- `CallStatement`는 `super(…)`와 전역 `console` 호출을 지우지 않습니다.
+- 정규식 mutant는 모두 `new RegExp`로 컴파일되는지 확인하고, 되지 않으면 버립니다. `^`·`$`가 없는 패턴의 `m`, `.`가 없는 패턴의 `s`는 빼도 같으므로 빼지 않습니다.
+- 이 셋은 [기준 실행의 프로파일](#기준-실행의-프로파일)로 예측하지 않고 실제로 실행합니다. 호출은 인자를 그대로 돌려주어도 부수 효과가 있을 수 있기 때문입니다.
 
 ### 문자열 `+`
 

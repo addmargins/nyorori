@@ -10,6 +10,9 @@ export const OPERATORS = [
   'Condition',
   'FunctionBody',
   'OptionalChaining',
+  'CallUnwrap',
+  'CallStatement',
+  'Regex',
 ] as const
 
 export type Operator = (typeof OPERATORS)[number]
@@ -53,7 +56,12 @@ export interface MutantResult extends Mutant {
   suppression?: Suppression
   /** Test files that executed the mutant in the baseline run, relative to the root. */
   tests: string[]
-  /** Why no test can notice the mutant, when the baseline profile shows it, e.g. "no test makes `user` null or undefined here". */
+  /**
+   * Why no test notices the mutant. The baseline profile's reason when it
+   * shows one, e.g. "no test makes `user` null or undefined here"; otherwise,
+   * on every Survived and NoCoverage result, "every test still passes with
+   * this change" or "no test runs this code". A dry run judges nothing and gives none.
+   */
   reason?: string
   /** The status comes from the profile alone: the mutant was not run. */
   predicted?: boolean

@@ -57,7 +57,8 @@ test('a predicted survivor shows why no test can notice it; skipped string `+` i
     files: ['src/a.js'],
     results: [
       { id: 1, file: '/repo/src/a.js', line: 2, column: 14, operator: 'OptionalChaining', description: '`?.` → `.`', status: 'Survived', tests: ['test/a.test.js'], reason, predicted: true },
-      { id: 2, file: '/repo/src/a.js', line: 5, column: 3, operator: 'Update', description: '`++` → `--`', status: 'Survived', tests: ['test/a.test.js'] },
+      // run() gives a survivor the profile has nothing on the words of the text output.
+      { id: 2, file: '/repo/src/a.js', line: 5, column: 3, operator: 'Update', description: '`++` → `--`', status: 'Survived', tests: ['test/a.test.js'], reason: 'every test still passes with this change' },
     ],
     equivalent: [],
     skipped: [
@@ -74,9 +75,10 @@ test('a predicted survivor shows why no test can notice it; skipped string `+` i
   Survived   src/a.js:2:14  OptionalChaining  \`?.\` → \`.\`  (${reason})
   Survived   src/a.js:5:3  Update  \`++\` → \`--\`  (every test still passes with this change)
   2 mutants skipped: string concatenation in every observed evaluation`)
-  expect(formatAnnotations(report)[0]).toBe(
+  expect(formatAnnotations(report)).toEqual([
     '::error file=src/a.js,line=2,col=14,title=nyorori%3A mutant survived::No test fails when OptionalChaining changes this code (`?.` → `.`): no test makes `user` null or undefined here. Add a test that checks this behavior.',
-  )
+    '::error file=src/a.js,line=5,col=3,title=nyorori%3A mutant survived::No test fails when Update changes this code (`++` → `--`). Add or strengthen a test that checks this behavior.',
+  ])
   expect(formatSummary(report)).toContain(`| Survived | \`src/a.js:2:14\` | OptionalChaining | \`?.\` → \`.\` | ${reason} |
 | Survived | \`src/a.js:5:3\` | Update | \`++\` → \`--\` | every test still passes with this change |
 

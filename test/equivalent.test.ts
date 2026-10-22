@@ -37,6 +37,15 @@ describe('TCE drops mutants that minify to the original', () => {
     expect(split(code)).toEqual({ kept: ['1 FunctionBody body → `return`'], equivalent: ['3 Update `++` → `--`'] })
   })
 
+  test('for calls and regular expressions too', () => {
+    // The minifier drops a pure call whose value goes unused, so removing it changes nothing.
+    const code = ['export function f(x, s) {', '  Math.abs(x)', '  if (false) return /a/i.test(s)', '  return g(x)', '}'].join('\n')
+    expect(split(code)).toEqual({
+      kept: ['1 FunctionBody body → `return`', '3 BooleanLiteral `false` → `true`', '4 CallUnwrap `g(x)` → `x`'],
+      equivalent: ['2 CallStatement `Math.abs(x)` removed', '3 CallUnwrap `/a/i.test(s)` → `s`', '3 Regex `/…/i` → `/…/`'],
+    })
+  })
+
   test('removes emptied sites and keeps ids contiguous per site', () => {
     const code = ['const DEBUG = false', 'export function f(i) {', '  if (DEBUG) { i++ }', '  return i > 0 ? i : -i', '}'].join('\n')
     const result = generate('file.js', code, all(code), 7)
