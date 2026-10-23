@@ -10,8 +10,11 @@ import picomatch from 'picomatch'
 import type { Reporter, TestModule, TestProject, TestSpecification, Vitest } from 'vitest/node'
 import { SLOTS } from './mutate/profile.ts'
 import { PROVIDE, type ModuleResult, type Request, type Response, type SpecRef } from './protocol.ts'
-import type { FilePlan } from './types.ts'
+import type { FilePlan, NotJudgedReason } from './types.ts'
 import { checkVitestVersion, findVitest, ProjectError } from './vitest.ts'
+
+/** Vitest's and Vite's config files: vitest.config.ts, vite.config.mjs, vitest.unit.config.ts, ... */
+const CONFIG = /^vite(?:st)?(?:\.[\w-]+)?\.config\./
 
 /** What nyorori reads of the other Vite plugins. */
 interface VitePlugin {
@@ -66,7 +69,7 @@ function send(message: Response): void {
   process.send!(message)
 }
 
-async function init(root: string, candidates: string[], exclude: string[], dir: string): Promise<string[]> {
+async function init(root: string, candidates: string[], exclude: string[], dir: string): Promise<Omit<Extract<Response, { type: 'ready' }>, 'type'>> {
   const vitestDir = findVitest(root)
   const pkg = JSON.parse(readFileSync(path.join(vitestDir, 'package.json'), 'utf8'))
   checkVitestVersion(pkg.version)
@@ -161,7 +164,7 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
   }
 
   const config = vitest.config
-  const coverageInclude = config.coverage.include?.length ? picomatch(config.coverage.include, { dot: true }) : () => true
+  const coverageInclude = config.coverage.include?.length ? picomatch(config.coverage.include, { dot: true }) : undefined
   const coverageExclude = picomatch(config.coverage.exclude, { dot: true })
   const userExclude = exclude.length > 0 ? picomatch(exclude, { dot: true }) : () => false
   // matchesTestGlob() knows only `include`: type tests (`*.test-d.ts`) and
@@ -171,19 +174,30 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
     const dir = project.config.dir || project.config.root
     return [typecheck, benchmark].map((globs) => ({ dir, matches: globMatcher(globs.include, globs.exclude) }))
   })
-  const eligible = candidates.filter((file) => {
+  const setupFiles = new Set(vitest.projects.flatMap((project) => [...project.config.setupFiles, ...project.config.globalSetup]))
+  // Config files and setup files are in coverage.exclude too, but Vitest put them there, not the user.
+  const reasonOf = (file: string): NotJudgedReason | undefined => {
     const relative = path.relative(config.root, file)
-    if (relative.startsWith('..') || path.isAbsolute(relative)) return false
-    if (vitest!.projects.some((project) => project.matchesTestGlob(file))) return false
-    if (otherTests.some(({ dir, matches }) => matches(path.relative(dir, file)))) return false
-    return coverageInclude(relative) && !coverageExclude(relative) && !userExclude(relative)
-  })
-  // Tests are picked from the files that get mutants. A changed vitest.config
-  // among them would make Vitest pick the whole suite (forceRerunTriggers),
-  // including tests that only pass in the project's own CI setup.
-  config.related = eligible
+    if (relative.startsWith('..') || path.isAbsolute(relative)) return 'outside-root'
+    if (setupFiles.has(file) || vitest!.projects.some((project) => project.matchesTestGlob(file))) return 'test'
+    if (otherTests.some(({ dir, matches }) => matches(path.relative(dir, file)))) return 'test'
+    if (CONFIG.test(path.basename(file))) return 'config'
+    if (userExclude(relative)) return 'excluded'
+    if (coverageInclude && !coverageInclude(relative)) return 'coverage-include'
+    if (coverageExclude(relative)) return 'coverage-exclude'
+    return undefined
+  }
+  const eligible: string[] = []
+  const notJudged: Array<{ file: string; reason: NotJudgedReason }> = []
+  for (const file of candidates) {
+    const reason = reasonOf(file)
+    if (reason) notJudged.push({ file, reason })
+    else eligible.push(file)
+  }
+  // A changed file among the triggers (package.json, the user's own) would make
+  // Vitest pick the whole suite, including tests that only pass in the project's own CI setup.
   config.forceRerunTriggers = []
-  return eligible
+  return { eligible, notJudged }
 }
 
 /**
@@ -267,10 +281,12 @@ process.on('message', async (request: Request) => {
   try {
     switch (request.type) {
       case 'init':
-        send({ type: 'ready', eligible: await init(request.root, request.candidates, request.exclude, request.setupDir) })
+        send({ type: 'ready', ...(await init(request.root, request.candidates, request.exclude, request.setupDir)) })
         break
       case 'plan': {
         for (const file of request.files) plans.set(file.file, file)
+        // Tests are picked from the files that got mutants.
+        vitest!.config.related = request.files.map((file) => file.file)
         // Finding the related tests transforms their imports too.
         const specs = await vitest!.getRelevantTestSpecifications().finally(checkTransforms)
         send({ type: 'planned', specs: specs.map(toRef) })

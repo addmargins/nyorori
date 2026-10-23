@@ -39,6 +39,13 @@ export function diffFiles(cwd: string, base: string): Map<string, FileDiff> {
   return parseDiff(diff, root)
 }
 
+/** The files deleted since `base`, absolute; like diffFiles, against the working tree. */
+export function deletedFiles(cwd: string, base: string): string[] {
+  const root = gitRoot(cwd)
+  const names = git(root, ['diff', '--name-only', '-z', '--no-ext-diff', '--find-renames', '--diff-filter=D', base, '--'])
+  return names.split('\0').filter(Boolean).map((file) => path.resolve(root, file))
+}
+
 /** What changed in a file whose new version is `code` (see changedRanges). */
 export function fileChanges(cwd: string, diff: FileDiff, code: string): Changes {
   let before: string | undefined

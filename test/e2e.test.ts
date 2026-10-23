@@ -12,12 +12,19 @@ const CLI = path.join(REPO, 'src', 'cli.ts')
 
 type Files = Record<string, string>
 
-/** A git repository under .tmp (so `vitest` resolves to ours) with a base commit and a head commit. */
-function project(name: string, base: Files, head: Files): string {
+/**
+ * A git repository under .tmp (so `vitest` resolves to ours) with a base commit
+ * and a head commit. A file that is null in `head` is deleted.
+ */
+function project(name: string, base: Files, head: Record<string, string | null>): string {
   const dir = path.join(REPO, '.tmp', `e2e-${name}`)
   rmSync(dir, { recursive: true, force: true })
-  const write = (files: Files) => {
+  const write = (files: Record<string, string | null>) => {
     for (const [file, content] of Object.entries(files)) {
+      if (content === null) {
+        rmSync(path.join(dir, file))
+        continue
+      }
       mkdirSync(path.dirname(path.join(dir, file)), { recursive: true })
       writeFileSync(path.join(dir, file), content)
     }
@@ -99,6 +106,11 @@ export function sum(n: number): number {
   return total
 }
 `
+
+// A one-mutant change: `>=` → `>` survives these tests.
+const lib = 'export function big(x: number): boolean {\n  return x > 1\n}\n'
+const changed = 'export function big(x: number): boolean {\n  return x >= 2\n}\n'
+const spec = (name: string) => `import { expect, it } from 'vitest'\nimport { big } from '../src/${name}'\nit('${name}', () => {\n  expect(big(5)).toBe(true)\n  expect(big(0)).toBe(false)\n})\n`
 
 describe('nyorori run', () => {
   test('judges every mutant of the changed lines', () => {
@@ -546,17 +558,95 @@ registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescrip
     expect(output).toContain('test/age.test.ts')
   })
 
-  test('leaves out test files, config files and --exclude matches', () => {
-    const dir = project('scope', { 'src/age.ts': AGE_BASE, 'test/age.test.ts': AGE_TEST }, {
+  test('leaves out test files, config files, --exclude matches, declarations and deleted files, and says so', () => {
+    const dir = project('scope', { 'src/age.ts': AGE_BASE, 'test/age.test.ts': AGE_TEST, 'src/old.ts': 'export const old = 1\n' }, {
       'test/age.test.ts': AGE_TEST.replace("test('isAdult'", "test('isAdult works'"),
-      'vitest.config.ts': "export default { test: { include: ['test/**/*.test.ts'] } }\n",
+      'test/setup.ts': 'export function setup(): void {\n  globalThis.ready = true\n}\n',
+      'vitest.config.ts': "export default { test: { include: ['test/**/*.test.ts'], setupFiles: ['test/setup.ts'] } }\n",
       'scripts/release.ts': 'export function release(v: number) {\n  return v + 1\n}\n',
       'src/types.d.ts': 'export declare function f(x: boolean): void\n',
+      'src/old.ts': null,
+      'README.md': '# fixture\n',
     })
     const { status, report, output } = nyorori(dir, '--exclude', 'scripts/**')
     expect(status, output).toBe(0)
     expect(report!.results).toEqual([])
-    expect(output).toContain('nyorori: no mutants in the changed code.')
+    expect(report!.judged).toEqual([])
+    expect(report!.notJudged).toEqual([
+      { file: 'scripts/release.ts', reason: 'excluded' },
+      { file: 'src/old.ts', reason: 'deleted' },
+      { file: 'src/types.d.ts', reason: 'declaration' },
+      { file: 'test/age.test.ts', reason: 'test' },
+      { file: 'test/setup.ts', reason: 'test' },
+      { file: 'vitest.config.ts', reason: 'config' },
+    ])
+    expect(output).toContain('nyorori: no changed source files were judged.\n  Not judged: 2 test files, 1 config file, 1 type declaration, 1 file matching --exclude, 1 deleted file')
+    expect(output).not.toContain('WARNING')
+  })
+
+  describe('changed files the Vitest config or the file type keeps from being judged', () => {
+    test('a component file stops the run with exit code 2, unless --exclude leaves it out', () => {
+      const vue = (n: number) => `<script setup lang="ts">\nconst limit = ${n}\n</script>\n\n<template>{{ limit }}</template>\n`
+      const dir = project('vue', { 'src/a.ts': lib, 'test/a.test.ts': spec('a'), 'src/Limit.vue': vue(1) }, { 'src/a.ts': changed, 'src/Limit.vue': vue(2) })
+      const { status, report, output, leftovers } = nyorori(dir)
+      expect(status, output).toBe(2)
+      expect(report!.notJudged).toEqual([{ file: 'src/Limit.vue', reason: 'unsupported' }])
+      expect(report!.results).toEqual([])
+      expect(output).toContain(`nyorori: 1 changed file of a type nyorori cannot mutate, so nothing was judged.
+  NOT JUDGED src/Limit.vue  (a file type nyorori cannot mutate)
+  nyorori mutates only JavaScript and TypeScript. Leave these files out with --exclude '**/*.vue' (the Action's \`exclude\` input) to judge the rest.`)
+      expect(leftovers).toEqual([])
+
+      const excluded = nyorori(dir, '--exclude', '**/*.vue')
+      expect(excluded.status, excluded.output).toBe(1)
+      expect(excluded.report!.notJudged).toEqual([{ file: 'src/Limit.vue', reason: 'excluded' }])
+      expect(statuses(excluded.report!)).toEqual(['src/a.ts:2 ComparisonBoundary `>=` → `>`: Survived'])
+    })
+
+    test('warns about changed source files outside the Vitest root, and judges the rest', () => {
+      const dir = project('outside-root', {
+        'packages/core/src/a.ts': lib,
+        'packages/core/test/a.test.ts': spec('a'),
+        'packages/web/src/b.ts': lib,
+      }, { 'packages/core/src/a.ts': changed, 'packages/web/src/b.ts': changed })
+      const { status, report, output } = nyorori(dir, '--root', 'packages/core')
+      expect(status, output).toBe(1)
+      expect(report!.judged).toEqual(['packages/core/src/a.ts'])
+      expect(statuses(report!)).toEqual(['packages/core/src/a.ts:2 ComparisonBoundary `>=` → `>`: Survived'])
+      expect(report!.notJudged).toEqual([{ file: 'packages/web/src/b.ts', reason: 'outside-root' }])
+      expect(output).toContain('  WARNING    1 changed source file outside the Vitest root was not judged: packages/web/src/b.ts')
+    })
+
+    test('warns about changed source files the coverage config leaves out', () => {
+      const dir = project('coverage', {
+        'vitest.config.ts': "export default { test: { coverage: { include: ['src/**'], exclude: ['src/generated/**'] } } }\n",
+        'src/a.ts': lib,
+        'test/a.test.ts': spec('a'),
+        'src/generated/b.ts': lib,
+        'lib/c.ts': lib,
+      }, { 'src/a.ts': changed, 'src/generated/b.ts': changed, 'lib/c.ts': changed })
+      const { status, report, output } = nyorori(dir)
+      expect(status, output).toBe(1)
+      expect(report!.judged).toEqual(['src/a.ts'])
+      expect(report!.notJudged).toEqual([{ file: 'lib/c.ts', reason: 'coverage-include' }, { file: 'src/generated/b.ts', reason: 'coverage-exclude' }])
+      expect(output).toContain(`  WARNING    1 changed source file not in coverage.include of the Vitest config was not judged: lib/c.ts
+  WARNING    1 changed source file in coverage.exclude of the Vitest config was not judged: src/generated/b.ts`)
+    })
+
+    test('says plainly when coverage.include matches none of the changed source files', () => {
+      // zustand's coverage.include: a glob that ends in a slash matches directories only.
+      const dir = project('coverage-none', {
+        'vitest.config.ts': "export default { test: { coverage: { include: ['src/**/'] } } }\n",
+        'src/a.ts': lib,
+        'test/a.test.ts': spec('a'),
+      }, { 'src/a.ts': changed })
+      const { status, report, output } = nyorori(dir)
+      expect(status, output).toBe(0)
+      expect(report!.notJudged).toEqual([{ file: 'src/a.ts', reason: 'coverage-include' }])
+      expect(output).toBe(`nyorori: no changed source files were judged.
+  WARNING    coverage.include in the Vitest config matches none of the changed source files, so none was judged: src/a.ts
+`)
+    })
   })
 
   test('leaves out type tests and benchmarks, enabled or not', () => {
@@ -571,6 +661,7 @@ registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescrip
     const { status, report, output } = nyorori(dir)
     expect(status, output).toBe(0)
     expect(report!.results).toEqual([])
+    expect(report!.notJudged).toEqual([{ file: 'bench/sum.bench.ts', reason: 'test' }, { file: 'test/sum.test-d.ts', reason: 'test' }])
   })
 
   test('runs Vitest projects that share the root Vite server', () => {
@@ -860,10 +951,6 @@ export function total(item) {
   })
 
   describe('project setups seen in real repositories', () => {
-    const lib = 'export function big(x: number): boolean {\n  return x > 1\n}\n'
-    const changed = 'export function big(x: number): boolean {\n  return x >= 2\n}\n'
-    const spec = (name: string) => `import { expect, it } from 'vitest'\nimport { big } from '../src/${name}'\nit('${name}', () => {\n  expect(big(5)).toBe(true)\n  expect(big(0)).toBe(false)\n})\n`
-
     test('a DOM environment can load the setup file from outside the project', () => {
       const dir = project('happy-dom', {
         'vitest.config.ts': "export default { test: { environment: 'happy-dom' } }\n",

@@ -1,4 +1,4 @@
-import type { FilePlan } from './types.ts'
+import type { FilePlan, NotJudgedReason } from './types.ts'
 
 /** Identifies a test file across processes. */
 export interface SpecRef {
@@ -9,7 +9,11 @@ export interface SpecRef {
 }
 
 export type Request =
-  /** `setupDir` is a temporary directory the CLI owns and removes after the run. */
+  /**
+   * `candidates` are the changed source and component files, absolute; the
+   * session sorts out the ones the Vitest config leaves out. `setupDir` is a
+   * temporary directory the CLI owns and removes after the run.
+   */
   | { type: 'init'; root: string; candidates: string[]; exclude: string[]; setupDir: string }
   | { type: 'plan'; files: FilePlan[] }
   /**
@@ -34,7 +38,8 @@ export interface ModuleResult {
 }
 
 export type Response =
-  | { type: 'ready'; eligible: string[] }
+  /** `eligible` are the candidates left to judge; `notJudged` has the others, with absolute paths. */
+  | { type: 'ready'; eligible: string[]; notJudged: Array<{ file: string; reason: NotJudgedReason }> }
   | { type: 'planned'; specs: SpecRef[] }
   | { type: 'result'; modules: ModuleResult[]; unhandledErrors: string[]; wall: number }
   | { type: 'closed' }

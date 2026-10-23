@@ -1,6 +1,6 @@
 import path from 'node:path'
 import type { Report } from './run.ts'
-import type { Mutant, MutantResult, MutantStatus } from './types.ts'
+import type { Mutant, MutantResult, MutantStatus, NotJudgedFile, NotJudgedReason } from './types.ts'
 
 const FAILING: ReadonlySet<MutantStatus> = new Set(['Survived', 'NoCoverage'])
 
@@ -8,9 +8,103 @@ export function failures(report: Report): MutantResult[] {
   return report.results.filter((r) => FAILING.has(r.status))
 }
 
-export function exitCode(report: Report): 0 | 1 {
+export function exitCode(report: Report): 0 | 1 | 2 {
   if (report.dryRun) return 0
+  if (unsupported(report).length > 0) return 2
   return failures(report).length > 0 || report.problems.length > 0 ? 1 : 0
+}
+
+/** Why each changed file was not judged, as the step summary lists them. */
+const WHY: Readonly<Record<NotJudgedReason, string>> = {
+  unsupported: 'a file type nyorori cannot mutate',
+  'outside-root': 'outside the Vitest root',
+  'coverage-include': 'not in coverage.include',
+  'coverage-exclude': 'in coverage.exclude',
+  excluded: 'matches --exclude',
+  test: 'test, type test, benchmark or setup file',
+  config: 'Vitest or Vite config',
+  declaration: 'type declaration',
+  node_modules: 'in node_modules',
+  deleted: 'deleted',
+}
+
+/** The reasons that are only counted in the text: nyorori never mutates such files, or was told not to. */
+const COUNTED: ReadonlyArray<[NotJudgedReason, (n: number) => string]> = [
+  ['test', (n) => plural(n, 'test file')],
+  ['config', (n) => plural(n, 'config file')],
+  ['declaration', (n) => plural(n, 'type declaration')],
+  ['excluded', (n) => `${plural(n, 'file')} matching --exclude`],
+  ['deleted', (n) => plural(n, 'deleted file')],
+  ['node_modules', (n) => `${plural(n, 'file')} in node_modules`],
+]
+
+/** Changed files of a type nyorori cannot mutate. Unless --exclude leaves them out, the run judges nothing and exits with 2. */
+function unsupported(report: Report): NotJudgedFile[] {
+  return report.notJudged.filter((f) => f.reason === 'unsupported')
+}
+
+/** Globs that leave the unsupported files out: one for each extension. */
+function excludeGlobs(files: NotJudgedFile[]): string[] {
+  return [...new Set(files.map((f) => `**/*${path.extname(f.file)}`))]
+}
+
+function unsupportedAdvice(files: NotJudgedFile[], markdown = false): string {
+  const globs = excludeGlobs(files)
+  const how = markdown
+    ? `the \`exclude\` input (${globs.map((glob) => `\`${glob}\``).join(', ')})`
+    : `${globs.map((glob) => `--exclude '${glob}'`).join(' ')} (the Action's \`exclude\` input)`
+  return `nyorori mutates only JavaScript and TypeScript. Leave these files out with ${how} to judge the rest.`
+}
+
+/** Some of the files, so that a monorepo's other packages do not fill the output. */
+function someOf(files: NotJudgedFile[]): string {
+  const shown = files.slice(0, 5).map((f) => f.file).join(', ')
+  return files.length > 5 ? `${shown} and ${files.length - 5} more` : shown
+}
+
+/**
+ * Changed source files the Vitest config leaves out. They do not fail the
+ * run: a monorepo job sees the other packages' changes outside its root. But
+ * a coverage.include that matches nothing passes every PR without a word.
+ */
+export function notJudgedWarnings(report: Report): string[] {
+  const of = (reason: NotJudgedReason) => report.notJudged.filter((f) => f.reason === reason)
+  const was = (files: unknown[]) => (files.length === 1 ? 'was' : 'were')
+  const warnings: string[] = []
+  const outside = of('outside-root')
+  if (outside.length > 0) {
+    warnings.push(`${plural(outside.length, 'changed source file')} outside the Vitest root ${was(outside)} not judged: ${someOf(outside)}`)
+  }
+  const notIncluded = of('coverage-include')
+  // No other file got past coverage.include: judged, in coverage.exclude, or a component.
+  const matchesNone = report.judged.length === 0 && !report.notJudged.some((f) => f.reason === 'coverage-exclude' || f.reason === 'unsupported')
+  if (notIncluded.length > 0 && matchesNone) {
+    warnings.push(`coverage.include in the Vitest config matches none of the changed source files, so none was judged: ${someOf(notIncluded)}`)
+  } else if (notIncluded.length > 0) {
+    warnings.push(`${plural(notIncluded.length, 'changed source file')} not in coverage.include of the Vitest config ${was(notIncluded)} not judged: ${someOf(notIncluded)}`)
+  }
+  const excluded = of('coverage-exclude')
+  if (excluded.length > 0) {
+    warnings.push(`${plural(excluded.length, 'changed source file')} in coverage.exclude of the Vitest config ${was(excluded)} not judged: ${someOf(excluded)}`)
+  }
+  return warnings
+}
+
+/** One line that counts the rest, e.g. "Not judged: 2 test files, 1 deleted file". */
+function notJudgedCount(report: Report): string | undefined {
+  const parts = COUNTED.map(([reason, count]) => [report.notJudged.filter((f) => f.reason === reason).length, count] as const)
+    .filter(([n]) => n > 0)
+    .map(([n, count]) => count(n))
+  return parts.length > 0 ? `Not judged: ${parts.join(', ')}` : undefined
+}
+
+/** Why there are no results, or undefined when there are. */
+function noResults(report: Report): string | undefined {
+  const stopped = unsupported(report)
+  if (stopped.length > 0 && !report.dryRun) return `${plural(stopped.length, 'changed file')} of a type nyorori cannot mutate, so nothing was judged`
+  if (report.results.length > 0) return undefined
+  if (report.judged.length > 0) return `no mutants in the changed code of ${plural(report.judged.length, 'judged file')}`
+  return report.notJudged.length > 0 ? 'no changed source files were judged' : 'no changed source files to judge'
 }
 
 function counts(report: Report): string {
@@ -84,8 +178,9 @@ function explain(r: MutantResult): string {
 export function formatText(report: Report): string {
   const lines: string[] = []
   const n = report.results.length
-  if (n === 0) {
-    lines.push('nyorori: no mutants in the changed code.')
+  const none = noResults(report)
+  if (none !== undefined) {
+    lines.push(`nyorori: ${none}.`)
   } else if (report.dryRun) {
     lines.push(`nyorori: ${plural(n, 'mutant')} in ${plural(report.files.length, 'changed file')} (dry run)`)
     for (const r of report.results) lines.push(`  ${where(report, r.file, r.line, r.column)}  ${r.operator}  ${r.description}`)
@@ -107,6 +202,12 @@ export function formatText(report: Report): string {
     lines.push(`  NEW IGNORE ${where(report, s.file, s.line)}  ${s.operators.join(', ')} -- ${s.reason}`)
   }
   for (const p of report.problems) lines.push(`  PROBLEM    ${where(report, p.file, p.line)}  ${p.message}`)
+  const stopped = unsupported(report)
+  for (const f of stopped) lines.push(`  NOT JUDGED ${f.file}  (${WHY.unsupported})`)
+  if (stopped.length > 0) lines.push(`  ${unsupportedAdvice(stopped)}`)
+  for (const warning of notJudgedWarnings(report)) lines.push(`  WARNING    ${warning}`)
+  const counted = notJudgedCount(report)
+  if (counted) lines.push(`  ${counted}`)
   return lines.join('\n')
 }
 
@@ -118,8 +219,10 @@ function escapeProperty(value: string): string {
   return escapeData(value).replace(/:/g, '%3A').replace(/,/g, '%2C')
 }
 
-function command(kind: 'error' | 'warning', report: Report, file: string, line: number, column: number | undefined, title: string, message: string): string {
-  const props = [`file=${escapeProperty(path.relative(report.gitRoot, file))}`, `line=${line}`]
+function command(kind: 'error' | 'warning', report: Report, file: string | undefined, line: number | undefined, column: number | undefined, title: string, message: string): string {
+  const props: string[] = []
+  if (file !== undefined) props.push(`file=${escapeProperty(path.relative(report.gitRoot, file))}`)
+  if (line !== undefined) props.push(`line=${line}`)
   if (column !== undefined) props.push(`col=${column}`)
   props.push(`title=${escapeProperty(title)}`)
   return `::${kind} ${props.join(',')}::${escapeData(message)}`
@@ -146,6 +249,13 @@ export function formatAnnotations(report: Report): string[] {
     out.push(command('warning', report, s.file, s.line, undefined, 'nyorori: new suppression', `${s.operators.join(', ')} -- ${s.reason}`))
   }
   for (const p of report.problems) out.push(command('error', report, p.file, p.line, undefined, 'nyorori: suppression', p.message))
+  for (const f of unsupported(report)) {
+    const [glob] = excludeGlobs([f])
+    const message = `nyorori cannot mutate ${path.extname(f.file)} files, so this change was not judged. Leave such files out with the exclude input (for example ${glob}) to judge the rest.`
+    out.push(command('error', report, path.join(report.gitRoot, f.file), undefined, undefined, 'nyorori: file type not supported', message))
+  }
+  // One for each kind, without a file: a monorepo's other packages are not this job's to fix.
+  for (const warning of notJudgedWarnings(report)) out.push(command('warning', report, undefined, undefined, undefined, 'nyorori: changed files not judged', warning))
   return out
 }
 
@@ -165,8 +275,11 @@ export function formatSummary(report: Report): string {
     lines.push('')
   }
   const failed = failures(report)
-  if (report.results.length === 0) {
-    lines.push('No mutants in the changed code.')
+  const none = noResults(report)
+  const stopped = unsupported(report)
+  if (none !== undefined) {
+    lines.push(`${none[0]!.toUpperCase()}${none.slice(1)}.`)
+    if (stopped.length > 0 && !report.dryRun) lines.push('', unsupportedAdvice(stopped, true))
   } else if (failed.length === 0) {
     lines.push(`All ${report.results.length} mutants in the changed code are detected by tests (${counts(report)}).`)
   } else {
@@ -201,6 +314,12 @@ export function formatSummary(report: Report): string {
   if (report.problems.length > 0) {
     lines.push('', '### Suppression problems', '')
     for (const p of report.problems) lines.push(`- \`${where(report, p.file, p.line)}\`: ${p.message}`)
+  }
+  if (report.notJudged.length > 0) {
+    lines.push('', '### Not judged', '')
+    for (const warning of notJudgedWarnings(report)) lines.push('> [!WARNING]', `> ${warning}`, '')
+    lines.push('| File | Why |', '|---|---|')
+    for (const f of report.notJudged) lines.push(`| \`${cell(f.file)}\` | ${f.reason === 'unsupported' ? `**${WHY[f.reason]}**` : WHY[f.reason]} |`)
   }
   return `${lines.join('\n')}\n`
 }

@@ -34,7 +34,8 @@ nyorori run --base <ref>
                   대상 파일마다 hunk 안의 옛 토큰과 새 토큰을 diff → "바뀐 범위"
   2. 세션 시작     Vitest를 띄운 별도 프로세스(session)를 시작한다
                   세션이 Vitest 설정으로 대상 파일을 거른다
-                  (테스트·타입 테스트·벤치마크 파일, coverage.exclude, --exclude 제외)
+                  (루트 밖, 테스트·타입 테스트·벤치마크·설정 파일, --exclude, coverage 설정)
+                  거른 파일은 이유와 함께 보고하고, 남은 컴포넌트 파일(.vue 등)이 있으면 exit 2로 멈춘다
   3. mutant 생성   먼저 문법 규칙이 모르는 범위 안의 `+`와, TS 파일에서 `?.`·`??`가 지키는 값을 모아
                   TypeScript에 한꺼번에 묻는다. TypeScript 프로세스는 이때만 떠 있다
                   oxc-parser로 파싱 → 바뀐 범위를 담은 지점에만 mutant를 만든다
@@ -43,7 +44,7 @@ nyorori run --base <ref>
   4. 계측          모든 mutant를 파일에 한꺼번에 넣는다 (mutant schemata)
                   파일마다 두 벌을 만든다: probe 없는 계측(plain)과 probe를 넣은 계측(profiled)
                   Vite 플러그인(enforce: 'pre', transform order: 'pre')이 원본 대신 계측된 코드를 돌려준다
-  5. 기준 실행     원본 그대로(mutant 0)로 관련 테스트를 profiled 계측으로 실행한다
+  5. 기준 실행     원본 그대로(mutant 0)로 mutant가 생긴 파일의 관련 테스트(related)를 profiled 계측으로 실행한다
                   - 실패가 하나라도 있으면 exit 2로 중단한다 (mutant를 판정할 수 없음)
                   - 테스트 파일마다 각 mutant 지점이 몇 번 실행됐는지(hit) 기록한다
                   - probe가 지점을 지나간 값의 종류를 기록한다 (실행 시간 프로파일링)
@@ -110,6 +111,7 @@ profiled 계측은 원본 분기 안에 probe를 더 넣는다("실행 시간 �
 
 다음은 개별 mutant의 판정이 아니라 실행 전체를 exit 2로 끝낸다.
 - 계측한 코드가 파싱되지 않는 경우
+- 바뀐 컴포넌트 파일(`.vue` 등)을 `--exclude`로 빼지 않은 경우("범위 규칙"의 "그 밖의 범위" 참고)
 - 다른 플러그인이 먼저 소스를 바꿔 놓아 계측할 수 없는 경우. 그 파일을 import하는 테스트가 실패하지만 테스트 탓이 아니므로, 기준 실행의 실패로 보고하지 않고 그 파일과 nyorori보다 먼저 transform이 도는 플러그인 이름을 알린다("구현 구조" 참고).
 - 계측 플러그인이 닿지 않는 Vitest project가 있는 경우 (남은 위험의 "여러 project 설정" 참고)
 
@@ -165,13 +167,23 @@ TCE로 버린 mutant와, 실행 시간에 문자열 연결로 확인되어 건�
 
 - 타입 전용 코드는 런타임에서 지워지므로 대상에서 뺀다. 타입 주석, interface, type alias, `declare`, enum이 여기에 해당한다.
 - 모듈 최상위 코드는 import 시점에 한 번만 실행되므로 대상에서 뺀다. 함수 안(매개변수 기본값 포함)의 코드만 대상이다.
-- 파일 기준으로 다음은 제외한다.
-  - 테스트 파일: Vitest의 `matchesTestGlob`
-  - 타입 테스트와 벤치마크: project마다 `typecheck.include`에서 `typecheck.exclude`를 뺀 것, `benchmark.include`에서 `benchmark.exclude`를 뺀 것. `matchesTestGlob`은 `include`만 보므로 따로 본다. 켜져 있지 않아도 뺀다. 테스트 파일이라서 그 안의 코드를 실행하는 테스트가 없고, 대상에 넣으면 NoCoverage로 거짓 실패한다.
-  - Vitest `coverage.include`/`coverage.exclude`에 따라 빠지는 파일: 기본값에서 설정 파일 등
-  - `--exclude`에 걸리는 파일
-  - `.d.ts`
-  - `node_modules`
+- 파일 기준으로 다음은 제외하고, 이유와 함께 보고한다(`notJudged`). 파일마다 이 순서로 처음 맞는 이유 하나다. 앞의 셋은 CLI가, 나머지는 Vitest 설정을 아는 세션이 정한다.
+  - 지운 파일(`deleted`): `git diff --diff-filter=D`. 판정할 코드가 없다.
+  - `node_modules`, `.d.ts`(`declaration`)
+  - Vitest 루트 밖(`outside-root`). project의 glob은 루트 기준이라서, 루트 밖의 테스트 파일도 테스트 파일로 알아볼 수 없다. 그래서 이것을 먼저 본다.
+  - 테스트 파일(`test`): Vitest의 `matchesTestGlob`, 그리고 project의 `setupFiles`와 `globalSetup`
+  - 타입 테스트와 벤치마크(`test`): project마다 `typecheck.include`에서 `typecheck.exclude`를 뺀 것, `benchmark.include`에서 `benchmark.exclude`를 뺀 것. `matchesTestGlob`은 `include`만 보므로 따로 본다. 켜져 있지 않아도 뺀다. 테스트 파일이라서 그 안의 코드를 실행하는 테스트가 없고, 대상에 넣으면 NoCoverage로 거짓 실패한다.
+  - 설정 파일(`config`): 파일 이름이 `vite(st)?(.이름)?.config.*`인 것. Vitest 4가 project 설정 파일을 찾는 규칙과 같다.
+  - `--exclude`에 걸리는 파일(`excluded`)
+  - Vitest `coverage.include`에 맞지 않거나(`coverage-include`) `coverage.exclude`에 걸리는(`coverage-exclude`) 파일
+  - 컴포넌트 형식(`unsupported`): `.vue`, `.svelte`, `.astro`, `.mdx`, `.marko`, `.gjs`, `.gts`. 위에 걸리지 않고 남은 것이다.
+- 이유마다 다루는 방법이 다르다. 전에는 모두 "no mutants in the changed code"였고, 그중 몇은 조용한 거짓 통과였다.
+  - `unsupported`는 exit 2로 멈춘다. 1.0은 이 형식을 지원하지 않기로 했다. PR이 바꾼 코드가 있는데 판정하지 않았으므로, 통과시키면 거짓 통과가 된다. 세션을 시작해 이유를 모두 정한 다음, 테스트를 돌리기 전에 멈춘다. `--exclude`로 명시적으로 빼면 `excluded`가 되어 나머지를 판정한다. dry run은 판정하지 않으므로 목록만 보여 주고 exit 0이다.
+  - `outside-root`, `coverage-include`, `coverage-exclude`는 경고다. 텍스트의 `WARNING` 줄, 파일 위치 없는 `::warning` 어노테이션(이유마다 하나), step summary의 `[!WARNING]`. 실패시키지 않는다. monorepo에서 `working-directory`를 패키지마다 둔 job은 다른 패키지의 변경을 모두 루트 밖으로 보기 때문이다. 어노테이션에 파일 위치를 달지 않는 것도 같은 이유다. 그 파일은 다른 job이 판정한다.
+  - `coverage.include`는 틀려도 조용하다. zustand의 `coverage.include: ['src/**/']`는 디렉터리에만 맞아서 모든 PR이 아무것도 판정하지 않고 통과했다. 그래서 판정한 파일도, `coverage.include`를 통과한 다른 파일도 없으면 "coverage.include in the Vitest config matches none of the changed source files"라고 따로 쓴다.
+  - Vitest는 설정 파일과 setup 파일, 테스트 `include`를 `coverage.exclude`에 스스로 넣는다. 그래서 이것들은 coverage보다 먼저 `config`와 `test`로 가려, 설정 파일을 바꿀 때마다 경고하지 않게 한다.
+  - 나머지는 개수만 한 줄로 쓴다(`Not judged: 2 test files, 1 deleted file`).
+  - JavaScript, TypeScript, 컴포넌트 형식이 아닌 파일은 넣지 않는다. mutant가 생길 수 없는 파일이고, lockfile이나 문서까지 넣으면 목록이 묻힌다.
 
 ### mutation 연산자
 
@@ -560,6 +572,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 - 예측하지 않은 Survived와 NoCoverage에도 `--json`에서 `reason`이 붙는다. 텍스트 출력과 같은 말, `every test still passes with this change`와 `no test runs this code`다. 그래서 `--json`만 읽어도 실패한 mutant마다 이유가 있다. 실행한 결과가 Survived라도 프로파일의 이유가 있으면(`--no-predict`) 그 이유를 둔다. 어노테이션은 전과 같다. dry run은 판정하지 않으므로 붙이지 않는다.
 - 문자열 `+`로 건너뛴 mutant는 `--json`의 `skipped`에 이유와 함께 남는다. 텍스트와 step summary에는 `N mutants skipped: string concatenation in every observed evaluation` 한 줄만 쓴다. 어노테이션은 만들지 않고 exit code에도 영향이 없다.
 - unnecessary는 `--json`의 `unnecessary`에 남는다. 보고 방식은 "타입으로 불필요한 방어 코드"의 "보고"를 본다.
+- 판정하지 않은 바뀐 파일은 `--json`의 `notJudged`에 `{ file, reason }`으로, 판정한 파일은 `judged`에 남는다. `skipped`는 문자열 `+`로 건너뛴 mutant라서 따로 둔다. 텍스트 첫 줄은 판정한 파일이 없으면 "no changed source files were judged", 판정했지만 mutant가 없으면 "no mutants in the changed code of N judged files"로 둘을 구별한다("범위 규칙"의 "그 밖의 범위" 참고).
 - 억제 주석
   - 예측한 mutant를 억제하면 실행하지 않고 Ignored가 된다. 살아남는 것이 확실하므로 "불필요한 억제"가 아니다.
   - 이 PR이 추가한 억제가 건너뛴 `+`만 가리키면, TCE와 마찬가지로 해당 mutant가 없다는 문제로 보고된다.

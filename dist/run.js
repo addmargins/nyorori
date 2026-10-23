@@ -2,7 +2,7 @@ import { fork } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { diffFiles, fileChanges, gitRoot, mergeBase } from './git.js';
+import { deletedFiles, diffFiles, fileChanges, gitRoot, mergeBase } from './git.js';
 import { generate, ParseError, typeQuestions } from './mutate/generate.js';
 import { instrument, InstrumentError } from './mutate/instrument.js';
 import { mergeProfile, predict } from './mutate/profile.js';
@@ -10,6 +10,11 @@ import { askTypes, typesNotAsked } from './mutate/typecheck.js';
 import { EXPLAIN } from './report.js';
 const SOURCE = /\.(?:[cm]?[jt]sx?)$/;
 const DECLARATION = /\.d\.[cm]?ts$/;
+/**
+ * Single-file component formats a Vite plugin compiles to JavaScript. They hold
+ * code a PR changes like any other, but nyorori cannot parse or instrument them.
+ */
+const COMPONENT = /\.(?:vue|svelte|astro|mdx|marko|g[jt]s)$/;
 /** The run cannot produce a verdict: bad input, failing baseline, or a tool failure. */
 export class RunError extends Error {
 }
@@ -25,14 +30,30 @@ export async function run(options) {
     }
     const changed = diffFiles(root, base);
     const relative = (file) => path.relative(repo, file);
-    const candidates = [...changed.keys()]
-        .filter((file) => SOURCE.test(file) && !DECLARATION.test(file) && !file.split(path.sep).includes('node_modules'))
-        .filter((file) => existsSync(file))
-        .sort();
+    const notJudged = [];
+    for (const file of deletedFiles(root, base))
+        if (isCode(file))
+            notJudged.push({ file, reason: 'deleted' });
+    const candidates = [];
+    for (const file of changed.keys()) {
+        if (!isCode(file))
+            continue;
+        if (file.split(path.sep).includes('node_modules'))
+            notJudged.push({ file, reason: 'node_modules' });
+        else if (DECLARATION.test(file))
+            notJudged.push({ file, reason: 'declaration' });
+        else if (!existsSync(file))
+            notJudged.push({ file, reason: 'deleted' });
+        else
+            candidates.push(file);
+    }
+    candidates.sort();
     const report = {
         gitRoot: repo,
         base,
+        judged: [],
         files: [],
+        notJudged: [],
         results: [],
         equivalent: [],
         skipped: [],
@@ -42,6 +63,10 @@ export async function run(options) {
         types: options.types ? typesNotAsked() : { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
         dryRun: options.dryRun,
     };
+    const listNotJudged = () => {
+        report.notJudged = notJudged.map(({ file, reason }) => ({ file: relative(file), reason })).sort((a, b) => a.file.localeCompare(b.file));
+    };
+    listNotJudged();
     if (candidates.length === 0)
         return report;
     // Holds the session's Vitest setup file. The CLI owns it because it SIGKILLs sessions.
@@ -50,11 +75,22 @@ export async function run(options) {
     let session;
     try {
         session = await start();
+        notJudged.push(...session.notJudged);
+        // What is left of the components is code nyorori cannot judge: the run
+        // stops (exit 2) rather than pass a PR that may change only them.
+        for (const file of session.eligible)
+            if (COMPONENT.test(file))
+                notJudged.push({ file, reason: 'unsupported' });
+        listNotJudged();
+        if (!options.dryRun && report.notJudged.some((f) => f.reason === 'unsupported'))
+            return report;
+        const eligible = session.eligible.filter((file) => SOURCE.test(file));
+        report.judged = eligible.map(relative);
         const plans = [];
         const mutants = [];
         const planned = new Map();
         const reformatted = new Set();
-        const sources = session.eligible.map((file) => {
+        const sources = eligible.map((file) => {
             const code = readFileSync(file, 'utf8');
             return { file, code, changes: fileChanges(repo, changed.get(file), code) };
         });
@@ -238,6 +274,10 @@ function reportUnusedSuppressions(report, reformatted) {
         }
     }
 }
+/** JavaScript, TypeScript or a component format: a file a PR changes code in. */
+function isCode(file) {
+    return SOURCE.test(file) || COMPONENT.test(file);
+}
 function judge(modules, unhandledErrors) {
     if (modules.some((m) => m.exceeded))
         return 'Timeout';
@@ -248,6 +288,7 @@ function judge(modules, unhandledErrors) {
 /** CLI side of the Vitest session process (see session.ts). */
 class Session {
     eligible = [];
+    notJudged = [];
     child;
     waiting;
     constructor(child) {
@@ -274,6 +315,7 @@ class Session {
             throw unexpected(response);
         }
         session.eligible = response.eligible;
+        session.notJudged = response.notJudged;
         return session;
     }
     async plan(files) {

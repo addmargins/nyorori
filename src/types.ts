@@ -113,6 +113,34 @@ export type TypesUsage =
   | { backend: 'typescript'; files: number; untyped: UntypedFile[] }
   | { backend: 'none'; reason: string; untyped: UntypedFile[] }
 
+/**
+ * Why nyorori did not judge a changed file. Only `unsupported` stops the run
+ * (exit 2): those files hold code nyorori would be expected to check. The
+ * Vitest root and coverage reasons are warnings, as they can hide a wrong
+ * config; the rest is what nyorori never mutates.
+ */
+export type NotJudgedReason =
+  /** A component format nyorori cannot mutate (.vue, .svelte, ...) that --exclude does not match. */
+  | 'unsupported'
+  | 'outside-root'
+  | 'coverage-include'
+  | 'coverage-exclude'
+  | 'excluded'
+  /** A test file, type test, benchmark or setup file of a Vitest project. */
+  | 'test'
+  /** A Vitest or Vite config file. */
+  | 'config'
+  | 'declaration'
+  | 'node_modules'
+  | 'deleted'
+
+/** A changed JavaScript, TypeScript or component file that got no mutants without being looked at. */
+export interface NotJudgedFile {
+  /** Relative to the git root. */
+  file: string
+  reason: NotJudgedReason
+}
+
 /** What the CLI hands to the Vitest session for one source file. */
 export interface FilePlan {
   file: string

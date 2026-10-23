@@ -1,4 +1,4 @@
-import { expect, test } from 'vitest'
+import { describe, expect, test } from 'vitest'
 import { exitCode, formatAnnotations, formatSummary, formatText } from '../src/report.ts'
 import type { Report } from '../src/run.ts'
 
@@ -6,7 +6,9 @@ test('equivalent mutants are counted, but neither annotated nor failing', () => 
   const report: Report = {
     gitRoot: '/repo',
     base: 'abc',
+    judged: ['src/a.ts'],
     files: ['src/a.ts'],
+    notJudged: [],
     results: [{ id: 1, file: '/repo/src/a.ts', line: 2, column: 14, operator: 'ComparisonBoundary', description: '`>=` → `>`', status: 'Killed', tests: ['test/a.test.ts'] }],
     equivalent: [
       { file: '/repo/src/a.ts', line: 3, column: 7, operator: 'Condition', description: '`DEBUG` → `false`' },
@@ -30,7 +32,9 @@ test('TypeScript files judged without types get one line of text, and nothing el
   const report: Report = {
     gitRoot: '/repo',
     base: 'abc',
+    judged: ['src/a.ts'],
     files: ['src/a.ts'],
+    notJudged: [],
     results: [{ id: 1, file: '/repo/src/a.ts', line: 2, column: 15, operator: 'Arithmetic', description: '`+` → `-`', status: 'Killed', tests: ['test/a.test.ts'] }],
     equivalent: [],
     skipped: [],
@@ -54,7 +58,9 @@ test('a predicted survivor shows why no test can notice it; skipped string `+` i
   const report: Report = {
     gitRoot: '/repo',
     base: 'abc',
+    judged: ['src/a.js'],
     files: ['src/a.js'],
+    notJudged: [],
     results: [
       { id: 1, file: '/repo/src/a.js', line: 2, column: 14, operator: 'OptionalChaining', description: '`?.` → `.`', status: 'Survived', tests: ['test/a.test.js'], reason, predicted: true },
       // run() gives a survivor the profile has nothing on the words of the text output.
@@ -93,7 +99,9 @@ test('with --no-predict, a survivor the profile got wrong is reported, without f
   const report: Report = {
     gitRoot: '/repo',
     base: 'abc',
+    judged: ['src/a.js'],
     files: ['src/a.js'],
+    notJudged: [],
     results: [
       { id: 1, file: '/repo/src/a.js', line: 3, column: 9, operator: 'ComparisonBoundary', description: '`<` → `<=`', status: 'Killed', tests: ['test/a.test.js'], reason: 'no test has `x === lo`', mispredicted: 'Killed' },
     ],
@@ -118,7 +126,9 @@ test('`?.` and `??` unnecessary by types are counted and listed in the summary, 
   const report: Report = {
     gitRoot: '/repo',
     base: 'abc',
+    judged: ['src/a.ts'],
     files: ['src/a.ts'],
+    notJudged: [],
     results: [{ id: 1, file: '/repo/src/a.ts', line: 2, column: 3, operator: 'FunctionBody', description: 'body → `return`', status: 'Killed', tests: ['test/a.test.ts'] }],
     equivalent: [],
     skipped: [],
@@ -153,4 +163,108 @@ If the value really can be null or undefined (data from outside, \`as\`, \`!\`),
   expect(formatSummary(wrong)).toContain(`- \`src/a.ts:3:14\` OptionalChaining \`?.\` → \`.\`: Killed, unnecessary by types (${reason})`)
   expect(formatAnnotations(wrong)).toEqual([])
   expect(exitCode(wrong)).toBe(0)
+})
+
+describe('changed files that were not judged', () => {
+  const base: Report = {
+    gitRoot: '/repo',
+    base: 'abc',
+    judged: [],
+    files: [],
+    notJudged: [],
+    results: [],
+    equivalent: [],
+    skipped: [],
+    unnecessary: [],
+    suppressions: [],
+    problems: [],
+    types: { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
+    dryRun: false,
+  }
+
+  test('a component file stops the run with exit code 2 and says how to leave it out', () => {
+    const report: Report = {
+      ...base,
+      notJudged: [
+        { file: 'src/App.vue', reason: 'unsupported' },
+        { file: 'src/Card.svelte', reason: 'unsupported' },
+        { file: 'src/App.test.ts', reason: 'test' },
+        { file: 'src/old.ts', reason: 'deleted' },
+      ],
+    }
+    expect(formatText(report)).toBe(`nyorori: 2 changed files of a type nyorori cannot mutate, so nothing was judged.
+  NOT JUDGED src/App.vue  (a file type nyorori cannot mutate)
+  NOT JUDGED src/Card.svelte  (a file type nyorori cannot mutate)
+  nyorori mutates only JavaScript and TypeScript. Leave these files out with --exclude '**/*.vue' --exclude '**/*.svelte' (the Action's \`exclude\` input) to judge the rest.
+  Not judged: 1 test file, 1 deleted file`)
+    expect(exitCode(report)).toBe(2)
+    expect(formatAnnotations(report)).toEqual([
+      '::error file=src/App.vue,title=nyorori%3A file type not supported::nyorori cannot mutate .vue files, so this change was not judged. Leave such files out with the exclude input (for example **/*.vue) to judge the rest.',
+      '::error file=src/Card.svelte,title=nyorori%3A file type not supported::nyorori cannot mutate .svelte files, so this change was not judged. Leave such files out with the exclude input (for example **/*.svelte) to judge the rest.',
+    ])
+    expect(formatSummary(report)).toBe(`## nyorori
+
+2 changed files of a type nyorori cannot mutate, so nothing was judged.
+
+nyorori mutates only JavaScript and TypeScript. Leave these files out with the \`exclude\` input (\`**/*.vue\`, \`**/*.svelte\`) to judge the rest.
+
+### Not judged
+
+| File | Why |
+|---|---|
+| \`src/App.vue\` | **a file type nyorori cannot mutate** |
+| \`src/Card.svelte\` | **a file type nyorori cannot mutate** |
+| \`src/App.test.ts\` | test, type test, benchmark or setup file |
+| \`src/old.ts\` | deleted |
+`)
+    // A dry run judges nothing anyway: it lists them and passes.
+    expect(exitCode({ ...report, dryRun: true })).toBe(0)
+    expect(formatText({ ...report, dryRun: true })).toContain('nyorori: no changed source files were judged.\n  NOT JUDGED src/App.vue')
+  })
+
+  test('files outside the root or the coverage config are warnings that do not fail the run', () => {
+    const outside = ['a', 'b', 'c', 'd', 'e', 'f'].map((name) => ({ file: `packages/web/src/${name}.ts`, reason: 'outside-root' as const }))
+    const report: Report = {
+      ...base,
+      judged: ['packages/core/src/a.ts'],
+      notJudged: [...outside, { file: 'packages/core/src/gen.ts', reason: 'coverage-exclude' }, { file: 'packages/core/scripts/x.ts', reason: 'excluded' }],
+    }
+    expect(formatText(report)).toBe(`nyorori: no mutants in the changed code of 1 judged file.
+  WARNING    6 changed source files outside the Vitest root were not judged: packages/web/src/a.ts, packages/web/src/b.ts, packages/web/src/c.ts, packages/web/src/d.ts, packages/web/src/e.ts and 1 more
+  WARNING    1 changed source file in coverage.exclude of the Vitest config was not judged: packages/core/src/gen.ts
+  Not judged: 1 file matching --exclude`)
+    expect(exitCode(report)).toBe(0)
+    expect(formatAnnotations(report)).toEqual([
+      '::warning title=nyorori%3A changed files not judged::6 changed source files outside the Vitest root were not judged: packages/web/src/a.ts, packages/web/src/b.ts, packages/web/src/c.ts, packages/web/src/d.ts, packages/web/src/e.ts and 1 more',
+      '::warning title=nyorori%3A changed files not judged::1 changed source file in coverage.exclude of the Vitest config was not judged: packages/core/src/gen.ts',
+    ])
+    expect(formatSummary(report)).toContain(`### Not judged
+
+> [!WARNING]
+> 6 changed source files outside the Vitest root were not judged: packages/web/src/a.ts, packages/web/src/b.ts, packages/web/src/c.ts, packages/web/src/d.ts, packages/web/src/e.ts and 1 more
+
+> [!WARNING]
+> 1 changed source file in coverage.exclude of the Vitest config was not judged: packages/core/src/gen.ts
+
+| File | Why |
+|---|---|
+| \`packages/web/src/a.ts\` | outside the Vitest root |
+`)
+  })
+
+  test('says plainly when coverage.include matches none of the changed source files', () => {
+    const report: Report = { ...base, notJudged: [{ file: 'src/a.ts', reason: 'coverage-include' }, { file: 'src/b.ts', reason: 'coverage-include' }] }
+    expect(formatText(report)).toBe(`nyorori: no changed source files were judged.
+  WARNING    coverage.include in the Vitest config matches none of the changed source files, so none was judged: src/a.ts, src/b.ts`)
+    expect(exitCode(report)).toBe(0)
+    // When it matches another one, it is only that these are not in it.
+    expect(formatText({ ...report, judged: ['src/c.ts'] })).toContain('WARNING    2 changed source files not in coverage.include of the Vitest config were not judged: src/a.ts, src/b.ts')
+  })
+
+  test('tells a change without source files from one whose source files were all left out', () => {
+    expect(formatText(base)).toBe('nyorori: no changed source files to judge.')
+    expect(formatSummary(base)).toBe('## nyorori\n\nNo changed source files to judge.\n')
+    expect(formatText({ ...base, notJudged: [{ file: 'test/a.test.ts', reason: 'test' }, { file: 'vitest.config.ts', reason: 'config' }] }))
+      .toBe('nyorori: no changed source files were judged.\n  Not judged: 1 test file, 1 config file')
+  })
 })

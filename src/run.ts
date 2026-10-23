@@ -2,7 +2,7 @@ import { fork, type ChildProcess } from 'node:child_process'
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { diffFiles, fileChanges, gitRoot, mergeBase } from './git.ts'
+import { deletedFiles, diffFiles, fileChanges, gitRoot, mergeBase } from './git.ts'
 import { generate, ParseError, typeQuestions, type PlannedMutant } from './mutate/generate.ts'
 import { instrument, InstrumentError } from './mutate/instrument.ts'
 import { mergeProfile, predict, type ProbeRecord } from './mutate/profile.ts'
@@ -15,6 +15,8 @@ import type {
   Mutant,
   MutantResult,
   MutantStatus,
+  NotJudgedFile,
+  NotJudgedReason,
   SkippedMutant,
   Suppression,
   SuppressionProblem,
@@ -24,6 +26,11 @@ import type {
 
 const SOURCE = /\.(?:[cm]?[jt]sx?)$/
 const DECLARATION = /\.d\.[cm]?ts$/
+/**
+ * Single-file component formats a Vite plugin compiles to JavaScript. They hold
+ * code a PR changes like any other, but nyorori cannot parse or instrument them.
+ */
+const COMPONENT = /\.(?:vue|svelte|astro|mdx|marko|g[jt]s)$/
 
 export interface RunOptions {
   root: string
@@ -43,7 +50,12 @@ export interface Report {
   /** Paths in the report are relative to this directory (the git root). */
   gitRoot: string
   base: string
+  /** The changed source files whose changed code was looked at for mutants. */
+  judged: string[]
+  /** The changed source files that got mutants. */
   files: string[]
+  /** The changed JavaScript, TypeScript and component files that were not judged, and why. */
+  notJudged: NotJudgedFile[]
   results: MutantResult[]
   /** Mutants dropped before running because they minify to the original code (TCE). They never fail the run. */
   equivalent: EquivalentMutant[]
@@ -73,14 +85,23 @@ export async function run(options: RunOptions): Promise<Report> {
   const changed = diffFiles(root, base)
   const relative = (file: string) => path.relative(repo, file)
 
-  const candidates = [...changed.keys()]
-    .filter((file) => SOURCE.test(file) && !DECLARATION.test(file) && !file.split(path.sep).includes('node_modules'))
-    .filter((file) => existsSync(file))
-    .sort()
+  const notJudged: Array<{ file: string; reason: NotJudgedReason }> = []
+  for (const file of deletedFiles(root, base)) if (isCode(file)) notJudged.push({ file, reason: 'deleted' })
+  const candidates: string[] = []
+  for (const file of changed.keys()) {
+    if (!isCode(file)) continue
+    if (file.split(path.sep).includes('node_modules')) notJudged.push({ file, reason: 'node_modules' })
+    else if (DECLARATION.test(file)) notJudged.push({ file, reason: 'declaration' })
+    else if (!existsSync(file)) notJudged.push({ file, reason: 'deleted' })
+    else candidates.push(file)
+  }
+  candidates.sort()
   const report: Report = {
     gitRoot: repo,
     base,
+    judged: [],
     files: [],
+    notJudged: [],
     results: [],
     equivalent: [],
     skipped: [],
@@ -90,6 +111,10 @@ export async function run(options: RunOptions): Promise<Report> {
     types: options.types ? typesNotAsked() : { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
     dryRun: options.dryRun,
   }
+  const listNotJudged = () => {
+    report.notJudged = notJudged.map(({ file, reason }) => ({ file: relative(file), reason })).sort((a, b) => a.file.localeCompare(b.file))
+  }
+  listNotJudged()
   if (candidates.length === 0) return report
 
   // Holds the session's Vitest setup file. The CLI owns it because it SIGKILLs sessions.
@@ -98,11 +123,19 @@ export async function run(options: RunOptions): Promise<Report> {
   let session: Session | undefined
   try {
     session = await start()
+    notJudged.push(...session.notJudged)
+    // What is left of the components is code nyorori cannot judge: the run
+    // stops (exit 2) rather than pass a PR that may change only them.
+    for (const file of session.eligible) if (COMPONENT.test(file)) notJudged.push({ file, reason: 'unsupported' })
+    listNotJudged()
+    if (!options.dryRun && report.notJudged.some((f) => f.reason === 'unsupported')) return report
+    const eligible = session.eligible.filter((file) => SOURCE.test(file))
+    report.judged = eligible.map(relative)
     const plans: FilePlan[] = []
     const mutants: Mutant[] = []
     const planned = new Map<number, PlannedMutant>()
     const reformatted = new Set<Suppression>()
-    const sources = session.eligible.map((file) => {
+    const sources = eligible.map((file) => {
       const code = readFileSync(file, 'utf8')
       return { file, code, changes: fileChanges(repo, changed.get(file)!, code) }
     })
@@ -277,6 +310,11 @@ function reportUnusedSuppressions(report: Report, reformatted: ReadonlySet<Suppr
   }
 }
 
+/** JavaScript, TypeScript or a component format: a file a PR changes code in. */
+function isCode(file: string): boolean {
+  return SOURCE.test(file) || COMPONENT.test(file)
+}
+
 function judge(modules: ModuleResult[], unhandledErrors: string[]): MutantStatus {
   if (modules.some((m) => m.exceeded)) return 'Timeout'
   if (unhandledErrors.length > 0 || modules.some((m) => !m.passed)) return 'Killed'
@@ -286,6 +324,7 @@ function judge(modules: ModuleResult[], unhandledErrors: string[]): MutantStatus
 /** CLI side of the Vitest session process (see session.ts). */
 class Session {
   eligible: string[] = []
+  notJudged: Array<{ file: string; reason: NotJudgedReason }> = []
   private readonly child: ChildProcess
   private waiting: ((response: Response) => void) | undefined
 
@@ -314,6 +353,7 @@ class Session {
       throw unexpected(response)
     }
     session.eligible = response.eligible
+    session.notJudged = response.notJudged
     return session
   }
 

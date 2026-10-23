@@ -12,7 +12,7 @@ inputs:
     description: Root of the Vitest project.
     default: .
   exclude:
-    description: Globs of source files to leave out, relative to the working directory, one per line.
+    description: Globs of source files to leave out, relative to the working directory, one per line. A changed .vue, .svelte, .astro or .mdx file stops the run unless a glob here such as **/*.vue leaves it out.
     default: ''
   max-mutants:
     description: Stop with an error instead of running more mutants than this.

@@ -59,7 +59,7 @@ npx nyorori run --base origin/main
 
 - `0`: 모든 mutant가 테스트에 걸렸습니다.
 - `1`: 살아남은 mutant, 테스트가 실행하지 않는 코드, 또는 억제 주석의 문제가 있습니다.
-- `2`: 판정할 수 없습니다. mutant 없이도 테스트가 실패하는 경우, merge-base가 없는 경우, [지원하지 않는 Vitest 설정](#지원하지-않는-vitest-설정)인 경우 등입니다.
+- `2`: 판정할 수 없습니다. mutant 없이도 테스트가 실패하는 경우, merge-base가 없는 경우, [지원하지 않는 Vitest 설정](#지원하지-않는-vitest-설정)인 경우, `.vue`처럼 [판정하지 못하는 형식의 파일](#판정하지-않는-파일)이 바뀐 경우 등입니다.
 
 ## 판정
 
@@ -84,11 +84,29 @@ npx nyorori run --base origin/main
 - 함수 본문을 건너뛰는 `FunctionBody`는 함수의 머리(시작부터 본문의 `{`까지, 메서드는 이름부터)가 바뀌었을 때만 만듭니다. 새 함수와, 매개변수나 이름을 바꾼 함수가 그렇습니다.
 - 이름만 바꾼 것(`total`→`sum`)도 바뀐 토큰입니다. 같은 토큰은 같은 코드로 보므로, 다시 쓴 코드에서 우연히 같은 토큰으로 남은 식은 변형하지 않을 수 있습니다. 자세한 것은 [`docs/design.md`](docs/design.md)의 "범위 규칙"에 있습니다.
 
-다음은 제외합니다.
+### 판정하지 않는 파일
 
-- 테스트 파일. 타입 테스트(`typecheck.include`, 기본값 `*.test-d.ts` 등)와 벤치마크(`benchmark.include`, 기본값 `*.bench.ts` 등)도 켜져 있든 아니든 테스트 파일입니다.
-- 타입 선언
-- Vitest `coverage.exclude`에 걸리는 파일(설정 파일 등)
+바뀐 파일 중 다음은 판정하지 않습니다. 파일마다 표의 위에서부터 처음 맞는 이유 하나를 씁니다.
+
+| `reason` | 파일 | 결과 |
+|---|---|---|
+| `deleted` | 지운 파일 | 개수만 표시 |
+| `node_modules` | `node_modules` 안의 파일 | 개수만 표시 |
+| `declaration` | 타입 선언(`.d.ts`) | 개수만 표시 |
+| `outside-root` | Vitest 루트(`--root`) 밖의 파일 | 경고 |
+| `test` | 테스트 파일. 타입 테스트(`typecheck.include`, 기본값 `*.test-d.ts` 등), 벤치마크(`benchmark.include`, 기본값 `*.bench.ts` 등), setup 파일(`setupFiles`, `globalSetup`)도 켜져 있든 아니든 해당 | 개수만 표시 |
+| `config` | Vitest와 Vite 설정 파일(`vitest.config.ts`, `vite.config.mjs`, `vitest.unit.config.ts` 등) | 개수만 표시 |
+| `excluded` | `--exclude`에 걸리는 파일 | 개수만 표시 |
+| `coverage-include` | Vitest `coverage.include`에 맞지 않는 파일 | 경고 |
+| `coverage-exclude` | Vitest `coverage.exclude`에 걸리는 파일 | 경고 |
+| `unsupported` | 위에 걸리지 않은 `.vue`, `.svelte`, `.astro`, `.mdx`, `.marko`, `.gjs`, `.gts` 파일 | **exit 2.** 아무것도 판정하지 않고 끝냄 |
+
+- 출력의 끝, job summary의 "Not judged" 표, `--json`의 `notJudged`(`[{ file, reason }]`)에 남습니다. 판정한 파일은 `--json`의 `judged`에 있습니다.
+- 출력의 첫 줄은 판정한 파일이 없으면 `no changed source files were judged`, 판정했지만 mutant가 없으면 `no mutants in the changed code of N judged files`입니다.
+- `.vue` 같은 컴포넌트 형식은 Vite 플러그인이 JavaScript로 바꾸는 파일입니다. nyorori는 이 파일을 파싱하거나 계측하지 못합니다. 이 파일만 바꾼 PR이 판정 없이 통과하지 않도록 exit 2로 멈추고, 빼는 방법을 알립니다. `--exclude '**/*.vue'`(Action은 `exclude` 입력)로 빼면 나머지를 판정합니다.
+- 경고는 출력의 `WARNING` 줄로, GitHub Actions에서는 파일 위치 없는 경고 어노테이션으로도 나옵니다. CI는 실패하지 않습니다. monorepo에서 패키지마다 job을 두면 다른 패키지의 변경은 모두 루트 밖이기 때문입니다. 하지만 `coverage.include`가 틀리면(예: 디렉터리에만 맞는 `src/**/`) 모든 PR이 아무것도 판정하지 않고 통과하므로 경고를 확인하세요. 바뀐 소스 파일 중 어느 것에도 맞지 않으면 `coverage.include in the Vitest config matches none of the changed source files`라고 알립니다.
+- 설정 파일과 setup 파일은 Vitest가 `coverage.exclude`에 스스로 넣는 파일이라서 경고하지 않습니다.
+- JavaScript, TypeScript, 위의 컴포넌트 형식이 아닌 파일(`.json`, `.css`, `.md` 등)은 목록에 넣지 않습니다.
 
 ### 기준 실행의 프로파일
 

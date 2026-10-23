@@ -27,6 +27,8 @@ import picomatch from 'picomatch';
 import { SLOTS } from './mutate/profile.js';
 import { PROVIDE } from './protocol.js';
 import { checkVitestVersion, findVitest, ProjectError } from './vitest.js';
+/** Vitest's and Vite's config files: vitest.config.ts, vite.config.mjs, vitest.unit.config.ts, ... */
+const CONFIG = /^vite(?:st)?(?:\.[\w-]+)?\.config\./;
 // The probe buffer goes back as the records of the probes that ran, keyed by probe key.
 const SETUP = `import { inject, afterAll } from 'vitest'
 const s = (globalThis.__nyorori ??= {})
@@ -155,7 +157,7 @@ async function init(root, candidates, exclude, dir) {
         project.config.setupFiles.push(setupFile);
     }
     const config = vitest.config;
-    const coverageInclude = config.coverage.include?.length ? picomatch(config.coverage.include, { dot: true }) : () => true;
+    const coverageInclude = config.coverage.include?.length ? picomatch(config.coverage.include, { dot: true }) : undefined;
     const coverageExclude = picomatch(config.coverage.exclude, { dot: true });
     const userExclude = exclude.length > 0 ? picomatch(exclude, { dot: true }) : () => false;
     // matchesTestGlob() knows only `include`: type tests (`*.test-d.ts`) and
@@ -165,22 +167,39 @@ async function init(root, candidates, exclude, dir) {
         const dir = project.config.dir || project.config.root;
         return [typecheck, benchmark].map((globs) => ({ dir, matches: globMatcher(globs.include, globs.exclude) }));
     });
-    const eligible = candidates.filter((file) => {
+    const setupFiles = new Set(vitest.projects.flatMap((project) => [...project.config.setupFiles, ...project.config.globalSetup]));
+    // Config files and setup files are in coverage.exclude too, but Vitest put them there, not the user.
+    const reasonOf = (file) => {
         const relative = path.relative(config.root, file);
         if (relative.startsWith('..') || path.isAbsolute(relative))
-            return false;
-        if (vitest.projects.some((project) => project.matchesTestGlob(file)))
-            return false;
+            return 'outside-root';
+        if (setupFiles.has(file) || vitest.projects.some((project) => project.matchesTestGlob(file)))
+            return 'test';
         if (otherTests.some(({ dir, matches }) => matches(path.relative(dir, file))))
-            return false;
-        return coverageInclude(relative) && !coverageExclude(relative) && !userExclude(relative);
-    });
-    // Tests are picked from the files that get mutants. A changed vitest.config
-    // among them would make Vitest pick the whole suite (forceRerunTriggers),
-    // including tests that only pass in the project's own CI setup.
-    config.related = eligible;
+            return 'test';
+        if (CONFIG.test(path.basename(file)))
+            return 'config';
+        if (userExclude(relative))
+            return 'excluded';
+        if (coverageInclude && !coverageInclude(relative))
+            return 'coverage-include';
+        if (coverageExclude(relative))
+            return 'coverage-exclude';
+        return undefined;
+    };
+    const eligible = [];
+    const notJudged = [];
+    for (const file of candidates) {
+        const reason = reasonOf(file);
+        if (reason)
+            notJudged.push({ file, reason });
+        else
+            eligible.push(file);
+    }
+    // A changed file among the triggers (package.json, the user's own) would make
+    // Vitest pick the whole suite, including tests that only pass in the project's own CI setup.
     config.forceRerunTriggers = [];
-    return eligible;
+    return { eligible, notJudged };
 }
 /**
  * A file another plugin changed before nyorori's transform makes its tests
@@ -260,11 +279,13 @@ process.on('message', async (request) => {
     try {
         switch (request.type) {
             case 'init':
-                send({ type: 'ready', eligible: await init(request.root, request.candidates, request.exclude, request.setupDir) });
+                send({ type: 'ready', ...(await init(request.root, request.candidates, request.exclude, request.setupDir)) });
                 break;
             case 'plan': {
                 for (const file of request.files)
                     plans.set(file.file, file);
+                // Tests are picked from the files that got mutants.
+                vitest.config.related = request.files.map((file) => file.file);
                 // Finding the related tests transforms their imports too.
                 const specs = await vitest.getRelevantTestSpecifications().finally(checkTransforms);
                 send({ type: 'planned', specs: specs.map(toRef) });
