@@ -96,8 +96,8 @@ const FUNCTIONS = new Set<Node['type']>(['FunctionDeclaration', 'FunctionExpress
 /**
  * Where a node sits. Module-level code runs once at import time, and the
  * arguments of a log call (a global `console` call, `logger.warn(…)`) or of a
- * dropped metrics call are only recorded; neither is mutated. An async
- * function awaits what it returns.
+ * dropped metrics call are only recorded, like all of an `if` that only logs;
+ * none is mutated. An async function awaits what it returns.
  */
 type Context = 'module' | 'function' | 'async' | 'log'
 
@@ -322,6 +322,39 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
   const converted = new Map<Node, 'Boolean' | 'String' | 'Promise'>()
   // A `console` declared in an enclosing scope (a parameter, an import, ...) is the code's own object.
   const isLogging = (node: Node) => (isConsoleCall(node) && !scopes.isDeclared('console')) || isLogCall(node)
+
+  /**
+   * Whether `statement` only logs: Google's service calls such nodes arid, and
+   * a compound node arid when all its children are. A statement is arid when
+   * the log filter leaves nothing in it (a log call, a dropped recording, an
+   * empty block or statement), and an `if` when its branches are. Its test
+   * then only decides whether to log, so it gets no mutant either:
+   * `if (err) this.logger.warn(…)`. A `?.` on the logger still does
+   * something, so `this.logger?.warn(…)` is not arid.
+   */
+  function isArid(statement: Node): boolean {
+    switch (statement.type) {
+      case 'EmptyStatement':
+        return true
+      case 'BlockStatement':
+        return statement.body.every(isArid)
+      case 'IfStatement':
+        return isArid(statement.consequent) && (!statement.alternate || isArid(statement.alternate))
+      case 'ExpressionStatement':
+        return isRecordStatement(statement) || logsOnly(statement.expression)
+      default:
+        return false
+    }
+  }
+
+  // A log call, or one that a condition guards like an `if` would: `err && logger.warn(…)`.
+  function logsOnly(expression: Expression): boolean {
+    const node = unwrapReference(expression)
+    if (node.type === 'LogicalExpression') return logsOnly(node.right)
+    if (node.type === 'ConditionalExpression') return logsOnly(node.consequent) && logsOnly(node.alternate)
+    const call = statementCall(expression)
+    return call !== undefined && call.site === call.node && isLogging(call.node)
+  }
 
   function mutate(node: Node, parent: Node | null, context: Context): void {
     if (node.type === 'CallExpression') {
@@ -603,6 +636,8 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
   walk<Context>(parsed.program, null, 'module', scopes, (node, parent, context) => {
     if (node.type === 'ExpressionStatement') statements.set(node.start, node)
     if (context === 'log') return context
+    // An `if` that only logs gets no mutant, its test included; so does `err && logger.warn(…)`.
+    if ((node.type === 'IfStatement' || node.type === 'ExpressionStatement') && isArid(node)) return 'log'
     const inner = 'async' in node && node.async ? 'async' : FUNCTIONS.has(node.type) ? 'function' : context
     if (inner !== 'module') mutate(node, parent, context)
     return isLogging(node) || isRecordStatement(node) ? 'log' : inner

@@ -213,8 +213,9 @@ Vite에 영향을 주지 않는 `test` 옵션(`name`, `include`, `environment` �
 - 값을 버리는 메트릭·트레이싱 호출 문: `metrics.increment('hits')`, `this.statsd.timing('load', ms)`
   - receiver 이름이 `metrics`, `statsd`, `telemetry`, `tracer`이거나 `Metrics`, `Telemetry`, `Tracer`로 끝나고, 메서드가 `increment`, `decrement`, `gauge`, `histogram`, `timing`, `distribution`, `record`, `addEvent`, `setAttribute`, `setAttributes`, `setStatus`, `recordException`인 호출입니다. 값을 쓰면 변형합니다.
 
+로그만 하는 `if`는 조건까지 변형하지 않습니다(`if (err) this.logger.warn(…)`). 갈래(`else` 포함)에 위의 로그 호출과 메트릭 호출 문, 빈 블록, 또 그런 `if`만 있는 경우입니다. 문으로 쓴 `err && logger.warn(…)`도 같습니다. `this.logger?.warn(…)`이나 `return`처럼 다른 일을 하는 갈래가 있으면 변형합니다.
 `setTimeout`과 `setInterval`은 변형합니다. 콜백은 코드가 하는 일이고, fake timer로 테스트할 수 있습니다.
-경고를 테스트하는 라이브러리라면 그 경고 호출에는 mutant가 없습니다. 이름이 다른 로거(`out.warn(…)`, `debug('…')`)는 거르지 않으므로, 그 mutant가 살아남으면 [억제 주석](#equivalent-mutant-억제)을 쓰세요.
+경고를 테스트하는 라이브러리라면 그 경고 호출과 경고만 지키는 조건에는 mutant가 없습니다. 이름이 다른 로거(`out.warn(…)`, `debug('…')`)는 거르지 않으므로, 그 mutant가 살아남으면 [억제 주석](#equivalent-mutant-억제)을 쓰세요.
 
 ### 문자열 `+`
 

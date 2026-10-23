@@ -608,6 +608,12 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
     - receiver의 마지막 이름이 `metrics`, `statsd`, `telemetry`, `tracer`(앞에 `_`가 붙어도 된다)이거나 `Metrics`, `Telemetry`, `Tracer`로 끝나고, 메서드가 `increment`, `decrement`, `gauge`, `histogram`, `timing`, `distribution`, `record`, `addEvent`, `setAttribute`, `setAttributes`, `setStatus`, `recordException`인 것이다.
     - 값을 쓰는 호출(`return metrics.increment(x)`)은 변형한다. 그 값은 코드가 쓰는 것이다.
     - 근거는 Google 논문이 "모니터링 시스템의 값 증가"를 바람직하지 않은 테스트 목표의 예로 든 것뿐이다(TSE §3.2.3). 트레이싱(`tracer`, `recordException` 등)과 메서드 이름 목록은 논문에 없고 우리가 정했다. es-toolkit과 i18next에는 이런 호출이 없어서 여기서는 확인하지 못했다. 그래서 좁게 잡았다. `span`은 DOM 요소일 때도 많아서(`span.setAttribute('class', c)`) 넣지 않았다. `counter`, `stats`도 같은 이유로 뺐다.
+  - 로그만 하는 `if`는 조건까지 통째로 건너뛴다. `if (err) this.logger.warn(…)`의 `err`도 변형하지 않는다. 그 조건은 로그를 남길지만 정한다.
+    - Google의 정의를 따른다. 자식이 모두 arid인 복합 노드는 arid다. 그래서 두 갈래(`else`가 없으면 한 갈래)가 arid한 문만 담은 `if`를 건너뛴다. arid한 문은 로그 필터가 아무 mutant도 남기지 않는 문(위의 로그 호출 문과 메트릭 호출 문), 빈 블록과 빈 문, 그리고 arid한 `if`다. `else if`로 이어진 `if`도 그렇다.
+    - 문으로 쓴 같은 조건도 건너뛴다: `err && logger.warn(…)`, `c ? logger.warn(a) : logger.info(b)`.
+    - `this.logger?.warn(…)`을 담은 `if`는 건너뛰지 않는다. 그 `?.`는 위처럼 코드가 하는 일이다. `return`이나 다른 호출을 같이 하는 갈래가 있어도 건너뛰지 않는다(`if (a) { logger.warn(a); return }`).
+    - 조건의 부수 효과는 보지 않는다. `if ((m = re.exec(s)) === null) logger.warn(…)`도 건너뛰므로, 대입을 건너뛰는 `→ true`를 놓친다. es-toolkit과 i18next의 `src`에는 그런 조건이 없었다.
+    - `if`와 식 문만이다. 로그만 하는 함수의 FunctionBody는 그대로 만든다.
 - `!!x`에서는 바깥 `!`만 변형한다. 안쪽을 빼도 결과가 같은 `!x`이기 때문이다.
 - `x.length >= 0` 같은 항상 참인 조건은 `true`로 바꾸지 않는다.
 - 조건이 이미 `true`/`false` 리터럴이면 Condition mutant를 만들지 않는다. BooleanLiteral mutant와 겹치기 때문이다.
@@ -690,6 +696,10 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
   - `translator.translate.returnObject.test.js`: `vi.spyOn(logger, 'create')`로 넣은 `warn` spy가 불렸는지 확인한다. `Translator.js`의 206줄
 - 살아남는 25개는 CI를 실패시키는 잡음이고, 잡히는 7개는 잃는 검출이다. 살아남는 쪽이 많아서 로그 호출 전체를 거른다. `CallStatement`는 두고 인자 안쪽만 거르는 안도 봤다. 없애는 8개가 모두 살아남는 것이라 잃는 검출은 없지만, 살아남는 `CallStatement` 17개가 그대로 남는다.
 - upstream PR 13개의 계획은 그대로다. 로그 호출을 바꾼 PR이 없다.
+- 로그만 하는 `if` 규칙은 모든 줄을 바뀐 것으로 쳤을 때 i18next `src`에서 2572개 중 32개를 더 없앤다. 8곳(`BackendConnector.js` 224·225, `Interpolator.js` 172, `Translator.js` 205·286, `i18next.js` 174·206·208)의 조건에 있던 Condition 16개, Negation 7개, Logical 6개, Equality 1개, Regex 2개다. es-toolkit `src`에서는 0개다.
+  - 32개를 같은 방법으로 돌렸다. 10개가 살아남고 22개가 잡혔다. 잡은 테스트는 위의 세 파일이다. `Interpolator.js` 172의 8개는 모두 `security.test.js`가, `Translator.js` 205의 3개는 `translator.translate.returnObject.test.js`가, `Translator.js` 286, `i18next.js` 174·206, `BackendConnector.js` 224의 `→ true`는 `i18next.hasLoadedNamespace.test.js`가 잡았다. 살아남은 것은 `loaded namespace`와 `initialized` 로그를 지키는 225·208의 조건 전부, 206의 `→ false`와 `!this.initializedStoreOnce`, 224의 `→ false`다.
+  - 잡히는 쪽이 많아도 거르기로 했다. 경고를 테스트하는 라이브러리에서 경고를 지키는 조건의 검출을 잃는 것은 로그 호출을 거를 때 이미 받아들인 손실과 같은 종류다. 대신 로그만 더하는 PR이 경고 테스트 없이 실패하지 않는다. i18next 사례 PR(`nyorori/case-log-guard-if`, 경고하는 `if` 두 개를 더함)은 3K 1T 6S로 실패했고, 이제 mutant가 없어 통과한다.
+  - upstream PR 13개의 계획은 그대로다.
 
 **타이머는 거르지 않는다.** `setTimeout(f, ms)`, `setInterval(f, ms)`과 그 인자는 변형한다.
 
@@ -905,7 +915,7 @@ return age >= 18
 - **로그 필터.**
   - 이름으로 판단한다. 로거 이름에 로그 레벨 메서드가 있지만 로거가 아닌 객체의 호출은 변형하지 않아서, 그 mutant를 놓친다. 이름이 다른 로거(`out.warn(…)`, `debug('x')`나 `log('x')`처럼 함수로 부르는 로거, `logger.child({ id }).info(…)`)는 거르지 않아서, 그 mutant가 살아남으면 억제 주석이 필요하다.
   - 경고를 테스트하는 라이브러리에서는 그 검출을 잃는다. i18next에서는 로그 호출 24곳 중 7곳을 테스트가 확인했다("로그 필터의 측정" 참고). 경고 호출을 더하거나 지우는 PR은 그 경고를 테스트하지 않아도 통과한다.
-  - 로그만 하는 `if`의 조건(`if (err) this.logger.warn(…)`의 `err`)은 변형한다. Google은 자식이 모두 arid인 노드도 arid로 보지만, 여기서는 하지 않았다. i18next `src`에는 그런 `if`가 8곳, 그 조건의 mutant가 30개 있다. 그중 몇 곳은 위의 테스트가 확인하는 경고를 지킨다.
+  - 로그만 하는 `if`는 조건까지 변형하지 않으므로, 경고를 지키는 조건의 검출도 잃는다. i18next `src`에서는 그 조건의 mutant 32개 중 22개를 테스트가 잡았다("로그 필터의 측정" 참고). 조건에 부수 효과가 있어도 건너뛴다.
   - 메트릭 이름은 Google 논문의 예(모니터링 값의 증가)만 근거로 하고, 트레이싱과 메서드 이름 목록은 우리가 정했다. 측정한 저장소에 그런 호출이 없었다.
 - **브라우저 모드.** 지원하지 않는다.
 - **실행 시간.**

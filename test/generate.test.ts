@@ -564,6 +564,35 @@ describe('log filter', () => {
   ])('mutates `%s`', (call, expected) => {
     expect(onCall(call)).toEqual(expected)
   })
+
+  test('skips all of an `if` that only logs, its test included, and the same guard as an expression', () => {
+    const code = [
+      'export class C { #logger; async f(a, b) {',
+      '  if (a > 1) this.logger.warn(a)',
+      '  if (a > 2) { logger.warn(a); } else if (b) { console.log(b) } else {}',
+      "  if (a > 3) { if (b > 1) log.info(b); metrics.increment('x'); ; }",
+      '  a > 4 && logger.warn(a)',
+      '  b ? logger.warn(a) : await log.info(b)',
+      // A branch that does something else, a `?.` that keeps a missing logger from throwing.
+      '  if (a > 5) { logger.warn(a); return }',
+      '  if (a > 6) this.logger?.warn(a)',
+      '  if (a > 7) logger.warn(a); else g(a)',
+      '} }',
+    ].join('\n')
+    expect(mutants(code).filter((m) => !m.startsWith('1:'))).toEqual([
+      '7:7 Condition `a > 5` → `true`',
+      '7:7 Condition `a > 5` → `false`',
+      '7:9 ComparisonBoundary `>` → `>=`',
+      '8:7 Condition `a > 6` → `true`',
+      '8:7 Condition `a > 6` → `false`',
+      '8:9 ComparisonBoundary `>` → `>=`',
+      '8:25 OptionalChaining `?.` → `.`',
+      '9:7 Condition `a > 7` → `true`',
+      '9:7 Condition `a > 7` → `false`',
+      '9:9 ComparisonBoundary `>` → `>=`',
+      '9:35 CallStatement `g(a)` removed',
+    ])
+  })
 })
 
 describe('equivalent-mutant filters', () => {
