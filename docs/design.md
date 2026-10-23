@@ -113,7 +113,7 @@ profiled 계측은 원본 분기 안에 probe를 더 넣는다("실행 시간 �
 - 계측한 코드가 파싱되지 않는 경우
 - 바뀐 컴포넌트 파일(`.vue` 등)을 `--exclude`로 빼지 않은 경우("범위 규칙"의 "그 밖의 범위" 참고)
 - 다른 플러그인이 먼저 소스를 바꿔 놓아 계측할 수 없는 경우. 그 파일을 import하는 테스트가 실패하지만 테스트 탓이 아니므로, 기준 실행의 실패로 보고하지 않고 그 파일과 nyorori보다 먼저 transform이 도는 플러그인 이름을 알린다("구현 구조" 참고).
-- 계측 플러그인이 닿지 않는 Vitest project가 있는 경우 (남은 위험의 "여러 project 설정" 참고)
+- 계측 플러그인이 닿지 않는 Vitest project의 테스트가 바뀐 코드를 실행하는 경우 (남은 위험의 "여러 project 설정" 참고)
 
 NoCoverage는 테스트를 돌리지 않고 판정하므로 비용이 들지 않는다.
 프로파일로 살아남는 것이 확실한 mutant도 실행하지 않는다.
@@ -368,7 +368,7 @@ action.yml               composite action: 런타임 의존성만 설치하고 �
 - 계측 플러그인의 transform은 `enforce: 'pre'`에 더해 `order: 'pre'`로 둔다. Vite는 `order: 'pre'`인 transform을 먼저, 플러그인 순서대로 돌린다. Vitest 자신의 `vitest:meta-env-replacer`(`import.meta.env`를 바꿈)와 vite-plugin-solid도 `enforce: 'pre'`라서, `enforce`만으로는 이들이 먼저 파일을 바꾸었다. 그래서 `import.meta.env`를 쓰는 파일(zustand의 devtools 미들웨어)이나 Solid 컴포넌트(solid-query)를 바꾼 PR이 "mutant 없이도 테스트가 실패한다"며 exit 2가 됐다.
   - 그래도 바뀐 내용이 오면(더 앞의 `order: 'pre'` transform, 내용을 바꾸는 `load` 훅) 계측하지 않고 실행을 멈춘다. `configResolved`에서 nyorori보다 먼저 도는 transform의 플러그인 이름을 모아 두었다가 함께 알린다. 어느 플러그인이 바꿨는지까지는 알 수 없다.
 - `createVitest` 전에 Vitest CLI(`prepareVitest`)처럼 `TEST=true`, `VITEST=true`, `NODE_ENV ??= 'test'`를 설정한다. 설정하지 않으면 Vite가 `NODE_ENV`를 `development`로 정하고, 워커도 그 값을 받는다. element-plus에서는 이 때문에 기준 실행에서 spec 파일 152개 중 16개가 실패했다.
-- `createVitest` 직후에 모든 project가 계측 플러그인을 거치는지 확인한다. 플러그인이 닿지 않는 project의 코드는 테스트가 실행하지 않는 것처럼 보이므로, 판정하기 전에 project 이름과 함께 exit 2로 멈춘다.
+- `createVitest` 직후에 모든 project가 계측 플러그인을 거치는지 확인한다. 플러그인이 닿지 않는 project의 테스트가 실행한 코드는 실행되지 않은 것처럼 보인다. 그래서 테스트를 고를 때(`getRelevantTestSpecifications()`) 그런 project의 테스트가 하나라도 있으면, 판정하기 전에 project 이름, 그 테스트 파일, 우회 방법과 함께 exit 2로 멈춘다. 없으면 나머지 project의 테스트로 판정한다.
 
 GitHub Action에서는 `::error file=…,line=…` 워크플로 명령을 쓴다.
 그래서 토큰 권한 없이도 문제가 된 mutant가 PR diff의 해당 줄에 바로 표시된다.
@@ -875,13 +875,17 @@ return age >= 18
     - Vite 설정에 영향을 주는 `test` 옵션(`alias`, `css`, `mode`, `root` 등)을 정한 inline project
     - `extends: false`이거나 `extends`로 선언한 설정이 아닌 다른 설정 파일을 가리키는 inline project
     - 설정 파일이나 디렉터리로 정한 project
-  - Vitest는 이런 서버에 루트의 `plugins`를 넘기지 않는다(`inheritRootViteOverrides`). 그래서 계측되지 않고, 이 project의 테스트만 실행하는 코드는 모두 NoCoverage가 되어 CI를 거짓으로 실패시킨다. 이런 project가 있으면 시작할 때 project 이름과 함께 exit 2로 멈춘다.
+  - Vitest는 이런 서버에 루트의 `plugins`를 넘기지 않는다(`inheritRootViteOverrides`). 그래서 계측되지 않고, 이 project의 테스트만 실행하는 코드는 모두 NoCoverage가 되어 CI를 거짓으로 실패시킨다.
+  - 전에는 이런 project가 하나라도 있으면 시작할 때 exit 2로 멈췄다. 루트 `projects`가 패키지마다의 설정 파일을 가리키는 monorepo(TanStack Query)나, 자기 플러그인을 가진 inline project가 하나 있는 저장소는 바뀐 코드를 그 project가 테스트하지 않아도 판정할 수 없었다.
+  - 이제는 바뀐 코드의 관련 테스트(`related`)를 고른 다음, 그중 이런 project의 테스트가 있을 때만 멈춘다. 메시지에는 project 이름, 그 테스트 파일, 그리고 project가 자기 디렉터리에 `vitest.config.*`나 `vite.config.*`를 가지면 `--root <그 디렉터리>`(Action은 `working-directory`)를 쓴다. 그 디렉터리를 루트로 하면 그 설정이 루트 설정이 되어 계측된다.
+  - 관련 테스트는 import 그래프로 고르므로, 이런 project의 테스트가 바뀐 코드를 동적으로만 실행하면 놓친다. 이때는 전처럼 NoCoverage가 될 수 있다.
+  - dry run은 테스트를 고르지 않으므로 멈추지 않는다.
   - 이런 project에 플러그인을 넣는 공식 방법은 Vitest 5.0.5에 없다.
     - Node API로 넘긴 `plugins`는 루트 서버에만 들어간다.
     - `configureVitest` 훅은 이미 그 project 설정에 있는 플러그인에서만 불린다.
     - 사용자 설정을 감싸 project마다 플러그인을 넣는 방법은 설정 형태가 다양해서 깨지기 쉽다.
   - project마다 설정 파일이 있는 monorepo는 `--root`로 그 디렉터리를 가리키면 그 설정이 루트 설정이 되므로 돌릴 수 있다.
-- **`experimental.viteModuleRunner: false`.** Vite transform을 거치지 않고 Node가 직접 import하므로 계측되지 않는다. 같은 이유로 시작할 때 exit 2로 멈춘다.
+- **`experimental.viteModuleRunner: false`.** Vite transform을 거치지 않고 Node가 직접 import하므로 계측되지 않는다. 같은 이유로 그 project의 테스트가 바뀐 코드를 실행하면 exit 2로 멈춘다.
 - **Vitest의 임시 디렉터리.** 실행이 정상적으로 끝나면 CLI가 세션에 `vitest.close()`를 요청하므로, Vitest가 `os.tmpdir()`에 만드는 임시 디렉터리도 지워진다(5초 안에 답이 없으면 SIGKILL). 무한 루프 때문에 강제 종료한 세션의 임시 디렉터리는 남는다.
 - **스냅샷 테스트.** `update: 'none'`으로 실행하므로, mutant가 스냅샷을 바꾸면 killed가 된다. `update: false`는 CI가 아닐 때 `'new'`가 되어 없는 스냅샷을 쓰고 통과시켰다. 그래서 로컬 실행이 CI와 다르게 판정했다. 이제 없는 스냅샷은 CI에서처럼 기준 실행의 실패다.
 - **flaky 테스트.** 실행한 mutant는 우연히 killed로 판정되는 방향이라서 판정이 느슨해질 뿐, 거짓 실패는 만들지 않는다. 기준 실행이 실패하면 전체를 중단한다. 프로파일 예측은 다르다(아래 "프로파일 예측" 참고).
@@ -924,7 +928,7 @@ return age >= 18
   - 경고를 테스트하는 라이브러리에서는 그 검출을 잃는다. i18next에서는 로그 호출 24곳 중 7곳을 테스트가 확인했다("로그 필터의 측정" 참고). 경고 호출을 더하거나 지우는 PR은 그 경고를 테스트하지 않아도 통과한다.
   - 로그만 하는 `if`의 조건(`if (err) this.logger.warn(…)`의 `err`)은 변형한다. Google은 자식이 모두 arid인 노드도 arid로 보지만, 여기서는 하지 않았다. i18next `src`에는 그런 `if`가 8곳, 그 조건의 mutant가 30개 있다. 그중 몇 곳은 위의 테스트가 확인하는 경고를 지킨다.
   - 메트릭 이름은 Google 논문의 예(모니터링 값의 증가)만 근거로 하고, 트레이싱과 메서드 이름 목록은 우리가 정했다. 측정한 저장소에 그런 호출이 없었다.
-- **브라우저 모드.** 지원하지 않는다.
+- **브라우저 모드.** 지원하지 않는다. 그 project의 테스트가 바뀐 코드를 실행하면 exit 2로 멈춘다.
 - **실행 시간.**
   - mutant 수 × 관련 테스트 시간만큼 걸린다.
   - hit 기반 테스트 선택과, 프로파일로 살아남는 것이 확실한 mutant를 실행하지 않는 것으로 줄이고, `--max-mutants`로 상한을 둔다.

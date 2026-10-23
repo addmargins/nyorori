@@ -696,6 +696,55 @@ registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescrip
     expect(report!.results.at(-1)!.tests).toEqual(['test/sum.spec.ts'])
   })
 
+  describe('judges with the projects it can instrument when the others do not run the changed code', () => {
+    test('an inline project with its own Vite config', () => {
+      const dir = project('projects-inline', {
+        'vitest.config.ts': `export default {
+  test: {
+    projects: [
+      { test: { name: 'unit', include: ['test/**/*.test.ts'] } },
+      { resolve: { alias: { '#lib': './lib' } }, test: { name: 'aliased', include: ['lib/**/*.test.ts'] } },
+    ],
+  },
+}
+`,
+        'src/a.ts': lib,
+        'test/a.test.ts': spec('a'),
+        'lib/b.ts': 'export const b = 1\n',
+        'lib/b.test.ts': "import { expect, it } from 'vitest'\nimport { b } from '#lib/b'\nit('b', () => { expect(b).toBe(1) })\n",
+      }, { 'src/a.ts': changed })
+      const { status, report, output } = nyorori(dir)
+      expect(status, output).toBe(1)
+      expect(statuses(report!)).toEqual(['src/a.ts:2 ComparisonBoundary `>=` → `>`: Survived'])
+    })
+
+    test('projects with their own config files, which --root runs alone', () => {
+      const dir = project('projects-files', {
+        'vitest.config.ts': "export default { test: { projects: ['packages/*', { test: { name: 'root', include: ['test/**/*.test.ts'] } }] } }\n",
+        'packages/a/vitest.config.ts': "export default { test: { name: 'a' } }\n",
+        'packages/a/src/a.ts': lib,
+        'packages/a/test/a.test.ts': spec('a'),
+        'src/b.ts': lib,
+        'test/b.test.ts': spec('b'),
+      }, { 'packages/a/src/a.ts': changed, 'src/b.ts': changed })
+      const refused = nyorori(dir)
+      expect(refused.status, refused.output).toBe(2)
+      expect(refused.output).toContain(
+        "nyorori: Vitest project \"a\" has its own Vite config (Vite options such as plugins, resolve or alias, or its own config file), so nyorori cannot instrument the code its tests run. Its tests run the changed code: packages/a/test/a.test.ts. Run nyorori on that project alone with --root packages/a (the Action's working-directory), where its config file is.",
+      )
+      expect(refused.leftovers).toEqual([])
+
+      const rest = nyorori(dir, '--exclude', 'packages/**')
+      expect(rest.status, rest.output).toBe(1)
+      expect(statuses(rest.report!)).toEqual(['src/b.ts:2 ComparisonBoundary `>=` → `>`: Survived'])
+
+      const alone = nyorori(dir, '--root', 'packages/a')
+      expect(alone.status, alone.output).toBe(1)
+      expect(statuses(alone.report!)).toEqual(['packages/a/src/a.ts:2 ComparisonBoundary `>=` → `>`: Survived'])
+      expect(alone.report!.notJudged).toEqual([{ file: 'src/b.ts', reason: 'outside-root' }])
+    })
+  })
+
   describe('stops with exit code 2 where it cannot instrument code, instead of calling it untested', () => {
     const run = (name: string, config: string) =>
       nyorori(project(name, { 'vitest.config.ts': config, 'src/age.ts': AGE_BASE, 'test/age.test.ts': AGE_TEST }, { 'src/age.ts': AGE_HEAD }))
@@ -712,7 +761,7 @@ registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescrip
 `)
       expect(status, output).toBe(2)
       expect(output).toContain('nyorori: Vitest project "aliased" has its own Vite config')
-      expect(output).toContain('This setup is not supported yet.')
+      expect(output).toContain('Its tests run the changed code: test/age.test.ts. This setup is not supported yet.')
       expect(output).not.toContain('    at ')
       expect(leftovers).toEqual([])
     })
@@ -721,7 +770,7 @@ registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescrip
       const { status, output } = run('native-runner', 'export default { test: { experimental: { viteModuleRunner: false } } }\n')
       expect(status, output).toBe(2)
       expect(output).toContain('nyorori: The Vitest config sets experimental.viteModuleRunner: false')
-      expect(output).toContain('This setup is not supported yet.')
+      expect(output).toContain('Its tests run the changed code: test/age.test.ts. This setup is not supported yet.')
     })
   })
 

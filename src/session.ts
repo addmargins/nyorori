@@ -54,6 +54,8 @@ let profiling = false
 let transformsBefore: string[] = []
 /** A planned file that reached the transform already changed: the run cannot judge it, whatever the tests say. */
 let changedBefore: string | undefined
+/** Why nyorori cannot instrument what a project's tests run, and what to do instead, by project name. */
+const unsupported = new Map<string, [problem: string, advice: string]>()
 
 // runTestSpecifications() returns every module the instance has ever run, so
 // a file that failed for an earlier mutant would count as failing for later
@@ -143,24 +145,30 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
     { plugins: [plugin] },
   )
   // Code that never passes through the plugin looks untested, so these setups
-  // would fail the PR with false NoCoverage. Stop before judging anything.
+  // would fail the PR with false NoCoverage. Their tests must not judge
+  // anything; planning stops if they run the changed code (see unsupported).
   for (const project of vitest.projects) {
     const name = project.name ? `Vitest project "${project.name}"` : 'The Vitest config'
+    const notYet = 'This setup is not supported yet.'
     if (project.config.browser.enabled) {
-      throw new ProjectError(`${name} runs its tests in browser mode, which nyorori does not support yet.`)
-    }
-    if (!project.vite.config.plugins.includes(plugin)) {
+      unsupported.set(project.name, [`${name} runs its tests in browser mode, which nyorori does not support yet.`, ''])
+    } else if (!project.vite.config.plugins.includes(plugin)) {
       // Vitest gives such a project its own Vite server and does not pass it the root's plugins.
-      throw new ProjectError(
-        `${name} has its own Vite config (Vite options such as plugins, resolve or alias, or its own config file), so nyorori cannot instrument the code its tests run. This setup is not supported yet.`,
-      )
+      // With its own vitest.config or vite.config in its own directory, that config works as a root.
+      const configFile = project.vite.config.configFile
+      const dir = path.relative(root, project.config.root)
+      const alone = configFile && configFile !== vitest.vite.config.configFile && dir !== '' && /^vite(?:st)?\.config\./.test(path.basename(configFile))
+      unsupported.set(project.name, [
+        `${name} has its own Vite config (Vite options such as plugins, resolve or alias, or its own config file), so nyorori cannot instrument the code its tests run.`,
+        alone
+          ? `Run nyorori on that project alone with --root ${dir} (the Action's working-directory), where its config file is.`
+          : `${notYet} A project with its own directory and config file can be run alone with --root (the Action's working-directory).`,
+      ])
+    } else if (project.config.experimental?.viteModuleRunner === false) {
+      unsupported.set(project.name, [`${name} sets experimental.viteModuleRunner: false, which skips the Vite transform nyorori instruments code with.`, notYet])
+    } else {
+      project.config.setupFiles.push(setupFile)
     }
-    if (project.config.experimental.viteModuleRunner === false) {
-      throw new ProjectError(
-        `${name} sets experimental.viteModuleRunner: false, which skips the Vite transform nyorori instruments code with. This setup is not supported yet.`,
-      )
-    }
-    project.config.setupFiles.push(setupFile)
   }
 
   const config = vitest.config
@@ -213,6 +221,20 @@ function checkTransforms(): void {
   throw new ProjectError(
     `${file} was changed by another Vite plugin before nyorori could instrument it, so its mutants cannot be judged. ${which} Leave the file out with --exclude to judge the rest.`,
   )
+}
+
+/**
+ * Tests of a project nyorori cannot instrument would see the changed code
+ * as never run. A project whose tests do not run it does not matter.
+ */
+function checkProjects(specs: readonly TestSpecification[]): void {
+  const blocked = specs.filter((spec) => unsupported.has(spec.project.name))
+  if (blocked.length === 0) return
+  const name = blocked[0]!.project.name
+  const tests = blocked.filter((spec) => spec.project.name === name).map((spec) => path.relative(vitest!.config.root, spec.moduleId))
+  const shown = tests.length > 3 ? `${tests.slice(0, 3).join(', ')} and ${tests.length - 3} more` : tests.join(', ')
+  const [problem, advice] = unsupported.get(name)!
+  throw new ProjectError(`${problem} Its tests run the changed code: ${shown}.${advice ? ` ${advice}` : ''}`)
 }
 
 function toRef(spec: TestSpecification): SpecRef {
@@ -289,6 +311,7 @@ process.on('message', async (request: Request) => {
         vitest!.config.related = request.files.map((file) => file.file)
         // Finding the related tests transforms their imports too.
         const specs = await vitest!.getRelevantTestSpecifications().finally(checkTransforms)
+        checkProjects(specs)
         send({ type: 'planned', specs: specs.map(toRef) })
         break
       }

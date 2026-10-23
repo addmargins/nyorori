@@ -169,18 +169,20 @@ TypeScript 파일에서는 `a?.b`, `f?.()`, `a ?? b`가 지키는 값(`a`, `f`)�
 
 nyorori는 Vite 플러그인으로 바뀐 코드를 계측합니다.
 플러그인이 닿지 않는 테스트에서는 바뀐 코드가 실행되지 않는 것처럼 보여 NoCoverage로 거짓 실패하게 됩니다.
-그래서 다음 설정에서는 판정하지 않고, 해당 project를 알려 주고 exit 2로 끝납니다.
+그래서 바뀐 코드를 실행하는 테스트(Vitest의 related)가 다음 project에 있으면 판정하지 않고, 그 project와 테스트 파일을 알려 주고 exit 2로 끝납니다.
+그런 project가 있어도 그 테스트가 바뀐 코드를 실행하지 않으면 상관없이 나머지 project로 판정합니다.
 
 - `test.projects` 중 Vite 서버를 따로 쓰는 project
   - Vite 옵션(`plugins`, `resolve` 등)이나 Vite에 영향을 주는 `test` 옵션(`alias`, `css`, `mode`, `root` 등)을 직접 정했거나, `extends: false`인 inline project
-  - 설정 파일이나 디렉터리로 정한 project. project마다 설정 파일이 있는 monorepo라면 `--root`(Action은 `working-directory`)로 project마다 따로 실행하세요.
+  - 설정 파일이나 디렉터리로 정한 project. project마다 설정 파일이 있는 monorepo라면 `--root`(Action은 `working-directory`)로 project마다 따로 실행하세요. 메시지가 그 디렉터리를 알려 줍니다.
+- 브라우저 모드 project
 - `experimental.viteModuleRunner: false`
 
 Vite에 영향을 주지 않는 `test` 옵션(`name`, `include`, `environment` 등)만 바꾸는 inline project는 루트 설정의 Vite 서버를 같이 쓰므로 지원합니다.
 
 그 밖에 알아 둘 점:
 
-- 브라우저 모드 project도 지원하지 않습니다(exit 2).
+- 이 검사는 테스트를 고를 때 하므로, 테스트를 돌리지 않는 `--dry-run`은 이런 project가 있어도 mutant 목록을 보여 줍니다.
 - nyorori의 플러그인은 다른 플러그인의 transform보다 먼저(`order: 'pre'`) 바뀐 파일을 계측합니다. 그래도 다른 플러그인이 먼저 파일을 바꾸면(그 플러그인도 `order: 'pre'`이고 더 앞에 있거나, `load` 훅이 내용을 바꾸는 경우) 그 파일을 판정할 수 없으므로, 먼저 도는 플러그인 이름과 함께 exit 2로 끝납니다. 그 파일은 `--exclude`로 빼세요.
 - `vitest run`처럼 `NODE_ENV`(설정되어 있지 않을 때만 `test`), `TEST`, `VITEST` 환경 변수를 설정합니다.
 - 스냅샷은 CI처럼 갱신하지 않습니다(`update: 'none'`). 없는 스냅샷은 쓰지 않고 실패하므로, 로컬에서도 스냅샷 파일을 커밋하지 않은 테스트가 있으면 기준 실행이 실패해 exit 2가 됩니다.
