@@ -104,7 +104,7 @@ export async function run(options: RunOptions): Promise<Report> {
     const reformatted = new Set<Suppression>()
     const sources = session.eligible.map((file) => {
       const code = readFileSync(file, 'utf8')
-      return { file, code, changes: fileChanges(repo, changed.get(file)!, code) }
+      return { file, code, changes: fileChanges(repo, file, changed.get(file)!, code) }
     })
     let types: TypeOracle | undefined
     if (options.types) {

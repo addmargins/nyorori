@@ -457,6 +457,18 @@ describe('scope of a change', () => {
     expect(changed(before, after)).toEqual([])
   })
 
+  test('mutates nothing for an edit of types alone', () => {
+    // es-toolkit case: `any` → `unknown`, casts that need parentheses, another return type.
+    const before = 'export function compare(a: any, b: any): number {\n  if (a < b) {\n    return -1\n  }\n  return 0\n}\n'
+    const after = 'export function compare(a: unknown, b: unknown): -1 | 0 {\n  if ((a as number) < (b as number)) {\n    return -1\n  }\n  return 0\n}\n'
+    expect(changed(before, after)).toEqual([])
+    expect(changed(before, after.replace(') < (', ') <= ('))).toEqual([
+      '2:7 Condition `(a as number) <= (b as number)` → `true`',
+      '2:7 Condition `(a as number) <= (b as number)` → `false`',
+      '2:21 ComparisonBoundary `<=` → `<`',
+    ])
+  })
+
   test('mutates all of a new function, its body included', () => {
     const before = 'export function one(): number {\n  return 1\n}\n'
     const added = 'export function isEven(n: number): boolean {\n  return n % 2 === 0\n}\n'

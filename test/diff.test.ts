@@ -89,6 +89,26 @@ describe('changedRanges', () => {
     expect(changes(call('a', 600), after).ranges).toEqual([{ start: 2, end: after.length - 2 }])
   })
 
+  test('leaves out what only TypeScript reads, in either version', () => {
+    // Types, casts, a `this` parameter, `?` and `!`, class member modifiers, overloads and type declarations compile to nothing.
+    const typed = 'function f(a: unknown, b?: number): Array<T[]> {\n  return (a as number) < (<number>b)!\n}\n'
+    expect(diff('function f(a: any, b): T[][] {\n  return a < b\n}\n', typed)).toBe(typed)
+    const members = 'class A implements I {\n  private readonly x?: number\n  public m(this: A, a: T): T\n  public m(this: A, a: any) { return a satisfies T }\n}\n'
+    expect(diff('class A {\n  x: number\n  m(a) { return a }\n}\n', members)).toBe(members)
+    const declared = 'function f(a) {\n  let x!: number\n  type T = 1\n  interface I { a: 1 }\n  return x\n}\n'
+    expect(diff('function f(a) {\n  let x: number\n  return x\n}\n', declared)).toBe(declared)
+  })
+
+  test('keeps the TypeScript that compiles to code', () => {
+    // A parameter property assigns a field; a field that becomes `declare` no longer defines one.
+    expect(diff('class A {\n  constructor(x: number) {}\n  y: number\n}\n', 'class A {\n  constructor(private x: number) {}\n  declare y: number\n}\n'))
+      .toBe('class A {\n  constructor([private] x: number) {}\n  declare y|: number\n}\n')
+    // Parentheses around a cast that group, or that `new` or an optional chain needs.
+    expect(diff('function f(a) {\n  return [a + b * c, new F().x, a?.b.c]\n}\n', 'function f(a) {\n  return [(a + b as number) * c, new (F() as any).x, (a?.b as B).c]\n}\n'))
+      .toBe('function f(a) {\n  return [[(]a + b as number[)] * c, new [(]F() as any[)].x, [(]a?.b as B[)].c]\n}\n')
+    expect(diff('enum E { A = 1 }\n', 'enum E { A = 2 }\n')).toBe('enum E { A = [2] }\n')
+  })
+
   test('without the old version, takes every token of the hunks as new', () => {
     const code = 'x = a + b\ny = c\n'
     const hunks = [{ oldStart: 1, oldCount: 1, newStart: 1, newCount: 1 }, { oldStart: 3, oldCount: 1, newStart: 2, newCount: 0 }]

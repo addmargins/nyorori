@@ -12,8 +12,8 @@ export function addedLines(code: string, lines: Iterable<number>): Changes {
   return { lines: set, ranges: changedRanges(undefined, code, hunks) }
 }
 
-/** What nyorori sees changed from `before` to `after`, with git finding the changed lines as it does for a branch. */
-export function changes(before: string, after: string): Changes {
+/** What nyorori sees changed from `before` to `after` in `file`, with git finding the changed lines as it does for a branch. */
+export function changes(before: string, after: string, file = 'file.ts'): Changes {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'nyorori-diff-'))
   try {
     writeFileSync(path.join(dir, 'before'), before)
@@ -21,7 +21,7 @@ export function changes(before: string, after: string): Changes {
     const { stdout } = spawnSync('git', ['diff', '--no-index', '--unified=0', '--no-color', '--no-ext-diff', '--src-prefix=a/', '--dst-prefix=b/', 'before', 'after'], { cwd: dir, encoding: 'utf8' })
     const diff = parseDiff(stdout, dir).get(path.join(dir, 'after'))
     if (!diff) return { lines: new Set(), ranges: [] }
-    return { lines: diff.lines, ranges: changedRanges(before, after, diff.hunks) }
+    return { lines: diff.lines, ranges: changedRanges(before, after, diff.hunks, file) }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

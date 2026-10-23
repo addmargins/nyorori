@@ -79,6 +79,7 @@ npx nyorori run --base origin/main
 대상은 이 PR이 바꾼 함수 안의 코드입니다. 바뀐 줄이 아니라 바뀐 토큰으로 정합니다.
 
 - git이 찾은 바뀐 줄 안에서, 옛 코드와 새 코드를 토큰 단위로 다시 비교합니다. 공백, 줄바꿈, 들여쓰기, 주석, 문자열의 따옴표 종류, 끝의 쉼표만 바꾼 것은 바뀐 것이 아닙니다. 그래서 Prettier로 다시 포맷한 함수에는 mutant가 생기지 않습니다.
+- TypeScript에서 타입만 바꾼 것도 바뀐 것이 아닙니다. 타입 주석과 반환 타입, 타입 인자, `as`·`satisfies`·`!`, interface와 type alias, overload, 클래스 멤버의 `private`·`readonly` 같은 수식어, cast 때문에만 있는 괄호(`(a as number) < (b as number)`)가 그렇습니다. 실행에 영향을 주는 parameter property(`constructor(private x)`), enum, decorator는 바뀐 것입니다.
 - 식은 그 안에 바뀐 토큰(또는 지운 자리)이 있을 때 변형합니다. `Math.min(fromIndex, arr.length - 1)`을 `Math.min(index, arr.length - 1)`로 바꾸면 `index`를 담은 `Math.min(…)`은 변형하고, 손대지 않은 `arr.length - 1`은 변형하지 않습니다. 반대로 여러 줄에 걸친 조건은 바뀐 피연산자가 어느 줄에 있든 변형합니다.
   - 식 안의 콜백 블록 본문(`xs.forEach((x) => { … })`의 `{ … }`)에서 바뀐 것은 그 콜백 안의 식만 변형합니다.
 - 함수 본문을 건너뛰는 `FunctionBody`는 함수의 머리(시작부터 본문의 `{`까지, 메서드는 이름부터)가 바뀌었을 때만 만듭니다. 새 함수와, 매개변수나 이름을 바꾼 함수가 그렇습니다.
@@ -253,7 +254,7 @@ return age >= 18
 - 주석은 diff에 그대로 보입니다. 이 PR이 추가한 억제는 경고 어노테이션과 job summary 맨 위에 따로 표시됩니다.
 - 다음 경우에는 실패합니다.
   - 형식이 틀린 주석
-  - 억제할 mutant가 없는 새 주석. 들여쓰기만 바꾼 줄처럼 대상 줄에서 공백이나 주석만 바꿨다면 실패하지 않습니다.
+  - 억제할 mutant가 없는 새 주석. 들여쓰기만 바꾼 줄처럼 대상 줄에서 공백이나 주석, 타입만 바꿨다면 실패하지 않습니다.
   - 테스트가 이미 잡는 mutant를 억제하는 주석
 
 ## 개발

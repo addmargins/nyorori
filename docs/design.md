@@ -32,6 +32,7 @@ PR이 **추가하거나 바꾼 코드**에만 mutation을 넣고, 그 PR 시점�
 nyorori run --base <ref>
   1. 범위 계산     git diff --unified=0 <merge-base> → 파일별 바뀐 줄과 hunk, 옛 blob
                   대상 파일마다 hunk 안의 옛 토큰과 새 토큰을 diff → "바뀐 범위"
+                  (TS 파일은 두 버전을 파싱해, 타입만인 토큰을 넣거나 지운 것은 빼고)
   2. 세션 시작     Vitest를 띄운 별도 프로세스(session)를 시작한다
                   세션이 Vitest 설정으로 대상 파일을 거른다
                   (테스트 파일, coverage.exclude, --exclude 제외)
@@ -136,6 +137,17 @@ TCE로 버린 mutant와, 실행 시간에 문자열 연결로 확인되어 건�
 - 비교는 Myers diff다. 앞뒤의 같은 토큰을 먼저 떼어 내므로 보통은 몇 토큰만 비교한다. 편집이 1000개를 넘는 hunk는 더 찾지 않고 모두 새것으로 본다. 6500줄짜리 hunk 하나(파일 전체를 다시 들여쓰거나 모든 이름을 바꾼 경우)도 75ms 안이었다.
 - 넣거나 바꾼 토큰이 바뀐 범위다. 아무것도 넣지 않고 지운 곳은 그 앞뒤 토큰 사이의 빈 범위로 남긴다. 그 자리를 감싸는 식은 바뀌었고(`a && b && c` → `a && c`), 옆의 식은 바뀌지 않았다.
 - 줄을 옮기면 git은 지우고 넣은 것으로 본다. 옮긴 코드는 실행 순서가 바뀌므로 바뀐 것으로 둔다.
+
+**타입만 고친 것.** TypeScript 파일(`.ts`, `.tsx`, `.mts`, `.cts`)에서는 컴파일하면 지워지는 토큰을 넣거나 지워도 바뀐 것으로 치지 않는다. 타입만 고친 PR에 mutant가 생기면 안 된다. es-toolkit 사례 PR(`nyorori/case-types-comments-only`)은 `any`→`unknown`, `as number`, interface의 `readonly`, JSDoc, 반환 타입만 바꿨는데 mutant가 10개 생겼다. 매개변수와 반환 타입이 함수 머리를 바꿔 FunctionBody가 생겼고, `a < b`를 `(a as number) < (b as number)`로 바꾸자 손대지 않은 `a < b`의 mutant가 생겼다.
+
+- 지워지는 것: 타입 주석과 반환 타입, 타입 매개변수와 타입 인자, `as T`·`satisfies T`·non-null `!`·`<T>x`, interface, type alias, `declare`한 것, abstract 멤버, overload와 index signature, `implements …`, `this` 매개변수와 그 쉼표, 선언한 이름 뒤의 `?`·`!`, 클래스 멤버의 `private`·`protected`·`public`·`readonly`·`override`, 그리고 cast 때문에만 있는 괄호. `(a as number) < (b as number)`는 `a < b`로 실행된다.
+  - cast를 감싼 괄호는 cast를 지운 안쪽이 이름, 멤버 접근, 호출, 배열 리터럴, 템플릿, 수가 아닌 리터럴일 때만 지워지는 것으로 본다. 연산자(`(a + b as number) * c`), optional chain(`(a?.b as B).c`는 `a?.b.c`와 달리 `a`가 null이면 throw한다), 수(`(1 as number).toFixed()`), `new`가 부르는 호출(`new (f() as F)()`는 `new f()()`가 아니다)을 감싼 괄호는 실행에 영향을 준다.
+- 실행에 영향을 주는 TypeScript는 센다. parameter property(`constructor(private x)`)는 필드에 대입하고, enum과 namespace는 객체를 만들고, decorator는 실행된다. 필드를 `declare`나 `abstract`로 바꾸면 그 필드를 정의하지 않게 되므로, 옛 필드 이름을 지운 것으로 본다.
+- 두 버전을 각각 oxc-parser로 파싱해 지워지는 토큰을 표시한다. 토큰을 맞출 때는 표시한 토큰도 그대로 쓰고, 넣거나 지운 토큰 중 표시한 것만 바뀐 것에서 뺀다. 표시한 토큰은 실행되는 같은 텍스트의 토큰과 다른 토큰으로 본다(`x: T` → `declare x: T`에서 `x`).
+  - 처음에는 표시한 토큰을 빼고 diff했다(타입을 지운 코드끼리 비교). 그러면 토큰 맞춤이 달라져, es-toolkit PR 2146에서 새 `const mappedValue = mapper(value)`의 `mapper(value)`가 옛 `mappedSecondSet.has(mapper(value))` 안의 같은 호출에 맞춰졌고 CallUnwrap이 빠졌다. 그래서 맞춤은 이전과 같게 두었다.
+  - 파싱되지 않는 버전에는 표시하지 않는다. 모든 토큰을 센다.
+- 사례 PR은 10개에서 0개가 됐다. es-toolkit의 최근 커밋 300개에서 `src`의 바뀐 파일마다 이 규칙이 빼는 mutant는 23개였다. 타입만 바꾼 함수 머리의 FunctionBody 20개와, `doesMatch(value, key as number, collection)`에서 `as number`만 지운 호출의 Condition 2개와 CallUnwrap 1개다. 늘어난 mutant는 없다. i18next(JavaScript)는 0개다. upstream PR 13개와 다른 사례 PR 27개의 계획은 그대로다.
+- 표시한 토큰을 `oxc-transform`이 타입을 지운 결과와 비교했다. 함수마다 표시하지 않은 토큰과 변환 결과의 같은 함수 토큰을 비교하면(`;`, 괄호, 쉼표는 빼고, 리터럴은 값으로), es-toolkit `src`의 함수 1187개 중 다른 것은 parameter property가 있는 생성자 하나였다(일부러 센다). nyorori의 함수 732개는 모두 같았다.
 
 **표현식 지점.** 지점의 텍스트가 바뀐 범위를 담으면(지운 곳은 지점 안쪽에 있어야 한다) 그 지점의 mutant를 만든다. 앵커가 어느 줄에 있는지는 보지 않는다. 앵커는 mutant가 바꾸는 토큰의 위치이고(연산자, 리터럴, 조건식의 시작, 함수 본문의 `{`), 보고하는 줄과 열은 이전처럼 앵커의 위치다.
 
@@ -831,7 +843,7 @@ return age >= 18
 - 억제된 mutant도 실행한다. 테스트가 이미 잡는 mutant를 억제한 주석은 "불필요한 억제"로 보고하고 실패시킨다.
 - 이 PR이 추가한 억제 주석이 아무 mutant에도 해당하지 않으면 실패시킨다. 그래야 낡은 주석이 쌓이지 않는다.
   - 주석은 토큰이 아니므로, 이 PR이 추가한 억제인지는 줄로 본다. 주석이 있는 줄을 바꿨으면(들여쓰기만 바꿔도) 새 억제로 표시한다.
-  - 대상 줄에서 공백이나 주석만 바꾼 경우에는 실패시키지 않는다. 블록의 들여쓰기를 바꾸면 억제 주석과 대상 줄이 모두 바뀐 줄이 되지만, 대상 줄에는 범위 안의 mutant가 없다. 이때 지우라고 하면 틀린 안내다.
+  - 대상 줄에서 공백이나 주석, 타입만 바꾼 경우에는 실패시키지 않는다. 블록의 들여쓰기를 바꾸면 억제 주석과 대상 줄이 모두 바뀐 줄이 되지만, 대상 줄에는 범위 안의 mutant가 없다. 이때 지우라고 하면 틀린 안내다.
   - 범위가 토큰 단위로 좁아져서, 이전에는 필요했던 억제에 해당하는 mutant가 없어질 수 있다. 이 PR이 추가한 억제라면 지우라고 알린다. es-toolkit PR 2047에서 `arr.length - 1`의 Arithmetic을 억제했다면 이제는 그 억제가 문제로 보고된다.
 
 ### L3. 이 PR이 새로 추가한 억제 → `warn`
@@ -897,6 +909,7 @@ return age >= 18
   - probe 함수 이름(`__nyorori_v`, `__nyorori_b0` 등)이 사용자 코드와 겹치지 않는다고 가정한다. `__nyorori_h`와 같다.
   - 호출 probe의 spread는 `Array.prototype[Symbol.iterator]`를 부른다. 이것을 바꾸는 코드는 기준 실행에서 그 호출을 더 보게 된다.
 - **토큰 단위 범위.** 토큰이 같으면 같은 코드로 본다("범위 규칙"의 남은 한계). 다시 쓴 코드에서 diff가 우연히 맞춘 식이나, 이름이 가리키는 변수만 바뀐 식은 범위 밖이 된다. 틀리는 방향은 mutant를 놓치는 쪽이다.
+  - 타입만 고친 것은 oxc-parser의 AST로 가린다. 실행되는 토큰을 타입으로 잘못 표시하면 그 변경의 mutant를 놓친다.
 - **문자열 `+`의 문법 규칙.** 타입 주석과 내장 객체를 믿는다(L1 참고). 주석과 다른 값이 들어오거나 내장 객체를 덮어쓴 코드에서는 숫자 `+`의 mutant를 놓친다.
 - **타입으로 불필요한 방어 코드.**
   - TypeScript 7.1이 본 타입을 믿는다. 타입 검사를 통과하면서 null을 넣는 길("남은 구멍")로 null이 오는데 테스트가 그 경우를 지나지 않으면, 필요한 `?.`가 "아마 불필요"로 목록에 오르고 CI는 통과한다. 원래라면 테스트가 없다고 실패했을 곳이다. 목록의 이유가 타입을 밝히므로 사람이 볼 수 있다.

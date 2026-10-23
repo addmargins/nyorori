@@ -56,7 +56,7 @@ export async function run(options) {
         const reformatted = new Set();
         const sources = session.eligible.map((file) => {
             const code = readFileSync(file, 'utf8');
-            return { file, code, changes: fileChanges(repo, changed.get(file), code) };
+            return { file, code, changes: fileChanges(repo, file, changed.get(file), code) };
         });
         let types;
         if (options.types) {

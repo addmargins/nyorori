@@ -1,3 +1,4 @@
+import { parseSync, visitorKeys } from 'oxc-parser';
 /**
  * Where `after` differs from `before` in what it runs. Git finds the changed
  * lines; within each hunk the tokens are diffed again, so a reformatted line,
@@ -9,10 +10,21 @@
  *
  * Without `before` (an added file, or an old version git cannot show), every
  * token of the hunks is new.
+ *
+ * In a TypeScript `file`, a token that only TypeScript reads (see typeSpans)
+ * is not a change when it is inserted or deleted, so an edit of types alone
+ * changes nothing: `(a: any)` → `(a: unknown)`, `a < b` → `(a as number) <
+ * (b as number)`. Such tokens still line the two versions up as before.
  */
-export function changedRanges(before, after, hunks) {
-    const old = before === undefined ? undefined : { tokens: tokenize(before), lines: lineStarts(before), length: before.length };
-    const tokens = tokenize(after);
+export function changedRanges(before, after, hunks, file) {
+    const read = (text) => {
+        const tokens = tokenize(text);
+        if (file !== undefined && TYPESCRIPT.test(file))
+            markTypes(tokens, typeSpans(file, text));
+        return tokens;
+    };
+    const old = before === undefined ? undefined : { tokens: read(before), lines: lineStarts(before), length: before.length };
+    const tokens = read(after);
     const lines = lineStarts(after);
     const ranges = [];
     for (const hunk of hunks) {
@@ -85,9 +97,11 @@ const INSERT = 2;
 function diffTokens(before, after, at, out) {
     const ids = new Map();
     const id = (token) => {
-        let value = ids.get(token.key);
+        // A name that only TypeScript reads is not the one that runs: `x: T` → `declare x: T` drops the field `x`.
+        const key = token.type ? `type ${token.key}` : token.key;
+        let value = ids.get(key);
         if (value === undefined)
-            ids.set(token.key, (value = ids.size));
+            ids.set(key, (value = ids.size));
         return value;
     };
     const a = before.map(id);
@@ -111,22 +125,30 @@ function diffTokens(before, after, at, out) {
         out.push({ start: place, end: place });
     };
     // Between two kept tokens, deleted tokens matter only if nothing was inserted:
-    // any expression around the place also holds the inserted tokens.
+    // any expression around the place also holds the inserted tokens. Tokens
+    // that only TypeScript reads count as neither.
+    let i = lo;
     let j = lo;
     let deleted = false;
     let inserted = false;
     for (const op of ops) {
         if (op === INSERT) {
-            changed[j++] = 1;
-            inserted = true;
+            if (!after[j].type) {
+                changed[j] = 1;
+                inserted = true;
+            }
+            j++;
         }
         else if (op === DELETE) {
-            deleted = true;
+            if (!before[i].type)
+                deleted = true;
+            i++;
         }
         else {
             if (deleted && !inserted)
                 deletedAt(j);
             deleted = inserted = false;
+            i++;
             j++;
         }
     }
@@ -212,6 +234,189 @@ function normalize(ranges) {
         }
     }
     return result;
+}
+const TYPESCRIPT = /\.[cm]?tsx?$/;
+// Child keys that hold only types: `: T`, `<T>` and the types after `implements`.
+const TYPE_KEYS = new Set(['typeAnnotation', 'returnType', 'typeParameters', 'typeArguments', 'superTypeArguments', 'implements']);
+// Declarations that compile to nothing, whatever is in them.
+const TYPE_DECLARATIONS = new Set([
+    'TSInterfaceDeclaration',
+    'TSTypeAliasDeclaration',
+    'TSDeclareFunction',
+    'TSIndexSignature',
+    'TSAbstractMethodDefinition',
+    'TSAbstractPropertyDefinition',
+    'TSAbstractAccessorProperty',
+]);
+const CASTS = new Set(['TSAsExpression', 'TSSatisfiesExpression', 'TSNonNullExpression', 'TSTypeAssertion']);
+// Modifiers of a class member that TypeScript checks and erases. Not of a parameter property, which they make assign a field.
+const MODIFIERS = /\b(?:private|protected|public|readonly|override)\b/g;
+/** Marks the tokens that lie inside one of `spans`, which are sorted and disjoint. */
+function markTypes(tokens, spans) {
+    let i = 0;
+    for (const token of tokens) {
+        while (i < spans.length && spans[i].end <= token.start)
+            i++;
+        const span = spans[i];
+        if (span && span.start <= token.start && token.end <= span.end)
+            token.type = true;
+    }
+}
+/**
+ * The parts of a TypeScript file that compile to nothing, sorted and merged:
+ * type annotations and return types, type parameters and arguments, `as T`,
+ * `satisfies T` and a non-null `!`, `<T>x`, interfaces, type aliases,
+ * `declare`d and abstract members and declarations, overload and index
+ * signatures, `implements …`, a `this` parameter, the `?` or `!` after a
+ * declared name, a class member's `private`, `readonly` or `override`, and
+ * parentheses that only a cast needs: `(a as number) < b` runs as `a < b`.
+ *
+ * Parameter properties (`constructor(private x)`) assign a field, enums and
+ * namespaces build objects, decorators run, and a field becomes `declare` or
+ * `abstract` only by losing the field it defines: none of that is left out.
+ * A file that does not parse has none, so all of it counts.
+ */
+function typeSpans(file, code) {
+    const parsed = parseSync(file, code);
+    if (parsed.errors.length > 0)
+        return [];
+    const spans = [];
+    const add = (start, end) => {
+        if (start < end)
+            spans.push({ start, end });
+    };
+    // The `?` or `!` in [from, to): `a?: T`, `x!: T`, `m?() {}`.
+    const mark = (from, to, char) => {
+        const at = code.indexOf(char, from);
+        if (at >= 0 && at < to)
+            add(at, at + 1);
+    };
+    // `private`, `readonly` and `override` before a class member's name.
+    const modifiers = (member) => {
+        const from = member.decorators.at(-1)?.end ?? member.start;
+        for (const match of code.slice(from, member.key.start).matchAll(MODIFIERS))
+            add(from + match.index, from + match.index + match[0].length);
+    };
+    // `newCallee`: what `new` calls, where `new (f() as F)()` is not `new f()()`.
+    const visit = (node, newCallee) => {
+        if (TYPE_DECLARATIONS.has(node.type) || ('declare' in node && node.declare === true))
+            return add(node.start, node.end);
+        switch (node.type) {
+            case 'TSAsExpression':
+            case 'TSSatisfiesExpression':
+            case 'TSNonNullExpression':
+                add(node.expression.end, node.end);
+                break;
+            case 'TSTypeAssertion':
+                add(node.start, node.expression.start);
+                break;
+            case 'ParenthesizedExpression':
+                if (CASTS.has(node.expression.type) && needsNoParens(uncast(node.expression), newCallee)) {
+                    add(node.start, node.start + 1);
+                    add(node.end - 1, node.end);
+                }
+                break;
+            case 'MethodDefinition':
+                // An overload signature in a class.
+                if (node.value.type === 'TSEmptyBodyFunctionExpression')
+                    return add(node.start, node.end);
+                modifiers(node);
+                if (node.optional)
+                    mark(node.key.end, node.value.start, '?');
+                break;
+            case 'PropertyDefinition':
+            case 'AccessorProperty': {
+                modifiers(node);
+                const next = node.typeAnnotation?.start ?? node.value?.start ?? node.end;
+                if (node.optional)
+                    mark(node.key.end, next, '?');
+                if (node.definite)
+                    mark(node.key.end, next, '!');
+                break;
+            }
+            case 'VariableDeclarator':
+                if (node.definite && node.id.type === 'Identifier')
+                    mark(node.id.start + node.id.name.length, node.id.typeAnnotation?.start ?? node.id.end, '!');
+                break;
+            case 'Identifier': {
+                // oxc's types say no identifier is optional, but a parameter's is: `a?: T`.
+                const optional = Reflect.get(node, 'optional');
+                if (optional === true)
+                    mark(node.start + node.name.length, node.typeAnnotation?.start ?? node.end, '?');
+                break;
+            }
+            case 'ClassDeclaration':
+            case 'ClassExpression': {
+                // The keyword is the last `implements` before the first type (one in a comment after it only leaves it counted).
+                const types = node.implements ?? [];
+                const at = types.length > 0 ? code.lastIndexOf('implements', types[0].start - 1) : -1;
+                if (at >= 0)
+                    add(at, types.at(-1).end);
+                break;
+            }
+            case 'FunctionDeclaration':
+            case 'FunctionExpression': {
+                // `function f(this: Window, a)`: the parameter and its comma.
+                const [first, second] = node.params;
+                if (first?.type === 'Identifier' && first.name === 'this')
+                    add(first.start, second?.start ?? first.end);
+                break;
+            }
+        }
+        for (const key of visitorKeys[node.type] ?? []) {
+            const value = Reflect.get(node, key);
+            for (const child of Array.isArray(value) ? value : [value]) {
+                if (!isNode(child))
+                    continue;
+                if (TYPE_KEYS.has(key))
+                    add(child.start, child.end);
+                else
+                    visit(child, passesNewCallee(node, key) && (newCallee || node.type === 'NewExpression'));
+            }
+        }
+    };
+    visit(parsed.program, false);
+    return normalize(spans);
+}
+// Where the callee of `new` reaches: `new (a.b as any)()`, `new (f() as F).x()`.
+function passesNewCallee(node, key) {
+    if (node.type === 'NewExpression')
+        return key === 'callee';
+    return (node.type === 'MemberExpression' && key === 'object') || node.type === 'ParenthesizedExpression' || CASTS.has(node.type);
+}
+function uncast(node) {
+    while (node.type === 'TSAsExpression' || node.type === 'TSSatisfiesExpression' || node.type === 'TSNonNullExpression' || node.type === 'TSTypeAssertion') {
+        node = node.expression;
+    }
+    return node;
+}
+/**
+ * Whether parentheses around `node` change nothing once its casts are gone:
+ * `(a as T).b` is `(a).b`, which is `a.b`. Not around an operator, an
+ * optional chain (`(a?.b as T).c` throws where `a?.b.c` does not), a number
+ * (`(1 as number).toFixed()`), a call that `new` calls, or anything that a
+ * statement or an arrow body would read differently (`{`, `function`).
+ */
+function needsNoParens(node, newCallee) {
+    switch (node.type) {
+        case 'Identifier':
+        case 'ThisExpression':
+        case 'MemberExpression':
+        case 'ParenthesizedExpression':
+        case 'ArrayExpression':
+        case 'TemplateLiteral':
+        case 'TaggedTemplateExpression':
+            return true;
+        case 'Literal':
+            return typeof node.value !== 'number' && typeof node.value !== 'bigint';
+        case 'CallExpression':
+            return !newCallee;
+        default:
+            return false;
+    }
+}
+function isNode(value) {
+    return typeof value === 'object' && value !== null && 'type' in value && typeof value.type === 'string';
 }
 const PUNCTUATORS = [
     new Set(['>>>=']),
