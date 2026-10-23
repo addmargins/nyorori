@@ -298,10 +298,10 @@ test('hasTodo', () => { expect(hasTodo('todo: x')).toBe(true); expect(hasTodo('d
     const { status, report, output } = nyorori(dir)
     expect(status, output).toBe(1)
     expect(statuses(report!).filter((s) => s.includes(' Revert '))).toEqual([
-      'src/limits.js:2 Revert `500` → `1000` (before this PR): Survived',
-      'src/limits.js:6 Revert `/[^a-z0-9]+/g` → `/[^a-z]+/g` (before this PR): Killed',
+      'src/limits.js:2 Revert `500` → `1000`, as before this PR: Survived',
+      'src/limits.js:6 Revert `/[^a-z0-9]+/g` → `/[^a-z]+/g`, as before this PR: Killed',
     ])
-    expect(output).toContain('Survived   src/limits.js:2:25  Revert  `500` → `1000` (before this PR)  (every test still passes with this change)')
+    expect(output).toContain('Survived   src/limits.js:2:25  Revert  `500` → `1000`, as before this PR  (every test still passes with this change)')
   })
 
   test('a reasoned suppression turns a survivor into a reported, passing Ignored', () => {
@@ -697,6 +697,19 @@ registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescrip
       expect(report!.notJudged).toEqual([{ file: 'lib/c.ts', reason: 'coverage-include' }, { file: 'src/generated/b.ts', reason: 'coverage-exclude' }])
       expect(output).toContain(`  WARNING    1 changed source file not in coverage.include of the Vitest config was not judged: lib/c.ts
   WARNING    1 changed source file in coverage.exclude of the Vitest config was not judged: src/generated/b.ts`)
+    })
+
+    test('counts a test file the loaded config does not run as a test, not as uncovered source', () => {
+      // es-toolkit's benchmarks workspace: its specs are left out of the root config, and coverage.include is src only.
+      const dir = project('foreign-test', {
+        'vitest.config.ts': "export default { test: { exclude: ['**/node_modules/**', 'bench/**'], coverage: { include: ['src/**'] } } }\n",
+        'src/a.ts': lib,
+        'test/a.test.ts': spec('a'),
+      }, { 'bench/size.spec.ts': spec('a'), 'types/a.test-d.ts': "export {}\n" })
+      const { status, report, output } = nyorori(dir)
+      expect(status, output).toBe(0)
+      expect(report!.notJudged).toEqual([{ file: 'bench/size.spec.ts', reason: 'test' }, { file: 'types/a.test-d.ts', reason: 'test' }])
+      expect(output).not.toContain('WARNING')
     })
 
     test('says plainly when coverage.include matches none of the changed source files', () => {

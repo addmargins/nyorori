@@ -386,15 +386,15 @@ describe('Revert', () => {
     expect(changed(before, after)).toEqual([
       // `||` → `&&` is killed whatever the number is; only this says whether a test checks it.
       '2:23 Logical `||` → `&&`',
-      '2:26 Revert `500` → `1000` (before this PR)',
-      '3:21 Revert `32n` → `64n` (before this PR)',
+      '2:26 Revert `500` → `1000`, as before this PR',
+      '3:21 Revert `32n` → `64n`, as before this PR',
       '4:26 Regex `[,;]` → `[^,;]`',
       '4:31 Regex `/…/g` → `/…/`',
-      '4:25 Revert `/[,;]/g` → `/,/` (before this PR)',
+      '4:25 Revert `/[,;]/g` → `/,/`, as before this PR',
       // The same as BooleanLiteral, which keeps it; a property name is not a value; `16` minifies like `0x10`.
       '5:19 Logical `o.on ?? true` → `o.on`',
       '5:22 BooleanLiteral `true` → `false`',
-      '6:24 Revert `4` → `2` (before this PR)',
+      '6:24 Revert `4` → `2`, as before this PR',
     ])
   })
 
@@ -412,9 +412,9 @@ describe('Revert', () => {
       .replace("'missing'", "'absent'").replace("'deprecated'", "'obsolete'").replace("split(',')", "split(';')").replace('`k=${', '`key=${')
       .replace("'0'", "' '")
     expect(changed(before, after).filter((m) => m.includes(' Revert '))).toEqual([
-      "6:19 Revert `';'` → `','` (before this PR)",
-      '6:25 Revert `key=` → `k=` (before this PR)',
-      "6:51 Revert `' '` → `'0'` (before this PR)",
+      "6:19 Revert `';'` → `','`, as before this PR",
+      '6:25 Revert `key=` → `k=`, as before this PR',
+      "6:51 Revert `' '` → `'0'`, as before this PR",
     ])
   })
 })
@@ -561,10 +561,10 @@ describe('scope of a change', () => {
       '2:16 FunctionBody body → `return`',
       '5:11 FunctionBody body → `return`',
       '6:14 ComparisonBoundary `>` → `>=`',
-      '6:16 Revert `2` → `1` (before this PR)',
+      '6:16 Revert `2` → `1`, as before this PR',
     ])
     // Only the body changed: the body site stays out.
-    expect(changed(before, before.replace('a > 1', 'a > 2'))).toEqual(['6:14 ComparisonBoundary `>` → `>=`', '6:16 Revert `2` → `1` (before this PR)'])
+    expect(changed(before, before.replace('a > 1', 'a > 2'))).toEqual(['6:14 ComparisonBoundary `>` → `>=`', '6:16 Revert `2` → `1`, as before this PR'])
   })
 
   test('leaves the call around a callback whose block body changed to the callback', () => {

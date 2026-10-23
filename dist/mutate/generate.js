@@ -511,7 +511,7 @@ function plan(file, code, changes, types) {
             return;
         // A template chunk shows its text: `a` for `` `a${ ``.
         const shown = (token) => snippet(site.type === 'TemplateLiteral' ? token.replace(/^[`}]|(?:`|\$\{)$/g, '') : token);
-        add(site, 'expression', start, 'Revert', edit(site, start, end, before), `\`${shown(code.slice(start, end))}\` → \`${shown(before)}\` (before this PR)`);
+        add(site, 'expression', start, 'Revert', edit(site, start, end, before), `\`${shown(code.slice(start, end))}\` → \`${shown(before)}\`, as before this PR`);
     }
     /**
      * Records the values that `node` converts (see converted). A test, the

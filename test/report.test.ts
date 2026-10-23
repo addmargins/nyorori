@@ -214,8 +214,8 @@ nyorori mutates only JavaScript and TypeScript. Leave these files out with the \
 |---|---|
 | \`src/App.vue\` | **a file type nyorori cannot mutate** |
 | \`src/Card.svelte\` | **a file type nyorori cannot mutate** |
-| \`src/App.test.ts\` | test, type test, benchmark or setup file |
-| \`src/old.ts\` | deleted |
+
+Not judged: 1 test file, 1 deleted file.
 `)
     // A dry run judges nothing anyway: it lists them and passes.
     expect(exitCode({ ...report, dryRun: true })).toBe(0)

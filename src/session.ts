@@ -19,6 +19,13 @@ const BENCHMARK = { include: ['**/*.{bench,benchmark}.?(c|m)[jt]s?(x)'], exclude
 /** Vitest's and Vite's config files: vitest.config.ts, vite.config.mjs, vitest.unit.config.ts, ... */
 const CONFIG = /^vite(?:st)?(?:\.[\w-]+)?\.config\./
 
+/**
+ * Test, type-test and benchmark files by Vitest's default names. One that no
+ * project of the loaded config runs belongs to another config (a benchmarks
+ * workspace, a type-test config) or is left out on purpose: still not source code.
+ */
+const TEST_NAME = /\.(?:(?:test|spec)(?:-d)?|bench|benchmark)\.[cm]?[jt]sx?$/
+
 /** What nyorori reads of the other Vite plugins. */
 interface VitePlugin {
   name: string
@@ -206,6 +213,7 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
     if (relative.startsWith('..') || path.isAbsolute(relative)) return 'outside-root'
     if (setupFiles.has(file) || vitest!.projects.some((project) => project.matchesTestGlob(file))) return 'test'
     if (otherTests.some(({ dir, matches }) => matches(path.relative(dir, file)))) return 'test'
+    if (TEST_NAME.test(path.basename(file))) return 'test'
     if (CONFIG.test(path.basename(file))) return 'config'
     if (userExclude(relative)) return 'excluded'
     if (coverageInclude && !coverageInclude(relative)) return 'coverage-include'

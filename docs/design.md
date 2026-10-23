@@ -193,6 +193,7 @@ TCE로 버린 mutant와, 실행 시간에 문자열 연결로 확인되어 건�
   - Vitest 루트 밖(`outside-root`). project의 glob은 루트 기준이라서, 루트 밖의 테스트 파일도 테스트 파일로 알아볼 수 없다. 그래서 이것을 먼저 본다.
   - 테스트 파일(`test`): Vitest의 `matchesTestGlob`, 그리고 project의 `setupFiles`와 `globalSetup`
   - 타입 테스트와 벤치마크(`test`): project마다 `typecheck.include`에서 `typecheck.exclude`를 뺀 것, `benchmark.include`에서 `benchmark.exclude`를 뺀 것. `matchesTestGlob`은 `include`만 보므로 따로 본다. 켜져 있지 않아도 뺀다. 테스트 파일이라서 그 안의 코드를 실행하는 테스트가 없고, 대상에 넣으면 NoCoverage로 거짓 실패한다.
+  - 이름이 Vitest의 기본 테스트 이름(`*.test.*`, `*.spec.*`, `*.test-d.*`, `*.bench.*`)인 파일(`test`). 읽은 설정의 project가 실행하지 않아도 테스트 파일이다. 다른 설정이 실행하거나(벤치마크 workspace, 타입 테스트 설정) 일부러 뺀 것이다. 이것을 빼면 coverage 경고가 거짓으로 난다. es-toolkit의 `benchmarks/**/*.spec.ts`(루트 설정의 `exclude`)와 i18next의 `test/typescript/**/*.test.ts`(`vitest.workspace.typescript.mts`가 실행)가 upstream PR과 실험 PR에서 그랬다.
   - 설정 파일(`config`): 파일 이름이 `vite(st)?(.이름)?.config.*`인 것. Vitest 4가 project 설정 파일을 찾는 규칙과 같다.
   - `--exclude`에 걸리는 파일(`excluded`)
   - Vitest `coverage.include`에 맞지 않거나(`coverage-include`) `coverage.exclude`에 걸리는(`coverage-exclude`) 파일
@@ -348,7 +349,7 @@ es-toolkit과 i18next의 upstream PR 13개를 다시 돌려 보니, 고친 코�
 
 리터럴만 바꾼 수정에는 그 변경을 확인하는 mutant가 없었다. i18next 사례 PR(`nyorori/case-literal-default`)은 `maxReplaces`의 기본값을 1000에서 500으로 바꿨다. 바뀐 `500`을 담은 식의 mutant(`maxReplaces || 500`의 `||`→`&&`, 기본값 객체를 돌려주는 화살표 함수의 FunctionBody)는 숫자와 상관없이 잡혀서 "All 2 mutants detected"로 통과했다. 정규식의 패턴만 바꾼 사례 PR(`nyorori/case-regex-body`)도 같다. 새 패턴의 Regex mutant는 생기지만, 옛 패턴으로 돌아가도 테스트가 실패하는지는 묻지 않는다.
 
-**`Revert`.** 토큰 diff가 옛 리터럴 토큰 하나를 같은 자리의 새 리터럴 토큰 하나로 바꿨으면(그 사이에 실행되는 다른 토큰을 넣거나 지우지 않았으면) 옛 텍스트를 되돌리는 mutant를 만든다. 설명은 `` `500` → `1000` (before this PR) ``이다. 살아남으면 새 값을 확인하는 테스트가 없다는 뜻이다.
+**`Revert`.** 토큰 diff가 옛 리터럴 토큰 하나를 같은 자리의 새 리터럴 토큰 하나로 바꿨으면(그 사이에 실행되는 다른 토큰을 넣거나 지우지 않았으면) 옛 텍스트를 되돌리는 mutant를 만든다. 설명은 `` `500` → `1000`, as before this PR ``이다. 살아남으면 새 값을 확인하는 테스트가 없다는 뜻이다.
 - 리터럴 토큰은 수(bigint 포함), 문자열, 정규식, `true`·`false`, 템플릿 조각이다. 종류가 달라도 된다(`'_'`→`/_/g`). 템플릿 조각은 끝이 같은 조각끼리만 짝짓는다(`` `a${ ``와 `` `b${ ``). 옛 텍스트는 base의 blob에서 읽으므로 따옴표도 옛 그대로다.
 - 지점은 리터럴 노드이고, 템플릿 조각이면 템플릿 리터럴 전체에서 그 조각만 바꾼다. 앵커는 리터럴(조각)의 시작이다.
 - 값이 아닌 리터럴에는 만들지 않는다: 속성 이름(`{ 1: a }`, 계산하는 `[2]`는 값), import·export의 경로, JSX 속성, 문 하나인 리터럴(`'use strict'`), tagged template의 조각(tag가 문자열 배열을 받으므로 괄호로 감쌀 수 없다). 모듈 최상위 코드는 다른 연산자처럼 대상이 아니다.

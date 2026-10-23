@@ -379,14 +379,14 @@ function main() {
 
   test('puts back each literal that took the place of another', () => {
     expect(mutants.filter((m) => m.operator === 'Revert').map((m) => `${m.line}:${m.column} ${m.description}`)).toEqual([
-      '3:21 `500` → `1000` (before this PR)',
-      '3:35 `4n` → `3n` (before this PR)',
-      '3:49 `/[,;]/` → `/,/` (before this PR)',
+      '3:21 `500` → `1000`, as before this PR',
+      '3:35 `4n` → `3n`, as before this PR',
+      '3:49 `/[,;]/` → `/,/`, as before this PR',
       // A template's chunk: the site is the whole template.
-      '3:73 `?` → `!` (before this PR)',
-      '5:3 `/^y/` → `/^x/` (before this PR)',
-      '6:18 `20` → `10` (before this PR)',
-      "6:23 `'large'` → `'big'` (before this PR)",
+      '3:73 `?` → `!`, as before this PR',
+      '5:3 `/^y/` → `/^x/`, as before this PR',
+      '6:18 `20` → `10`, as before this PR',
+      "6:23 `'large'` → `'big'`, as before this PR",
     ])
     expect(plain.split('\n').find((line) => line.includes('/^y/.test(s)'))).toMatch(/^  \{ \(__nyorori_h\(/)
   })

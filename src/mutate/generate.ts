@@ -552,7 +552,7 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
     if (before === undefined) return
     // A template chunk shows its text: `a` for `` `a${ ``.
     const shown = (token: string) => snippet(site.type === 'TemplateLiteral' ? token.replace(/^[`}]|(?:`|\$\{)$/g, '') : token)
-    add(site, 'expression', start, 'Revert', edit(site, start, end, before), `\`${shown(code.slice(start, end))}\` → \`${shown(before)}\` (before this PR)`)
+    add(site, 'expression', start, 'Revert', edit(site, start, end, before), `\`${shown(code.slice(start, end))}\` → \`${shown(before)}\`, as before this PR`)
   }
 
   /**

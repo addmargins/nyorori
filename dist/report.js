@@ -314,9 +314,15 @@ export function formatSummary(report) {
         lines.push('', '### Not judged', '');
         for (const warning of notJudgedWarnings(report))
             lines.push('> [!WARNING]', `> ${warning}`, '');
-        lines.push('| File | Why |', '|---|---|');
-        for (const f of report.notJudged)
+        // Test files and the like are counted, as in the text: a large PR would list every spec.
+        const listed = report.notJudged.filter((f) => !COUNTED.some(([reason]) => reason === f.reason));
+        if (listed.length > 0)
+            lines.push('| File | Why |', '|---|---|');
+        for (const f of listed)
             lines.push(`| \`${cell(f.file)}\` | ${f.reason === 'unsupported' ? `**${WHY[f.reason]}**` : WHY[f.reason]} |`);
+        const counted = notJudgedCount(report);
+        if (counted)
+            lines.push(...(listed.length > 0 ? [''] : []), `${counted}.`);
     }
     return `${lines.join('\n')}\n`;
 }

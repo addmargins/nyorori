@@ -31,6 +31,12 @@ import { checkVitestVersion, findVitest, ProjectError } from './vitest.js';
 const BENCHMARK = { include: ['**/*.{bench,benchmark}.?(c|m)[jt]s?(x)'], exclude: ['**/node_modules/**', '**/.git/**'] };
 /** Vitest's and Vite's config files: vitest.config.ts, vite.config.mjs, vitest.unit.config.ts, ... */
 const CONFIG = /^vite(?:st)?(?:\.[\w-]+)?\.config\./;
+/**
+ * Test, type-test and benchmark files by Vitest's default names. One that no
+ * project of the loaded config runs belongs to another config (a benchmarks
+ * workspace, a type-test config) or is left out on purpose: still not source code.
+ */
+const TEST_NAME = /\.(?:(?:test|spec)(?:-d)?|bench|benchmark)\.[cm]?[jt]sx?$/;
 // The probe buffer goes back as the records of the probes that ran, keyed by probe key.
 const setup = (features) => `import { inject, afterAll } from 'vitest'
 const s = (globalThis.__nyorori ??= {})
@@ -207,6 +213,8 @@ async function init(root, candidates, exclude, dir) {
         if (setupFiles.has(file) || vitest.projects.some((project) => project.matchesTestGlob(file)))
             return 'test';
         if (otherTests.some(({ dir, matches }) => matches(path.relative(dir, file))))
+            return 'test';
+        if (TEST_NAME.test(path.basename(file)))
             return 'test';
         if (CONFIG.test(path.basename(file)))
             return 'config';
