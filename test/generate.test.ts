@@ -425,7 +425,8 @@ describe('Revert', () => {
       "  'use cache'",
       '  const q = sql`select * from old where n = ${n}`',
       "  const o = { 'key-old': n, ['k-old']: n }",
-      '  return <a href="/old" title={\'old\'} data-n={1}>{a}{q}{o}</a>',
+      "  const m = [import('./old-lazy'), require('./old-cjs')]",
+      '  return <a href="/old" title={\'old\'} data-n={1}>{a}{q}{o}{m}</a>',
       '}',
     ].join('\n')
     const after = before.replaceAll('old', 'new').replace('use cache', 'use server').replace('{1}', '{2}')
@@ -433,8 +434,8 @@ describe('Revert', () => {
     // A computed key and a JSX expression are values.
     expect(generate(file, after, changes(before, after, file), 1).mutants.map((m) => `${m.line}:${m.column} ${m.operator} ${m.description}`)).toEqual([
       "5:30 Revert `'k-new'` → `'k-old'`, as before this PR",
-      "6:32 Revert `'new'` → `'old'`, as before this PR",
-      '6:47 Revert `2` → `1`, as before this PR',
+      "7:32 Revert `'new'` → `'old'`, as before this PR",
+      '7:47 Revert `2` → `1`, as before this PR',
     ])
   })
 })

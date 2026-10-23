@@ -240,7 +240,7 @@ Vitest 4는 `test.projects`의 project마다, inline project라도 Vite 서버�
 
 - 옛 리터럴 하나를 같은 자리의 새 리터럴 하나로 바꾼 곳에만 만듭니다. 다른 토큰도 함께 바꿨으면 그 식의 다른 mutant가 맡습니다.
 - 에러 메시지(`throw`하는 값, `new TypeError('…')`처럼 이름이 `Error`로 끝나는 것의 인자)와 [로그 호출](#로그-호출)의 문자열에는 만들지 않습니다. 문구를 확인하지 않는 테스트가 흔하기 때문입니다.
-- 속성 이름, import 경로, JSX 속성, tagged template의 문자열에도 만들지 않습니다. `true`↔`false`와 정규식 flag 하나를 더한 것은 `BooleanLiteral`과 `Regex`가 이미 되돌립니다.
+- 속성 이름, import 경로(동적 `import()`와 `require()` 포함), JSX 속성, tagged template의 문자열에도 만들지 않습니다. `true`↔`false`와 정규식 flag 하나를 더한 것은 `BooleanLiteral`과 `Regex`가 이미 되돌립니다.
 - 값이 같은 리터럴(`0x10`→`16`)로 바꾼 것은 압축 결과가 같으므로 버립니다(TCE).
 
 ### 로그 호출

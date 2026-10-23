@@ -831,6 +831,9 @@ function isValue(literal, parent) {
         return true;
     if ('key' in parent && parent.key === literal)
         return 'computed' in parent && parent.computed === true;
+    // `import('./x')` and `require('./x')` name a module like an import declaration: the old path would only fail to load.
+    if (parent.type === 'ImportExpression' || (parent.type === 'CallExpression' && isName(parent.callee, 'require')))
+        return false;
     return !['ImportDeclaration', 'ExportNamedDeclaration', 'ExportAllDeclaration', 'ImportAttribute', 'JSXAttribute', 'ExpressionStatement'].includes(parent.type);
 }
 function isBooleanLiteral(node) {
