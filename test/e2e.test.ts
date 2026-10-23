@@ -288,6 +288,22 @@ test('hasTodo', () => { expect(hasTodo('todo: x')).toBe(true); expect(hasTodo('d
     expect(output).toContain('Survived   src/fix.js:29:16  Regex  `/…/i` → `/…/`  (every test still passes with this change)')
   })
 
+  test('reverts a changed literal, which survives where no test checks the new value', () => {
+    const limits = "export function maxItems(options) {\n  return options.max || 1000\n}\n\nexport function slug(s) {\n  return s.replace(/[^a-z]+/g, '-')\n}\n"
+    const dir = project('revert', {
+      'src/limits.js': limits,
+      // Checks that there is a default, not which one; and checks digits in a slug.
+      'test/limits.test.js': "import { expect, test } from 'vitest'\nimport { maxItems, slug } from '../src/limits.js'\ntest('maxItems', () => { expect(maxItems({ max: 3 })).toBe(3); expect(maxItems({})).toBeGreaterThan(0) })\ntest('slug', () => { expect(slug('a1 b')).toBe('a1-b') })\n",
+    }, { 'src/limits.js': limits.replace('1000', '500').replace('[^a-z]', '[^a-z0-9]') })
+    const { status, report, output } = nyorori(dir)
+    expect(status, output).toBe(1)
+    expect(statuses(report!).filter((s) => s.includes(' Revert '))).toEqual([
+      'src/limits.js:2 Revert `500` → `1000` (before this PR): Survived',
+      'src/limits.js:6 Revert `/[^a-z0-9]+/g` → `/[^a-z]+/g` (before this PR): Killed',
+    ])
+    expect(output).toContain('Survived   src/limits.js:2:25  Revert  `500` → `1000` (before this PR)  (every test still passes with this change)')
+  })
+
   test('a reasoned suppression turns a survivor into a reported, passing Ignored', () => {
     const dir = project('suppress', { 'src/age.ts': AGE_BASE, 'test/age.test.ts': AGE_TEST }, {
       'src/age.ts': AGE_HEAD.replace('  return age >= 18', '  // nyorori-ignore-next-line ComparisonBoundary -- callers validate age first\n  return age >= 18'),
@@ -310,9 +326,52 @@ test('hasTodo', () => { expect(hasTodo('todo: x')).toBe(true); expect(hasTodo('d
     expect(status, output).toBe(1)
     expect(report!.problems.map((p) => `${p.line} ${p.message}`)).toEqual([
       '13 Suppression matches no mutant of Logical on line 14. Remove it.',
-      '7 Unnecessary suppression: tests already detect mutant Condition `isAdult(age)` → `true`. Remove it.',
-      '7 Unnecessary suppression: tests already detect mutant Condition `isAdult(age)` → `false`. Remove it.',
+      '7 Unnecessary suppression: tests already detect every mutant it matches (Condition `isAdult(age)` → `true`, Condition `isAdult(age)` → `false`). Remove it.',
     ])
+    // They keep their verdicts; only the survivor on line 3 is ignored.
+    expect(statuses(report!).filter((s) => s.includes(' Condition ') || s.includes(' ComparisonBoundary '))).toEqual([
+      'src/age.ts:3 ComparisonBoundary `>=` → `>`: Ignored',
+      'src/age.ts:8 Condition `isAdult(age)` → `true`: Killed',
+      'src/age.ts:8 Condition `isAdult(age)` → `false`: Killed',
+      'src/age.ts:15 Condition `i < n` → `false`: Killed',
+      'src/age.ts:15 ComparisonBoundary `<` → `<=`: Killed',
+    ])
+  })
+
+  test('a suppression ignores the survivors it matches, and the mutants that tests kill stay Killed', () => {
+    // es-toolkit `chunk`: without the fast path the loop returns [] too, so `→ false` is equivalent; `→ true` is killed.
+    const chunk = 'export function chunk<T>(xs: T[], size: number): T[][] {\n  const out: T[][] = []\n  for (let i = 0; i < xs.length; i += size) out.push(xs.slice(i, i + size))\n  return out\n}\n'
+    const dir = project('suppress-fast-path', {
+      'src/chunk.ts': chunk,
+      'test/chunk.test.ts': "import { expect, test } from 'vitest'\nimport { chunk } from '../src/chunk'\ntest('chunk', () => { expect(chunk([], 2)).toEqual([]); expect(chunk([1, 2, 3], 2)).toEqual([[1, 2], [3]]) })\n",
+    }, {
+      'src/chunk.ts': chunk.replace('  const out', '  // nyorori-ignore-next-line Condition -- the loop returns [] for an empty array too\n  if (xs.length === 0) return []\n  const out'),
+    })
+    const { status, report, output } = nyorori(dir)
+    expect(status, output).toBe(0)
+    expect(statuses(report!)).toEqual([
+      'src/chunk.ts:3 Condition `xs.length === 0` → `true`: Killed',
+      'src/chunk.ts:3 Condition `xs.length === 0` → `false`: Ignored',
+      'src/chunk.ts:3 Equality `===` → `!==`: Killed',
+    ])
+    expect(report!.problems).toEqual([])
+  })
+
+  test('a suppression does not apply to code that no test runs', () => {
+    const dir = project('suppress-untested', { 'src/age.ts': AGE_BASE, 'test/age.test.ts': AGE_TEST.replace(/\ntest\('label'[^]*$/, '\n') }, {
+      'src/age.ts': `${AGE_BASE}
+export function double(n: number): number {
+  // nyorori-ignore-next-line Arithmetic -- doubling cannot be observed
+  return n * 2
+}
+`,
+    })
+    const { status, report, output } = nyorori(dir)
+    expect(status, output).toBe(1)
+    expect(statuses(report!)).toEqual(['src/age.ts:5 FunctionBody body → `return`: NoCoverage', 'src/age.ts:7 Arithmetic `*` → `/`: NoCoverage'])
+    expect(output).toContain('NoCoverage src/age.ts:7:12  Arithmetic  `*` → `/`  (no test runs this code, and a suppression does not apply to untested code)')
+    // It still matches a mutant, so it is not reported as stale.
+    expect(report!.problems).toEqual([])
   })
 
   test('kills and restarts the Vitest session when a mutant hangs code it cannot instrument', () => {

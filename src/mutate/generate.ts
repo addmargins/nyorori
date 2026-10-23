@@ -96,8 +96,8 @@ const FUNCTIONS = new Set<Node['type']>(['FunctionDeclaration', 'FunctionExpress
 /**
  * Where a node sits. Module-level code runs once at import time, and the
  * arguments of a log call (a global `console` call, `logger.warn(…)`) or of a
- * dropped metrics call are only recorded; neither is mutated. An async
- * function awaits what it returns.
+ * dropped metrics call are only recorded, like all of an `if` that only logs;
+ * none is mutated. An async function awaits what it returns.
  */
 type Context = 'module' | 'function' | 'async' | 'log'
 
@@ -201,15 +201,24 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
 
   // The block bodies of functions, by start (filled by the first walk below).
   const blocks: Span[] = []
+  // The nodes at each place where an operand was cut off, outermost first (filled by the first walk), and the
+  // expressions that lost it, as `start:end` (see cutShort).
+  const atCuts = new Map<string, Array<{ node: Node; parent: Node | null }>>()
+  for (const { start, cut } of changes.ranges) if (cut) atCuts.set(`${cut}:${start}`, [])
+  const cut = new Set<string>()
+  // The literals this branch put in place of others, as `start:end`, with the text of the ones they replaced (see revert).
+  const replaced = new Map<string, string>()
+  for (const { start, end, before } of changes.ranges) if (before !== undefined) replaced.set(`${start}:${end}`, before)
 
   /**
    * Whether `span` holds a change of its own. One in the block body of a
    * function nested in it does not count: those statements belong to that
    * function and its sites, or `xs.forEach((x) => { … })` would be removed for
    * every edit in the callback. An expression body is part of the expression.
+   * An expression that lost an operand at its edge changed too.
    */
   function changed(span: Span): boolean {
-    return changesIn(changes.ranges, span.start, span.end).some(({ start, end }) =>
+    return cut.has(`${span.start}:${span.end}`) || changesIn(changes.ranges, span.start, span.end).some(({ start, end }) =>
       !inNestedBlock(span, Math.max(start, span.start), Math.min(end, span.end)))
   }
 
@@ -320,8 +329,44 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
   // as `Boolean(x)`, a template expression as `String(x)`, an awaited value as
   // `Promise.resolve(x)`. That call there changes nothing (see convert).
   const converted = new Map<Node, 'Boolean' | 'String' | 'Promise'>()
+  // Values that only make an error's message: `throw new TypeError('Expected a function')`,
+  // `throw 'bad ' + x`. Its text gets no Revert, like a log call's (see markMessages).
+  const messages = new Set<Node>()
   // A `console` declared in an enclosing scope (a parameter, an import, ...) is the code's own object.
   const isLogging = (node: Node) => (isConsoleCall(node) && !scopes.isDeclared('console')) || isLogCall(node)
+
+  /**
+   * Whether `statement` only logs: Google's service calls such nodes arid, and
+   * a compound node arid when all its children are. A statement is arid when
+   * the log filter leaves nothing in it (a log call, a dropped recording, an
+   * empty block or statement), and an `if` when its branches are. Its test
+   * then only decides whether to log, so it gets no mutant either:
+   * `if (err) this.logger.warn(…)`. A `?.` on the logger still does
+   * something, so `this.logger?.warn(…)` is not arid.
+   */
+  function isArid(statement: Node): boolean {
+    switch (statement.type) {
+      case 'EmptyStatement':
+        return true
+      case 'BlockStatement':
+        return statement.body.every(isArid)
+      case 'IfStatement':
+        return isArid(statement.consequent) && (!statement.alternate || isArid(statement.alternate))
+      case 'ExpressionStatement':
+        return isRecordStatement(statement) || logsOnly(statement.expression)
+      default:
+        return false
+    }
+  }
+
+  // A log call, or one that a condition guards like an `if` would: `err && logger.warn(…)`.
+  function logsOnly(expression: Expression): boolean {
+    const node = unwrapReference(expression)
+    if (node.type === 'LogicalExpression') return logsOnly(node.right)
+    if (node.type === 'ConditionalExpression') return logsOnly(node.consequent) && logsOnly(node.alternate)
+    const call = statementCall(expression)
+    return call !== undefined && call.site === call.node && isLogging(call.node)
+  }
 
   function mutate(node: Node, parent: Node | null, context: Context): void {
     if (node.type === 'CallExpression') {
@@ -332,6 +377,7 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
     else if (node.type === 'UnaryExpression' && node.operator === 'delete') references.add(unwrapReference(node.argument))
     else if (node.type === 'NewExpression') constructed.add(unwrapReference(node.callee))
     convert(node, parent, context)
+    markMessages(node)
     switch (node.type) {
       case 'BinaryExpression': {
         const entry = BINARY[node.operator]
@@ -391,13 +437,21 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
           for (const { at, literal, from, to } of regexMutations(node.regex.pattern, node.regex.flags)) {
             add(node, 'expression', node.start + at, 'Regex', literal, to === '' ? `\`${from}\` removed` : `\`${snippet(from)}\` → \`${snippet(to)}\``)
           }
-          break
+        } else if (typeof node.value === 'boolean') {
+          const other = String(!node.value)
+          add(node, 'expression', node.start, 'BooleanLiteral', other, `\`${node.value}\` → \`${other}\``)
         }
-        if (typeof node.value !== 'boolean') break
-        const other = String(!node.value)
-        add(node, 'expression', node.start, 'BooleanLiteral', other, `\`${node.value}\` → \`${other}\``)
+        // Last, so a mutant that another operator makes keeps its name: `true` → `false`, a flag removed.
+        if (isValue(node, parent) && !(typeof node.value === 'string' && messages.has(node))) revert(node, node.start, node.end)
         break
       }
+      case 'TemplateLiteral':
+        // The text of a tagged template is not a value: the tag gets it whole.
+        if (parent?.type === 'TaggedTemplateExpression' || messages.has(node)) break
+        for (const { start, end } of changesIn(changes.ranges, node.start, node.end)) {
+          if (!node.expressions.some((expression) => expression.start <= start && end <= expression.end)) revert(node, start, end)
+        }
+        break
       case 'IfStatement':
       case 'ConditionalExpression':
         condition(node.test, ['true', 'false'])
@@ -486,6 +540,22 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
   }
 
   /**
+   * `Revert`: the literal that this branch replaced, put back (see
+   * Range.before). A changed literal puts the expressions around it in
+   * scope, but none of their mutants says whether a test checks its new
+   * value: `maxReplaces || 500` gets `||` → `&&`, which tests kill whatever
+   * the number is. If this one survives, no test does. [start, end) is the
+   * literal's token in `site`: the literal itself, or a chunk of a template.
+   */
+  function revert(site: Node, start: number, end: number): void {
+    const before = replaced.get(`${start}:${end}`)
+    if (before === undefined) return
+    // A template chunk shows its text: `a` for `` `a${ ``.
+    const shown = (token: string) => snippet(site.type === 'TemplateLiteral' ? token.replace(/^[`}]|(?:`|\$\{)$/g, '') : token)
+    add(site, 'expression', start, 'Revert', edit(site, start, end, before), `\`${shown(code.slice(start, end))}\` → \`${shown(before)}\` (before this PR)`)
+  }
+
+  /**
    * Records the values that `node` converts (see converted). A test, the
    * operand of `!`, and both operands of an `&&` or `||` whose own value is
    * used that way are used only for their truthiness. An untagged template
@@ -524,6 +594,28 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
       case 'ArrowFunctionExpression':
         if (node.async && node.expression) converted.set(unwrap(node.body), 'Promise')
         break
+    }
+  }
+
+  /**
+   * Records the values that only make an error's message (see messages): what
+   * is thrown, the arguments of `new …Error(…)` or `…Error(…)`, and, within
+   * those, the operands of `+`, `&&`, `||`, `??` and the branches of `?:`.
+   * Messages are text for people, often reworded with no test that reads
+   * them; a log call's arguments are left out for the same reason.
+   */
+  function markMessages(node: Node): void {
+    if (node.type === 'ThrowStatement') messages.add(unwrap(node.argument))
+    else if ((node.type === 'NewExpression' || node.type === 'CallExpression') && /Error$/.test(calleeName(node.callee) ?? '')) {
+      for (const argument of node.arguments) messages.add(unwrap(argument))
+    }
+    if (!messages.has(node)) return
+    if ((node.type === 'BinaryExpression' && node.operator === '+') || node.type === 'LogicalExpression') {
+      messages.add(unwrap(node.left))
+      messages.add(unwrap(node.right))
+    } else if (node.type === 'ConditionalExpression') {
+      messages.add(unwrap(node.consequent))
+      messages.add(unwrap(node.alternate))
     }
   }
 
@@ -593,16 +685,21 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
   // pass collects them all and the second also sees names declared below their
   // use: hoisted `var` and functions, or a module-level logger defined further down.
   // It also finds the block bodies that `changed` leaves to the functions they belong to.
-  walk(parsed.program, null, undefined, scopes, (node) => {
+  walk(parsed.program, null, undefined, scopes, (node, parent) => {
     if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') &&
       node.body?.type === 'BlockStatement') blocks.push(node.body)
+    atCuts.get(`end:${node.end}`)?.push({ node, parent })
+    atCuts.get(`start:${node.start}`)?.push({ node, parent })
     return undefined
   })
   blocks.sort((a, b) => a.start - b.start)
+  for (const nodes of atCuts.values()) for (const node of cutShort(nodes)) cut.add(`${node.start}:${node.end}`)
   scopes.freeze()
   walk<Context>(parsed.program, null, 'module', scopes, (node, parent, context) => {
     if (node.type === 'ExpressionStatement') statements.set(node.start, node)
     if (context === 'log') return context
+    // An `if` that only logs gets no mutant, its test included; so does `err && logger.warn(…)`.
+    if ((node.type === 'IfStatement' || node.type === 'ExpressionStatement') && isArid(node)) return 'log'
     const inner = 'async' in node && node.async ? 'async' : FUNCTIONS.has(node.type) ? 'function' : context
     if (inner !== 'module') mutate(node, parent, context)
     return isLogging(node) || isRecordStatement(node) ? 'log' : inner
@@ -710,6 +807,31 @@ function walk<T>(node: Node, parent: Node | null, state: T, scopes: Scopes, ente
   scopes.leave(node)
 }
 
+// Expressions that hold an operand at their edge more tightly than a binary operator would: `size <= 0`, `!x`, `a.b(c)`.
+const TIGHT = new Set<Node['type']>([
+  'BinaryExpression', 'LogicalExpression', 'UnaryExpression', 'UpdateExpression', 'AwaitExpression', 'MemberExpression', 'CallExpression',
+  'ChainExpression', 'TaggedTemplateExpression', 'TSAsExpression', 'TSSatisfiesExpression', 'TSNonNullExpression', 'TSTypeAssertion',
+  'TSInstantiationExpression',
+])
+
+/**
+ * Of `nodes`, which end (or start) where an operand was cut off with its
+ * operator, outermost first, those that lost it (see Range.cut). That is the
+ * expression left in the operand's place: from the innermost, up through
+ * what binds more tightly, so `size <= 0` and not its `0`. What holds it at
+ * the same place changed with it, like an arrow function whose body it is.
+ * None when it is an operand of a binary or logical expression around it:
+ * that one holds the place inside and changed anyway (`a && b && c` → `a && c`).
+ */
+function cutShort(nodes: Array<{ node: Node; parent: Node | null }>): Node[] {
+  let k = nodes.length - 1
+  if (k < 0 || !/Expression$|^(?:Identifier|Literal|TemplateLiteral|Super)$/.test(nodes[k]!.node.type)) return []
+  while (k > 0 && TIGHT.has(nodes[k - 1]!.node.type)) k--
+  const { parent } = nodes[k]!
+  if (parent?.type === 'BinaryExpression' || parent?.type === 'LogicalExpression') return []
+  return nodes.slice(0, k + 1).map(({ node }) => node)
+}
+
 function isNode(value: unknown): value is Node {
   return typeof value === 'object' && value !== null && 'type' in value && typeof value.type === 'string'
 }
@@ -726,6 +848,16 @@ function unwrapReference(node: Node): Node {
     node.type === 'TSNonNullExpression' || node.type === 'TSTypeAssertion'
   ) node = node.expression
   return node
+}
+
+/**
+ * Whether `literal` is a value the code computes: not a property name, an
+ * import source, a JSX attribute, or a statement of its own like `'use strict'`.
+ */
+function isValue(literal: Node, parent: Node | null): boolean {
+  if (!parent) return true
+  if ('key' in parent && parent.key === literal) return 'computed' in parent && parent.computed === true
+  return !['ImportDeclaration', 'ExportNamedDeclaration', 'ExportAllDeclaration', 'ImportAttribute', 'JSXAttribute', 'ExpressionStatement'].includes(parent.type)
 }
 
 function isBooleanLiteral(node: Node): boolean {
@@ -913,6 +1045,13 @@ function isCopy(call: CallExpression): boolean {
   const [first, ...rest] = call.arguments
   if (method === 'concat') return !first
   return method === 'slice' && rest.length === 0 && (!first || isNumber(first, 0))
+}
+
+/** The name a callee goes by: `Error`, `TypeError` in `errors.TypeError`, none in `make()`. */
+function calleeName(callee: Node): string | undefined {
+  const node = unwrapReference(callee)
+  if (node.type === 'Identifier') return node.name
+  return node.type === 'MemberExpression' && !node.computed && node.property.type === 'Identifier' ? node.property.name : undefined
 }
 
 /** The name of the method a call makes: `sort` in `xs.sort()`, none in `xs[k]()`. */

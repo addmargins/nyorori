@@ -44,6 +44,14 @@ describe('changedRanges', () => {
     expect(diff('x = f(a, b)\n', 'x = f(c)\n')).toBe('x = f([c])\n')
   })
 
+  test('marks where an operand went with its operator, and which side lost it', () => {
+    // `a > 0` lost its last operand; `b` its first.
+    expect(changes('if (a > 0 || b) x()\n', 'if (a > 0) x()\n').ranges).toEqual([{ start: 9, end: 9, cut: 'end' }])
+    expect(changes('if (a > 0 || b) x()\n', 'if (b) x()\n').ranges).toEqual([{ start: 4, end: 4, cut: 'start' }])
+    // A deleted statement or argument took no operand.
+    expect(changes('g(a)\nf(a, b)\n', 'f(a)\n').ranges).toEqual([{ start: 0, end: 0 }, { start: 3, end: 3 }])
+  })
+
   test('marks a renamed name like any other replaced token', () => {
     expect(diff('function f(fromIndex) {\n  return fromIndex + 1\n}\n', 'function f(index) {\n  return index + 1\n}\n'))
       .toBe('function f([index]) {\n  return [index] + 1\n}\n')
@@ -87,6 +95,26 @@ describe('changedRanges', () => {
     // 1200 replaced names: the commas between them are not worth the search.
     const after = call('b', 600)
     expect(changes(call('a', 600), after).ranges).toEqual([{ start: 2, end: after.length - 2 }])
+  })
+
+  test('leaves out what only TypeScript reads, in either version', () => {
+    // Types, casts, a `this` parameter, `?` and `!`, class member modifiers, overloads and type declarations compile to nothing.
+    const typed = 'function f(a: unknown, b?: number): Array<T[]> {\n  return (a as number) < (<number>b)!\n}\n'
+    expect(diff('function f(a: any, b): T[][] {\n  return a < b\n}\n', typed)).toBe(typed)
+    const members = 'class A implements I {\n  private readonly x?: number\n  public m(this: A, a: T): T\n  public m(this: A, a: any) { return a satisfies T }\n}\n'
+    expect(diff('class A {\n  x: number\n  m(a) { return a }\n}\n', members)).toBe(members)
+    const declared = 'function f(a) {\n  let x!: number\n  type T = 1\n  interface I { a: 1 }\n  return x\n}\n'
+    expect(diff('function f(a) {\n  let x: number\n  return x\n}\n', declared)).toBe(declared)
+  })
+
+  test('keeps the TypeScript that compiles to code', () => {
+    // A parameter property assigns a field; a field that becomes `declare` no longer defines one.
+    expect(diff('class A {\n  constructor(x: number) {}\n  y: number\n}\n', 'class A {\n  constructor(private x: number) {}\n  declare y: number\n}\n'))
+      .toBe('class A {\n  constructor([private] x: number) {}\n  declare y|: number\n}\n')
+    // Parentheses around a cast that group, or that `new` or an optional chain needs.
+    expect(diff('function f(a) {\n  return [a + b * c, new F().x, a?.b.c]\n}\n', 'function f(a) {\n  return [(a + b as number) * c, new (F() as any).x, (a?.b as B).c]\n}\n'))
+      .toBe('function f(a) {\n  return [[(]a + b as number[)] * c, new [(]F() as any[)].x, [(]a?.b as B[)].c]\n}\n')
+    expect(diff('enum E { A = 1 }\n', 'enum E { A = 2 }\n')).toBe('enum E { A = [2] }\n')
   })
 
   test('without the old version, takes every token of the hunks as new', () => {

@@ -8,7 +8,7 @@ import { instrument, InstrumentError } from './mutate/instrument.ts'
 import { mergeProfile, predict, type ProbeRecord } from './mutate/profile.ts'
 import { askTypes, typesNotAsked, type TypeOracle } from './mutate/typecheck.ts'
 import type { ModuleResult, Request, Response, SpecRef } from './protocol.ts'
-import { EXPLAIN } from './report.ts'
+import { EXPLAIN, UNTESTED_SUPPRESSION } from './report.ts'
 import type {
   EquivalentMutant,
   FilePlan,
@@ -137,7 +137,7 @@ export async function run(options: RunOptions): Promise<Report> {
     const reformatted = new Set<Suppression>()
     const sources = eligible.map((file) => {
       const code = readFileSync(file, 'utf8')
-      return { file, code, changes: fileChanges(repo, changed.get(file)!, code) }
+      return { file, code, changes: fileChanges(repo, file, changed.get(file)!, code) }
     })
     let types: TypeOracle | undefined
     if (options.types) {
@@ -264,20 +264,15 @@ export async function run(options: RunOptions): Promise<Report> {
           if (prediction !== undefined && status !== 'Survived') result.mispredicted = status
         }
       }
-      if (result.suppression) {
-        if (status === 'Killed' || status === 'Timeout') {
-          report.problems.push({
-            file: result.suppression.file,
-            line: result.suppression.line,
-            message: `Unnecessary suppression: tests already detect mutant ${result.operator} ${result.description}. Remove it.`,
-          })
-        }
-        status = 'Ignored'
-      }
+      // A suppression ignores survivors only. A killed mutant stays Killed, and one no test runs stays
+      // NoCoverage: why a change cannot be seen says nothing about code that no test runs.
+      if (result.suppression && status === 'Survived') status = 'Ignored'
+      if (result.suppression && status === 'NoCoverage') result.reason = UNTESTED_SUPPRESSION
       result.status = status
       // The same words as the text output, so --json says why every failing mutant fails.
       if (status === 'Survived' || status === 'NoCoverage') result.reason ??= EXPLAIN[status]
     }
+    reportUnnecessarySuppressions(report)
     if (!options.predict) {
       // Run too, to check the category: the profile says they survive, whatever the types say.
       for (const mutant of report.unnecessary) {
@@ -313,6 +308,24 @@ function reportUnusedSuppressions(report: Report, reformatted: ReadonlySet<Suppr
 /** JavaScript, TypeScript or a component format: a file a PR changes code in. */
 function isCode(file: string): boolean {
   return SOURCE.test(file) || COMPONENT.test(file)
+}
+
+/**
+ * A suppression is needed while one of its mutants survives, predicted or
+ * run. One whose mutants the tests all kill would only hide the next change
+ * there. A fast path like `if (arr.length === 0) return []` keeps one: its
+ * `→ false` is equivalent even though its `→ true` is killed.
+ */
+function reportUnnecessarySuppressions(report: Report): void {
+  for (const suppression of report.suppressions) {
+    const matched = report.results.filter((result) => result.suppression === suppression)
+    if (matched.length === 0 || !matched.every(({ status }) => status === 'Killed' || status === 'Timeout')) continue
+    report.problems.push({
+      file: suppression.file,
+      line: suppression.line,
+      message: `Unnecessary suppression: tests already detect every mutant it matches (${matched.map((m) => `${m.operator} ${m.description}`).join(', ')}). Remove it.`,
+    })
+  }
 }
 
 function judge(modules: ModuleResult[], unhandledErrors: string[]): MutantStatus {

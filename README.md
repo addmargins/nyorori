@@ -76,7 +76,7 @@ npx nyorori run --base origin/main
 | Timeout | 무한 루프 등으로 시간 초과 | 통과 |
 | Survived | 관련 테스트가 모두 통과, 또는 [기준 실행의 프로파일](#기준-실행의-프로파일)로 보아 통과할 것이 확실함 | 실패 |
 | NoCoverage | 바뀐 코드를 실행하는 테스트가 없음 | 실패 |
-| Ignored | 억제 주석으로 제외 | 통과. 요약에 표시 |
+| Ignored | 살아남았지만 억제 주석으로 제외 | 통과. 요약에 표시 |
 
 `--json`의 Survived와 NoCoverage 결과에는 모두 `reason`이 있습니다. [기준 실행의 프로파일](#기준-실행의-프로파일)이 이유를 알면 그 이유이고, 아니면 텍스트 출력과 같은 `every test still passes with this change`나 `no test runs this code`입니다. `--dry-run`은 판정하지 않으므로 `reason`이 없습니다.
 
@@ -86,7 +86,9 @@ npx nyorori run --base origin/main
 대상은 이 PR이 바꾼 함수 안의 코드입니다. 바뀐 줄이 아니라 바뀐 토큰으로 정합니다.
 
 - git이 찾은 바뀐 줄 안에서, 옛 코드와 새 코드를 토큰 단위로 다시 비교합니다. 공백, 줄바꿈, 들여쓰기, 주석, 문자열의 따옴표 종류, 끝의 쉼표만 바꾼 것은 바뀐 것이 아닙니다. 그래서 Prettier로 다시 포맷한 함수에는 mutant가 생기지 않습니다.
+- TypeScript에서 타입만 바꾼 것도 바뀐 것이 아닙니다. 타입 주석과 반환 타입, 타입 인자, `as`·`satisfies`·`!`, interface와 type alias, overload, 클래스 멤버의 `private`·`readonly` 같은 수식어, cast 때문에만 있는 괄호(`(a as number) < (b as number)`)가 그렇습니다. 실행에 영향을 주는 parameter property(`constructor(private x)`), enum, decorator는 바뀐 것입니다.
 - 식은 그 안에 바뀐 토큰(또는 지운 자리)이 있을 때 변형합니다. `Math.min(fromIndex, arr.length - 1)`을 `Math.min(index, arr.length - 1)`로 바꾸면 `index`를 담은 `Math.min(…)`은 변형하고, 손대지 않은 `arr.length - 1`은 변형하지 않습니다. 반대로 여러 줄에 걸친 조건은 바뀐 피연산자가 어느 줄에 있든 변형합니다.
+  - 피연산자를 연산자와 함께 지우면 남은 식이 바뀐 것입니다. `size <= 0 || !Number.isInteger(size)`를 `size <= 0`이나 `!Number.isInteger(size)`로 줄이면, 가운데 피연산자를 지울 때처럼 그 조건을 변형합니다.
   - 식 안의 콜백 블록 본문(`xs.forEach((x) => { … })`의 `{ … }`)에서 바뀐 것은 그 콜백 안의 식만 변형합니다.
 - 함수 본문을 건너뛰는 `FunctionBody`는 함수의 머리(시작부터 본문의 `{`까지, 메서드는 이름부터)가 바뀌었을 때만 만듭니다. 새 함수와, 매개변수나 이름을 바꾼 함수가 그렇습니다.
 - 이름만 바꾼 것(`total`→`sum`)도 바뀐 토큰입니다. 같은 토큰은 같은 코드로 보므로, 다시 쓴 코드에서 우연히 같은 토큰으로 남은 식은 변형하지 않을 수 있습니다. 자세한 것은 [`docs/design.md`](docs/design.md)의 "범위 규칙"에 있습니다.
@@ -216,6 +218,7 @@ Vitest 4는 `test.projects`의 project마다, inline project라도 Vite 서버�
 | `CallUnwrap` | 함수 호출 → 첫 인자. `toInteger(x)`→`x`, `this.getValue(x)`→`x`, `Math.min(i, n)`→`i`. 문자열·배열을 바꾸는 메서드 → receiver. `s.trim()`→`s`, `xs.map(f)`→`xs` |
 | `CallStatement` | 값을 버리는 호출 문 → 호출 제거. `unmatched.delete(key)`, `await save(x)`→`await undefined` |
 | `Regex` | 정규식 리터럴: flag 하나 제거(`/a/gi`→`/a/i`), 그룹 밖의 `^`·`$` 제거, `[abc]`↔`[^abc]`, `\d`↔`\D`, `\w`↔`\W`, `\s`↔`\S` |
+| `Revert` | 이 PR이 바꾼 리터럴을 옛 값으로 되돌림: `maxReplaces || 500`→`maxReplaces || 1000`. 수, 정규식, 문자열, 템플릿 조각 |
 
 호출과 정규식 연산자는 값을 감싸는 함수나 변환을 더하거나(`normalizeZero(x)`, `.map(normalizeZero)`), 호출 문을 더하거나(`set.delete(key)`), 정규식 flag를 더한 수정에도 mutant가 생기게 합니다.
 
@@ -232,6 +235,13 @@ Vitest 4는 `test.projects`의 project마다, inline project라도 Vite 서버�
 - 정규식 mutant는 모두 `new RegExp`로 컴파일되는지 확인하고, 되지 않으면 버립니다. `^`·`$`가 없는 패턴의 `m`, `.`가 없는 패턴의 `s`는 빼도 같으므로 빼지 않습니다.
 - 이 셋은 [기준 실행의 프로파일](#기준-실행의-프로파일)로 예측하지 않고 실제로 실행합니다. 호출은 인자를 그대로 돌려주어도 부수 효과가 있을 수 있기 때문입니다.
 
+`Revert`는 리터럴 하나만 바꾼 수정(기본값 `1000`→`500`, 정규식의 패턴)에도 그 변경을 확인하는 mutant가 생기게 합니다. 그 리터럴을 담은 식의 다른 mutant는 값과 상관없이 잡히기 때문입니다. 설명은 `` `500` → `1000` (before this PR) ``이고, 살아남으면 새 값을 확인하는 테스트가 없다는 뜻입니다.
+
+- 옛 리터럴 하나를 같은 자리의 새 리터럴 하나로 바꾼 곳에만 만듭니다. 다른 토큰도 함께 바꿨으면 그 식의 다른 mutant가 맡습니다.
+- 에러 메시지(`throw`하는 값, `new TypeError('…')`처럼 이름이 `Error`로 끝나는 것의 인자)와 [로그 호출](#로그-호출)의 문자열에는 만들지 않습니다. 문구를 확인하지 않는 테스트가 흔하기 때문입니다.
+- 속성 이름, import 경로, JSX 속성, tagged template의 문자열에도 만들지 않습니다. `true`↔`false`와 정규식 flag 하나를 더한 것은 `BooleanLiteral`과 `Regex`가 이미 되돌립니다.
+- 값이 같은 리터럴(`0x10`→`16`)로 바꾼 것은 압축 결과가 같으므로 버립니다(TCE).
+
 ### 로그 호출
 
 로그는 코드가 하는 일이 아니라 그 기록이어서, 살아남아도 테스트를 더할 일이 드뭅니다. 그래서 다음 호출은 호출 자체(`CallUnwrap`, `CallStatement`)도, 인자 안쪽도 변형하지 않습니다.
@@ -244,8 +254,9 @@ Vitest 4는 `test.projects`의 project마다, inline project라도 Vite 서버�
 - 값을 버리는 메트릭·트레이싱 호출 문: `metrics.increment('hits')`, `this.statsd.timing('load', ms)`
   - receiver 이름이 `metrics`, `statsd`, `telemetry`, `tracer`이거나 `Metrics`, `Telemetry`, `Tracer`로 끝나고, 메서드가 `increment`, `decrement`, `gauge`, `histogram`, `timing`, `distribution`, `record`, `addEvent`, `setAttribute`, `setAttributes`, `setStatus`, `recordException`인 호출입니다. 값을 쓰면 변형합니다.
 
+로그만 하는 `if`는 조건까지 변형하지 않습니다(`if (err) this.logger.warn(…)`). 갈래(`else` 포함)에 위의 로그 호출과 메트릭 호출 문, 빈 블록, 또 그런 `if`만 있는 경우입니다. 문으로 쓴 `err && logger.warn(…)`도 같습니다. `this.logger?.warn(…)`이나 `return`처럼 다른 일을 하는 갈래가 있으면 변형합니다.
 `setTimeout`과 `setInterval`은 변형합니다. 콜백은 코드가 하는 일이고, fake timer로 테스트할 수 있습니다.
-경고를 테스트하는 라이브러리라면 그 경고 호출에는 mutant가 없습니다. 이름이 다른 로거(`out.warn(…)`, `debug('…')`)는 거르지 않으므로, 그 mutant가 살아남으면 [억제 주석](#equivalent-mutant-억제)을 쓰세요.
+경고를 테스트하는 라이브러리라면 그 경고 호출과 경고만 지키는 조건에는 mutant가 없습니다. 이름이 다른 로거(`out.warn(…)`, `debug('…')`)는 거르지 않으므로, 그 mutant가 살아남으면 [억제 주석](#equivalent-mutant-억제)을 쓰세요.
 
 ### 문자열 `+`
 
@@ -281,10 +292,12 @@ return age >= 18
 
 - 연산자와 이유를 반드시 적어야 합니다.
 - 주석은 diff에 그대로 보입니다. 이 PR이 추가한 억제는 경고 어노테이션과 job summary 맨 위에 따로 표시됩니다.
+- 억제해도 mutant는 실행합니다. 살아남은 것만 Ignored가 되고, 테스트가 잡은 것은 Killed로 남습니다. 그래서 `if (arr.length === 0) return []`처럼 `→ false`는 equivalent이고 `→ true`는 잡히는 빠른 경로도 `Condition`으로 억제할 수 있습니다.
+- 테스트가 실행하지 않는 코드에는 억제가 적용되지 않습니다. NoCoverage로 실패하고, 이유에 그렇게 표시됩니다.
 - 다음 경우에는 실패합니다.
   - 형식이 틀린 주석
-  - 억제할 mutant가 없는 새 주석. 들여쓰기만 바꾼 줄처럼 대상 줄에서 공백이나 주석만 바꿨다면 실패하지 않습니다.
-  - 테스트가 이미 잡는 mutant를 억제하는 주석
+  - 억제할 mutant가 없는 새 주석. 들여쓰기만 바꾼 줄처럼 대상 줄에서 공백이나 주석, 타입만 바꿨다면 실패하지 않습니다.
+  - 가리키는 mutant를 테스트가 모두 잡는 주석
 
 ## 개발
 

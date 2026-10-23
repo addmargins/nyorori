@@ -366,6 +366,59 @@ describe('Regex', () => {
   })
 })
 
+describe('Revert', () => {
+  const changed = (before: string, after: string) =>
+    generate('file.js', after, changes(before, after, 'file.js'), 1).mutants.map((m) => `${m.line}:${m.column} ${m.operator} ${m.description}`)
+
+  test('puts back a number, bigint or regex literal that took the place of another', () => {
+    const before = [
+      'export function f(a, s, o) {',
+      '  const limit = a.max || 1000',
+      '  const big = 1n << 64n',
+      '  const parts = s.split(/,/)',
+      '  const on = o.on ?? false',
+      '  const key = { 1: a, [2]: s }',
+      '  return [limit, big, parts, on, key, 0x10]',
+      '}',
+    ].join('\n')
+    const after = before.replace('1000', '500').replace('64n', '32n').replace('/,/', '/[,;]/g').replace('?? false', '?? true')
+      .replace('1: a', '3: a').replace('[2]', '[4]').replace('0x10', '16')
+    expect(changed(before, after)).toEqual([
+      // `||` → `&&` is killed whatever the number is; only this says whether a test checks it.
+      '2:23 Logical `||` → `&&`',
+      '2:26 Revert `500` → `1000` (before this PR)',
+      '3:21 Revert `32n` → `64n` (before this PR)',
+      '4:26 Regex `[,;]` → `[^,;]`',
+      '4:31 Regex `/…/g` → `/…/`',
+      '4:25 Revert `/[,;]/g` → `/,/` (before this PR)',
+      // The same as BooleanLiteral, which keeps it; a property name is not a value; `16` minifies like `0x10`.
+      '5:19 Logical `o.on ?? true` → `o.on`',
+      '5:22 BooleanLiteral `true` → `false`',
+      '6:24 Revert `4` → `2` (before this PR)',
+    ])
+  })
+
+  test('puts back a string or a template chunk, but not the text of an error or a log call', () => {
+    const before = [
+      'export function f(a, s) {',
+      "  if (!a) throw new TypeError('Expected a function')",
+      "  if (s === 'x') throw new Error(`bad ${s}: ` + (a ? 'one' : 'two'))",
+      "  if (!s) return Promise.reject(createError('missing'))",
+      "  logger.warn('deprecated')",
+      "  return [s.split(','), `k=${a}`, s.padStart(2, '0')]",
+      '}',
+    ].join('\n')
+    const after = before.replace('Expected a function', 'Expected a callback').replace('bad ${', 'invalid ${').replace("'one'", "'1'")
+      .replace("'missing'", "'absent'").replace("'deprecated'", "'obsolete'").replace("split(',')", "split(';')").replace('`k=${', '`key=${')
+      .replace("'0'", "' '")
+    expect(changed(before, after).filter((m) => m.includes(' Revert '))).toEqual([
+      "6:19 Revert `';'` → `','` (before this PR)",
+      '6:25 Revert `key=` → `k=` (before this PR)',
+      "6:51 Revert `' '` → `'0'` (before this PR)",
+    ])
+  })
+})
+
 describe('scope', () => {
   test('only mutates sites on changed lines', () => {
     const code = ['function f(a) {', '  if (a > 1) return 1', '  return a === 2', '}'].join('\n')
@@ -451,10 +504,42 @@ describe('scope of a change', () => {
     ])
   })
 
+  test('mutates an expression that lost its first or last operand, like one that lost a middle one', () => {
+    const before = 'export function chunk(arr: number[], size: number) {\n  if (size <= 0 || !Number.isInteger(size)) {\n    throw new Error()\n  }\n  return arr.filter((x) => x > 0 && x < size)\n}\n'
+    expect(changed(before, before.replace(' || !Number.isInteger(size)', '').replace(' && x < size', ''))).toEqual([
+      '2:7 Condition `size <= 0` → `true`',
+      '2:7 Condition `size <= 0` → `false`',
+      '2:12 ComparisonBoundary `<=` → `<`',
+      // The arrow function's body is what lost it.
+      '5:14 CallUnwrap `arr.filter((x) => x > 0)` → `arr`',
+      '5:28 FunctionBody `=> x > 0` → `=> undefined`',
+      '5:30 ComparisonBoundary `>` → `>=`',
+    ])
+    expect(changed(before, before.replace('size <= 0 || ', ''))).toEqual([
+      '2:7 Condition `!Number.isInteger(size)` → `true`',
+      '2:7 Condition `!Number.isInteger(size)` → `false`',
+      '2:7 Negation `!Number.isInteger(size)` → `Number.isInteger(size)`',
+    ])
+    // A statement deleted next to an expression took nothing from it.
+    expect(changed('export function f(a: number) {\n  g(a)\n  return a > 0\n}\n', 'export function f(a: number) {\n  return a > 0\n}\n')).toEqual([])
+  })
+
   test('mutates nothing in a reformatted function', () => {
     const before = 'export function clamp(x: number, lo: number, hi: number): number { if (x < lo) return lo; return x > hi ? hi : x }\n'
     const after = 'export function clamp(x: number, lo: number, hi: number): number {\n  if (x < lo) {\n    return lo;\n  }\n  return x > hi\n    ? hi\n    : x;\n}\n'
     expect(changed(before, after)).toEqual([])
+  })
+
+  test('mutates nothing for an edit of types alone', () => {
+    // es-toolkit case: `any` → `unknown`, casts that need parentheses, another return type.
+    const before = 'export function compare(a: any, b: any): number {\n  if (a < b) {\n    return -1\n  }\n  return 0\n}\n'
+    const after = 'export function compare(a: unknown, b: unknown): -1 | 0 {\n  if ((a as number) < (b as number)) {\n    return -1\n  }\n  return 0\n}\n'
+    expect(changed(before, after)).toEqual([])
+    expect(changed(before, after.replace(') < (', ') <= ('))).toEqual([
+      '2:7 Condition `(a as number) <= (b as number)` → `true`',
+      '2:7 Condition `(a as number) <= (b as number)` → `false`',
+      '2:21 ComparisonBoundary `<=` → `<`',
+    ])
   })
 
   test('mutates all of a new function, its body included', () => {
@@ -476,9 +561,10 @@ describe('scope of a change', () => {
       '2:16 FunctionBody body → `return`',
       '5:11 FunctionBody body → `return`',
       '6:14 ComparisonBoundary `>` → `>=`',
+      '6:16 Revert `2` → `1` (before this PR)',
     ])
     // Only the body changed: the body site stays out.
-    expect(changed(before, before.replace('a > 1', 'a > 2'))).toEqual(['6:14 ComparisonBoundary `>` → `>=`'])
+    expect(changed(before, before.replace('a > 1', 'a > 2'))).toEqual(['6:14 ComparisonBoundary `>` → `>=`', '6:16 Revert `2` → `1` (before this PR)'])
   })
 
   test('leaves the call around a callback whose block body changed to the callback', () => {
@@ -563,6 +649,35 @@ describe('log filter', () => {
     ]],
   ])('mutates `%s`', (call, expected) => {
     expect(onCall(call)).toEqual(expected)
+  })
+
+  test('skips all of an `if` that only logs, its test included, and the same guard as an expression', () => {
+    const code = [
+      'export class C { #logger; async f(a, b) {',
+      '  if (a > 1) this.logger.warn(a)',
+      '  if (a > 2) { logger.warn(a); } else if (b) { console.log(b) } else {}',
+      "  if (a > 3) { if (b > 1) log.info(b); metrics.increment('x'); ; }",
+      '  a > 4 && logger.warn(a)',
+      '  b ? logger.warn(a) : await log.info(b)',
+      // A branch that does something else, a `?.` that keeps a missing logger from throwing.
+      '  if (a > 5) { logger.warn(a); return }',
+      '  if (a > 6) this.logger?.warn(a)',
+      '  if (a > 7) logger.warn(a); else g(a)',
+      '} }',
+    ].join('\n')
+    expect(mutants(code).filter((m) => !m.startsWith('1:'))).toEqual([
+      '7:7 Condition `a > 5` → `true`',
+      '7:7 Condition `a > 5` → `false`',
+      '7:9 ComparisonBoundary `>` → `>=`',
+      '8:7 Condition `a > 6` → `true`',
+      '8:7 Condition `a > 6` → `false`',
+      '8:9 ComparisonBoundary `>` → `>=`',
+      '8:25 OptionalChaining `?.` → `.`',
+      '9:7 Condition `a > 7` → `true`',
+      '9:7 Condition `a > 7` → `false`',
+      '9:9 ComparisonBoundary `>` → `>=`',
+      '9:35 CallStatement `g(a)` removed',
+    ])
   })
 })
 

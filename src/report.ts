@@ -170,6 +170,9 @@ export const EXPLAIN: Readonly<Record<'Survived' | 'NoCoverage', string>> = {
   NoCoverage: 'no test runs this code',
 }
 
+/** Why a suppressed mutant still fails as untested: a suppression only ignores survivors. */
+export const UNTESTED_SUPPRESSION = 'no test runs this code, and a suppression does not apply to untested code'
+
 /** The profile's reason when it has one: it says what the tests never do. */
 function explain(r: MutantResult): string {
   return r.reason ?? EXPLAIN[r.status as keyof typeof EXPLAIN]
@@ -239,7 +242,7 @@ export function formatAnnotations(report: Report): string[] {
   for (const r of failures(report)) {
     const title = r.status === 'Survived' ? 'nyorori: mutant survived' : 'nyorori: changed code is not tested'
     const advice = r.status === 'NoCoverage'
-      ? `No test runs this code, so the ${r.operator} mutant (${r.description}) goes unnoticed. Add a test that exercises it.`
+      ? `No test runs this code, so the ${r.operator} mutant (${r.description}) goes unnoticed${r.suppression ? ', and its suppression does not apply to untested code' : ''}. Add a test that exercises it.`
       : r.reason !== undefined && r.reason !== EXPLAIN.Survived
         ? `No test fails when ${r.operator} changes this code (${r.description}): ${r.reason}. Add a test that checks this behavior.`
         : `No test fails when ${r.operator} changes this code (${r.description}). Add or strengthen a test that checks this behavior.`

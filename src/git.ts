@@ -46,8 +46,8 @@ export function deletedFiles(cwd: string, base: string): string[] {
   return names.split('\0').filter(Boolean).map((file) => path.resolve(root, file))
 }
 
-/** What changed in a file whose new version is `code` (see changedRanges). */
-export function fileChanges(cwd: string, diff: FileDiff, code: string): Changes {
+/** What changed in `file`, whose new version is `code` (see changedRanges). */
+export function fileChanges(cwd: string, file: string, diff: FileDiff, code: string): Changes {
   let before: string | undefined
   if (diff.blob) {
     try {
@@ -56,7 +56,7 @@ export function fileChanges(cwd: string, diff: FileDiff, code: string): Changes 
       // Then every token of the changed lines counts as new, as when only lines were compared.
     }
   }
-  return { lines: diff.lines, ranges: changedRanges(before, code, diff.hunks) }
+  return { lines: diff.lines, ranges: changedRanges(before, code, diff.hunks, file) }
 }
 
 export function parseDiff(diff: string, root: string): Map<string, FileDiff> {

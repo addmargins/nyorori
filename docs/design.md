@@ -33,6 +33,7 @@ PR이 **추가하거나 바꾼 코드**에만 mutation을 넣고, 그 PR 시점�
 nyorori run --base <ref>
   1. 범위 계산     git diff --unified=0 <merge-base> → 파일별 바뀐 줄과 hunk, 옛 blob
                   대상 파일마다 hunk 안의 옛 토큰과 새 토큰을 diff → "바뀐 범위"
+                  (TS 파일은 두 버전을 파싱해, 타입만인 토큰을 넣거나 지운 것은 빼고)
   2. 세션 시작     Vitest를 띄운 별도 프로세스(session)를 시작한다
                   세션이 Vitest 설정으로 대상 파일을 거른다
                   (루트 밖, 테스트·타입 테스트·벤치마크·설정 파일, --exclude, coverage 설정)
@@ -108,7 +109,7 @@ profiled 계측은 원본 분기 안에 probe를 더 넣는다("실행 시간 �
 | Timeout | hit 상한 초과, 또는 세션 강제 종료 | 통과 (killed로 취급) |
 | Survived | 관련 테스트가 모두 통과. 또는 기준 실행의 프로파일로 보아 살아남는 것이 확실함(실행하지 않음, 이유를 함께 보고) | **실패** |
 | NoCoverage | 기준 실행에서 이 지점을 실행한 테스트가 없음 | **실패** |
-| Ignored | 소스 주석으로 억제됨 (L2) | 통과, 보고서에 표시 |
+| Ignored | 살아남았지만 소스 주석으로 억제됨 (L2). 억제해도 잡힌 mutant는 Killed, 실행되지 않은 mutant는 NoCoverage 그대로다 | 통과, 보고서에 표시 |
 
 다음은 개별 mutant의 판정이 아니라 실행 전체를 exit 2로 끝낸다.
 - 계측한 코드가 파싱되지 않는 경우
@@ -138,7 +139,23 @@ TCE로 버린 mutant와, 실행 시간에 문자열 연결로 확인되어 건�
 - 문자열, 템플릿 조각, 정규식은 통째로 비교하므로 그 안의 공백도 센다.
 - 비교는 Myers diff다. 앞뒤의 같은 토큰을 먼저 떼어 내므로 보통은 몇 토큰만 비교한다. 편집이 1000개를 넘는 hunk는 더 찾지 않고 모두 새것으로 본다. 6500줄짜리 hunk 하나(파일 전체를 다시 들여쓰거나 모든 이름을 바꾼 경우)도 75ms 안이었다.
 - 넣거나 바꾼 토큰이 바뀐 범위다. 아무것도 넣지 않고 지운 곳은 그 앞뒤 토큰 사이의 빈 범위로 남긴다. 그 자리를 감싸는 식은 바뀌었고(`a && b && c` → `a && c`), 옆의 식은 바뀌지 않았다.
+  - 지운 토큰이 이항·논리 연산자로 시작하거나 끝나면, 피연산자를 그 연산자와 함께 지운 것이다. 그러면 옆의 식이 피연산자를 잃은 것이다. `size <= 0 || !Number.isInteger(size)`의 뒤를 지우면 `size <= 0`이, 앞을 지우면 `!Number.isInteger(size)`가 조건 전체가 된다. 이전에는 지운 곳이 남은 식의 바로 뒤나 앞이어서 mutant가 하나도 생기지 않았다. 가운데를 지우면 3개가 생기는 것과 맞지 않았다.
+  - 피연산자를 잃은 식은 그 자리에 남은 피연산자 전체다. 지운 곳에 닿은 가장 안쪽 식에서 시작해, 이항 연산자보다 강하게 묶는 식(이항·논리·단항 연산, `await`, 멤버 접근, 호출, TS 단언)을 따라 바깥으로 올라간다. `size <= 0`의 `0`이 아니라 `size <= 0`이다. 그 식과, 같은 자리에서 그것을 담은 식(본문이 그 식인 화살표 함수 등)을 바뀐 것으로 본다. 그래서 그 자리(조건, 반환값, 인자, 화살표 함수의 본문)가 가운데를 지울 때와 같은 mutant를 받는다. 남은 피연산자 안쪽의 식(`a && f(x) || y` → `a && f(x)`의 `f(x)`)은 가운데를 지울 때처럼 바뀌지 않은 것으로 둔다.
+  - 남은 식이 다른 이항·논리 식의 피연산자이면 가운데를 지운 것이다. 그 식이 지운 곳을 안에 담으므로 이미 바뀐 것으로 본다. 그래서 가운데를 지운 결과는 이전과 같다.
+  - 문장, 인자, 배열 원소를 지운 것은 지운 토큰이 연산자로 시작하거나 끝나지 않으므로 이전과 같다. 옆의 식은 바뀌지 않았다.
+  - upstream PR 13개와 사례 PR 28개의 계획은 그대로다. 두 저장소의 최근 커밋 300개씩에서 mutant가 14개 늘었고 줄어든 것은 없다. 모두 첫 피연산자나 마지막 피연산자를 지운 곳이다. es-toolkit `forEach`·`map`의 `isArrayLike(collection) || Array.isArray(collection)` → `isArrayLike(collection)`(PR 제목이 "delete unnecessary array check"다), `orderBy`의 `object == null || criterion == null` → `criterion == null`, `isMatchWith`의 `target == null || isPrimitive(target)` → `target == null`, i18next의 `formatter && (…)` → `formatter`다.
 - 줄을 옮기면 git은 지우고 넣은 것으로 본다. 옮긴 코드는 실행 순서가 바뀌므로 바뀐 것으로 둔다.
+
+**타입만 고친 것.** TypeScript 파일(`.ts`, `.tsx`, `.mts`, `.cts`)에서는 컴파일하면 지워지는 토큰을 넣거나 지워도 바뀐 것으로 치지 않는다. 타입만 고친 PR에 mutant가 생기면 안 된다. es-toolkit 사례 PR(`nyorori/case-types-comments-only`)은 `any`→`unknown`, `as number`, interface의 `readonly`, JSDoc, 반환 타입만 바꿨는데 mutant가 10개 생겼다. 매개변수와 반환 타입이 함수 머리를 바꿔 FunctionBody가 생겼고, `a < b`를 `(a as number) < (b as number)`로 바꾸자 손대지 않은 `a < b`의 mutant가 생겼다.
+
+- 지워지는 것: 타입 주석과 반환 타입, 타입 매개변수와 타입 인자, `as T`·`satisfies T`·non-null `!`·`<T>x`, interface, type alias, `declare`한 것, abstract 멤버, overload와 index signature, `implements …`, `this` 매개변수와 그 쉼표, 선언한 이름 뒤의 `?`·`!`, 클래스 멤버의 `private`·`protected`·`public`·`readonly`·`override`, 그리고 cast 때문에만 있는 괄호. `(a as number) < (b as number)`는 `a < b`로 실행된다.
+  - cast를 감싼 괄호는 cast를 지운 안쪽이 이름, 멤버 접근, 호출, 배열 리터럴, 템플릿, 수가 아닌 리터럴일 때만 지워지는 것으로 본다. 연산자(`(a + b as number) * c`), optional chain(`(a?.b as B).c`는 `a?.b.c`와 달리 `a`가 null이면 throw한다), 수(`(1 as number).toFixed()`), `new`가 부르는 호출(`new (f() as F)()`는 `new f()()`가 아니다)을 감싼 괄호는 실행에 영향을 준다.
+- 실행에 영향을 주는 TypeScript는 센다. parameter property(`constructor(private x)`)는 필드에 대입하고, enum과 namespace는 객체를 만들고, decorator는 실행된다. 필드를 `declare`나 `abstract`로 바꾸면 그 필드를 정의하지 않게 되므로, 옛 필드 이름을 지운 것으로 본다.
+- 두 버전을 각각 oxc-parser로 파싱해 지워지는 토큰을 표시한다. 토큰을 맞출 때는 표시한 토큰도 그대로 쓰고, 넣거나 지운 토큰 중 표시한 것만 바뀐 것에서 뺀다. 표시한 토큰은 실행되는 같은 텍스트의 토큰과 다른 토큰으로 본다(`x: T` → `declare x: T`에서 `x`).
+  - 처음에는 표시한 토큰을 빼고 diff했다(타입을 지운 코드끼리 비교). 그러면 토큰 맞춤이 달라져, es-toolkit PR 2146에서 새 `const mappedValue = mapper(value)`의 `mapper(value)`가 옛 `mappedSecondSet.has(mapper(value))` 안의 같은 호출에 맞춰졌고 CallUnwrap이 빠졌다. 그래서 맞춤은 이전과 같게 두었다.
+  - 파싱되지 않는 버전에는 표시하지 않는다. 모든 토큰을 센다.
+- 사례 PR은 10개에서 0개가 됐다. es-toolkit의 최근 커밋 300개에서 `src`의 바뀐 파일마다 이 규칙이 빼는 mutant는 23개였다. 타입만 바꾼 함수 머리의 FunctionBody 20개와, `doesMatch(value, key as number, collection)`에서 `as number`만 지운 호출의 Condition 2개와 CallUnwrap 1개다. 늘어난 mutant는 없다. i18next(JavaScript)는 0개다. upstream PR 13개와 다른 사례 PR 27개의 계획은 그대로다.
+- 표시한 토큰을 `oxc-transform`이 타입을 지운 결과와 비교했다. 함수마다 표시하지 않은 토큰과 변환 결과의 같은 함수 토큰을 비교하면(`;`, 괄호, 쉼표는 빼고, 리터럴은 값으로), es-toolkit `src`의 함수 1187개 중 다른 것은 parameter property가 있는 생성자 하나였다(일부러 센다). nyorori의 함수 732개는 모두 같았다.
 
 **표현식 지점.** 지점의 텍스트가 바뀐 범위를 담으면(지운 곳은 지점 안쪽에 있어야 한다) 그 지점의 mutant를 만든다. 앵커가 어느 줄에 있는지는 보지 않는다. 앵커는 mutant가 바꾸는 토큰의 위치이고(연산자, 리터럴, 조건식의 시작, 함수 본문의 `{`), 보고하는 줄과 열은 이전처럼 앵커의 위치다.
 
@@ -163,6 +180,8 @@ TCE로 버린 mutant와, 실행 시간에 문자열 연결로 확인되어 건�
 - 괄호를 더해 묶음을 바꾸면(`a - b * c` → `(a - b) * c`) 안쪽 `a - b`는 토큰이 같으므로 범위 밖이다. 괄호를 담은 바깥 식(`*`)이 범위 안이다.
 - 괄호는 동작을 바꿀 수 있으므로 늘 센다. Prettier가 괄호를 더하거나 빼면 그 괄호를 담은 식이 범위에 들어온다. 화살표 함수 매개변수의 괄호(`x => x` → `(x) => x`)는 머리를 바꾼 것이 된다. 세미콜론도 토큰이지만 문장 끝에 오므로 담는 지점이 거의 없다.
 - 문장을 통째로 지운 것은 감싸는 식이 없으므로 여전히 A의 범위 밖이다(B에서 다룬다). 식의 일부를 지운 것은 위처럼 그 식을 바꾼 것이다. 그래서 줄을 지우기만 한 파일도 대상 후보로 남는다.
+- 단항 연산자만 지운 것(`if (!a)` → `if (a)`)은 여전히 남은 식의 바로 앞을 지운 것으로 본다. mutant가 생기지 않는다.
+- 우선순위가 섞인 곳에서 끝의 피연산자를 지우면, 피연산자를 잃은 식보다 바깥의 식을 바뀐 것으로 볼 수 있다. `a || b && c` → `a || b`에서 피연산자를 잃은 것은 `b`지만, `a || b`를 바뀐 것으로 본다. `b` 안쪽의 mutant는 생기지 않는다.
 
 **그 밖의 범위.**
 
@@ -204,6 +223,7 @@ TCE로 버린 mutant와, 실행 시간에 문자열 연결로 확인되어 건�
 | `CallUnwrap` | 함수 호출 → 첫 인자. `toInteger(x)`→`x`, `this.getValue(x)`→`x`, `Math.min(i, n)`→`i`. 문자열·배열을 바꾸는 메서드 → receiver. `s.trim()`→`s`, `xs.map(f)`→`xs`. 그 밖의 메서드 호출에는 만들지 않음 |
 | `CallStatement` | 값을 버리는 호출 문 → 호출 제거. `unmatched.delete(key)`→`undefined`, `await save(x)`→`await undefined` |
 | `Regex` | 정규식 리터럴: flag 하나 제거, 최상위 `^`·`$` 제거, 문자 클래스 부정(`[abc]`↔`[^abc]`), `\d`↔`\D`, `\w`↔`\W`, `\s`↔`\S` |
+| `Revert` | 이 PR이 리터럴 하나를 다른 리터럴 하나로 바꾼 곳: 옛 리터럴로 되돌림. `500`→`1000`, `/^['"]+/`→`/^'+/`. 수, bigint, 정규식, 문자열, 템플릿 조각. 에러 메시지와 로그 인자에는 만들지 않음 |
 
 문자열 리터럴→`""`과 배열/객체 리터럴 비우기는 오탐이 많아 2차로 미룬다.
 
@@ -323,6 +343,32 @@ es-toolkit과 i18next의 upstream PR 13개를 다시 돌려 보니, 고친 코�
 - `generate()` 전체는 중앙값 1.7~1.8초에서 2.4~2.5초가 됐다. 늘어난 mutant 하나에 약 1ms로, 대부분 TCE가 mutant마다 파일을 압축하는 비용이다.
 - 실제 PR에서는 바뀐 범위를 담은 호출 수에 비례한다. 늘어나는 비용의 대부분은 mutant 실행이다.
 - 메서드 규칙을 바꾼 뒤 지금의 `src`(16개 파일, 3876줄)로 같은 측정을 하면 `CallUnwrap`은 664개에서 510개가 된다. 첫 인자가 395개, receiver가 115개다. 빠진 것은 대부분 조회와 조건(`get`, `has`, `charCodeAt`, `startsWith`, `test`, `join`)이고, 기본 import한 `path`의 함수(`path.dirname(f)` 등 14개)도 빠졌다.
+
+#### 바꾼 리터럴 되돌리기
+
+리터럴만 바꾼 수정에는 그 변경을 확인하는 mutant가 없었다. i18next 사례 PR(`nyorori/case-literal-default`)은 `maxReplaces`의 기본값을 1000에서 500으로 바꿨다. 바뀐 `500`을 담은 식의 mutant(`maxReplaces || 500`의 `||`→`&&`, 기본값 객체를 돌려주는 화살표 함수의 FunctionBody)는 숫자와 상관없이 잡혀서 "All 2 mutants detected"로 통과했다. 정규식의 패턴만 바꾼 사례 PR(`nyorori/case-regex-body`)도 같다. 새 패턴의 Regex mutant는 생기지만, 옛 패턴으로 돌아가도 테스트가 실패하는지는 묻지 않는다.
+
+**`Revert`.** 토큰 diff가 옛 리터럴 토큰 하나를 같은 자리의 새 리터럴 토큰 하나로 바꿨으면(그 사이에 실행되는 다른 토큰을 넣거나 지우지 않았으면) 옛 텍스트를 되돌리는 mutant를 만든다. 설명은 `` `500` → `1000` (before this PR) ``이다. 살아남으면 새 값을 확인하는 테스트가 없다는 뜻이다.
+- 리터럴 토큰은 수(bigint 포함), 문자열, 정규식, `true`·`false`, 템플릿 조각이다. 종류가 달라도 된다(`'_'`→`/_/g`). 템플릿 조각은 끝이 같은 조각끼리만 짝짓는다(`` `a${ ``와 `` `b${ ``). 옛 텍스트는 base의 blob에서 읽으므로 따옴표도 옛 그대로다.
+- 지점은 리터럴 노드이고, 템플릿 조각이면 템플릿 리터럴 전체에서 그 조각만 바꾼다. 앵커는 리터럴(조각)의 시작이다.
+- 값이 아닌 리터럴에는 만들지 않는다: 속성 이름(`{ 1: a }`, 계산하는 `[2]`는 값), import·export의 경로, JSX 속성, 문 하나인 리터럴(`'use strict'`), tagged template의 조각(tag가 문자열 배열을 받으므로 괄호로 감쌀 수 없다). 모듈 최상위 코드는 다른 연산자처럼 대상이 아니다.
+- 같은 지점의 다른 mutant와 대체 텍스트가 같으면 만들지 않는다. 그래서 `true`→`false`는 BooleanLiteral이, flag 하나를 더한 정규식(`/a/`→`/a/g`)은 Regex의 flag 제거가 맡는다. 같은 지점에서 Revert를 맨 나중에 만들어서, 이전부터 있던 mutant의 이름이 그대로다.
+- 값이 같은 리터럴로 바꾼 것(`0x10`→`16`, `1`→`1e0`)의 Revert는 TCE가 버린다.
+- 프로파일로 예측하지 않는다. 실행해서 판정한다.
+
+**문자열.** 에러 메시지, 로그 인자, 사용자에게 보이는 글은 테스트 없이 자주 바뀐다. 그래서 문자열을 넣기 전에 따로 쟀다.
+- upstream PR 13개와 사례 PR 28개에는 문자열의 Revert가 하나도 없었다. 생긴 Revert는 4개로, 수 2개(사례 #10)와 정규식 2개(사례 #12, PR 2399의 `'_'`→`/_/g`)다.
+- 그래서 두 저장소의 최근 커밋 300개씩에서 `src`의 리터럴을 하나만 바꾼 곳을 모두 찾았다. 문자열(템플릿 조각 포함)은 39개였다. 30개는 모듈 최상위의 import 경로라 대상이 아니다. 3개는 i18next의 로그 메시지(후원 안내 문구)라 로그 필터가 이미 거른다. 남은 6개는 모두 코드가 쓰는 문자열이었다. es-toolkit `words`의 정규식을 만드는 템플릿 조각 3개, `isDeepKey`의 `'['`→`'.'`, `deburr`의 `'\ufe23'`→`'\ufe2f'`, i18next `Interpolator`의 nesting 정규식을 만드는 템플릿 조각이다. 그 커밋에서 하나씩 적용하고 `vitest related`로 돌리니 6개 모두 잡혔다. i18next의 것은 옛 정규식의 ReDoS로 테스트가 끝나지 않았다(nyorori에서는 Timeout). 잡음은 없었다.
+- `throw`나 `new …Error(…)` 안의 메시지는 600개 커밋에 하나도 없었다. 그래도 로그와 같은 이유로 뺀다. 메시지는 사람이 읽는 글이고, 그 문구를 확인하지 않는 테스트(`toThrow()`)가 흔하다. es-toolkit처럼 메시지를 정확히 확인하는 저장소에서는 그만큼의 검출을 잃는다.
+  - 빼는 것은 던지는 값, 이름이 `Error`로 끝나는 생성자나 함수(`TypeError`, `createError`, `errors.NotFoundError`)의 인자, 그리고 그 안에서 `+`, `&&`·`||`·`??`의 피연산자와 `?:`의 갈래다. `` throw new Error(`bad ${s}: ` + (a ? 'one' : 'two')) ``의 문자열과 조각이 모두 빠진다.
+  - JSX의 글(텍스트)은 리터럴 토큰이 아니고, JSX 속성 문자열은 값이 아니라서 대상이 아니다.
+- 문자열을 아예 빼면 위의 6개도 빠진다. 모두 테스트가 잡는 진짜 동작이다. 그래서 메시지와 로그만 뺐다.
+
+**결과.**
+- 사례 #10: Revert `500` → `1000` 2개(`Interpolator.js`, `defaults.js`)가 살아남는다. 2K로 통과하던 것이 2K 2S로 실패한다. 새 기본값을 확인하는 테스트가 없는 실제 공백이다.
+- 사례 #12: Revert `` `/^['"]+|['"]+$/g` → `/^'+|'+$/g` ``가 살아남는다(4K 2S에서 4K 3S). PR이 더한 테스트는 결과가 문자열인지만 확인해서, 큰따옴표를 벗기는지 아무도 보지 않는다. 실제 공백이다.
+- upstream PR 2399(i18next, `code?.replace('_', '-')`→`code?.replace(/_/g, '-')`): `/_/g` → `'_'`를 테스트가 잡는다(4K에서 5K). 다른 mutant의 판정은 그대로다. upstream PR 13개 중 Revert가 생긴 것은 이것뿐이다.
+- 커밋 300개씩에서 생긴 Revert는 11개였다(수 4, 정규식 1, 문자열 2, 템플릿 조각 4). 모두 잡혔다(Killed 10, ReDoS로 끝나지 않은 것 1). 테스트와 함께 병합된 커밋이라 공백의 증거는 아니지만, Revert가 잡음을 만들지 않는다는 증거다.
 
 ## 구현 구조
 
@@ -626,12 +672,19 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
     - receiver의 마지막 이름이 `metrics`, `statsd`, `telemetry`, `tracer`(앞에 `_`가 붙어도 된다)이거나 `Metrics`, `Telemetry`, `Tracer`로 끝나고, 메서드가 `increment`, `decrement`, `gauge`, `histogram`, `timing`, `distribution`, `record`, `addEvent`, `setAttribute`, `setAttributes`, `setStatus`, `recordException`인 것이다.
     - 값을 쓰는 호출(`return metrics.increment(x)`)은 변형한다. 그 값은 코드가 쓰는 것이다.
     - 근거는 Google 논문이 "모니터링 시스템의 값 증가"를 바람직하지 않은 테스트 목표의 예로 든 것뿐이다(TSE §3.2.3). 트레이싱(`tracer`, `recordException` 등)과 메서드 이름 목록은 논문에 없고 우리가 정했다. es-toolkit과 i18next에는 이런 호출이 없어서 여기서는 확인하지 못했다. 그래서 좁게 잡았다. `span`은 DOM 요소일 때도 많아서(`span.setAttribute('class', c)`) 넣지 않았다. `counter`, `stats`도 같은 이유로 뺐다.
+  - 로그만 하는 `if`는 조건까지 통째로 건너뛴다. `if (err) this.logger.warn(…)`의 `err`도 변형하지 않는다. 그 조건은 로그를 남길지만 정한다.
+    - Google의 정의를 따른다. 자식이 모두 arid인 복합 노드는 arid다. 그래서 두 갈래(`else`가 없으면 한 갈래)가 arid한 문만 담은 `if`를 건너뛴다. arid한 문은 로그 필터가 아무 mutant도 남기지 않는 문(위의 로그 호출 문과 메트릭 호출 문), 빈 블록과 빈 문, 그리고 arid한 `if`다. `else if`로 이어진 `if`도 그렇다.
+    - 문으로 쓴 같은 조건도 건너뛴다: `err && logger.warn(…)`, `c ? logger.warn(a) : logger.info(b)`.
+    - `this.logger?.warn(…)`을 담은 `if`는 건너뛰지 않는다. 그 `?.`는 위처럼 코드가 하는 일이다. `return`이나 다른 호출을 같이 하는 갈래가 있어도 건너뛰지 않는다(`if (a) { logger.warn(a); return }`).
+    - 조건의 부수 효과는 보지 않는다. `if ((m = re.exec(s)) === null) logger.warn(…)`도 건너뛰므로, 대입을 건너뛰는 `→ true`를 놓친다. es-toolkit과 i18next의 `src`에는 그런 조건이 없었다.
+    - `if`와 식 문만이다. 로그만 하는 함수의 FunctionBody는 그대로 만든다.
 - `!!x`에서는 바깥 `!`만 변형한다. 안쪽을 빼도 결과가 같은 `!x`이기 때문이다.
 - `x.length >= 0` 같은 항상 참인 조건은 `true`로 바꾸지 않는다.
 - 조건이 이미 `true`/`false` 리터럴이면 Condition mutant를 만들지 않는다. BooleanLiteral mutant와 겹치기 때문이다.
 - 같은 지점의 mutant끼리 대체 텍스트가 같으면 하나만 만든다. `if (check(true))`의 CallUnwrap `→ true`는 Condition `→ true`와 같다.
 - `CallUnwrap`은 첫 인자가 콜백인 함수 호출, 변환이 아닌 메서드 호출, 바로 읽고 버리는 사본(`xs.slice().map(f)`), `.call`/`.apply`/`.bind`, 다른 호출의 callee인 호출, 값을 버리는 호출 문, 둘레의 코드가 어차피 하는 변환(`if (Boolean(x))`, `` `${String(x)}` ``, `await Promise.resolve(x)`)은 만들지 않는다. `CallStatement`는 `super(…)`를 지우지 않는다("호출과 정규식" 참고).
 - `Regex`는 `^`·`$`가 없는 패턴의 `m`, `.`가 없는 패턴의 `s`를 빼지 않는다. 빼도 같은 정규식이다. 컴파일되지 않는 mutant도 만들지 않는다.
+- `Revert`는 에러 메시지(던지는 값과 `new …Error(…)`의 인자)의 문자열과 템플릿 조각에 만들지 않는다. 로그 인자처럼 사람이 읽는 글이다("바꾼 리터럴 되돌리기" 참고).
 - `x * 1`, `x / 1`, `x * 1n`, `x / 1n`은 `*`↔`/` 변형을 만들지 않는다.
   - bigint에서도 `x * 1n`과 `x / 1n`은 같은 값이다. `x`가 bigint가 아니면 둘 다 같은 메시지의 TypeError를 던진다(Symbol이면 `Cannot convert a Symbol value to a number`, 그 밖에는 `Cannot mix BigInt and other types, use explicit conversions`). 0n, 음수, 2^100 크기의 bigint, 수, `-0`, NaN, 문자열, null, undefined, boolean, 객체, bigint를 주는 `valueOf`, Symbol, `Object(3n)`의 21가지로 확인했다. `valueOf`도 양쪽에서 한 번씩 불린다.
   - 리터럴의 값으로 비교하므로 `0x1n`도 같다.
@@ -708,6 +761,10 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
   - `translator.translate.returnObject.test.js`: `vi.spyOn(logger, 'create')`로 넣은 `warn` spy가 불렸는지 확인한다. `Translator.js`의 206줄
 - 살아남는 25개는 CI를 실패시키는 잡음이고, 잡히는 7개는 잃는 검출이다. 살아남는 쪽이 많아서 로그 호출 전체를 거른다. `CallStatement`는 두고 인자 안쪽만 거르는 안도 봤다. 없애는 8개가 모두 살아남는 것이라 잃는 검출은 없지만, 살아남는 `CallStatement` 17개가 그대로 남는다.
 - upstream PR 13개의 계획은 그대로다. 로그 호출을 바꾼 PR이 없다.
+- 로그만 하는 `if` 규칙은 모든 줄을 바뀐 것으로 쳤을 때 i18next `src`에서 2572개 중 32개를 더 없앤다. 8곳(`BackendConnector.js` 224·225, `Interpolator.js` 172, `Translator.js` 205·286, `i18next.js` 174·206·208)의 조건에 있던 Condition 16개, Negation 7개, Logical 6개, Equality 1개, Regex 2개다. es-toolkit `src`에서는 0개다.
+  - 32개를 같은 방법으로 돌렸다. 10개가 살아남고 22개가 잡혔다. 잡은 테스트는 위의 세 파일이다. `Interpolator.js` 172의 8개는 모두 `security.test.js`가, `Translator.js` 205의 3개는 `translator.translate.returnObject.test.js`가, `Translator.js` 286, `i18next.js` 174·206, `BackendConnector.js` 224의 `→ true`는 `i18next.hasLoadedNamespace.test.js`가 잡았다. 살아남은 것은 `loaded namespace`와 `initialized` 로그를 지키는 225·208의 조건 전부, 206의 `→ false`와 `!this.initializedStoreOnce`, 224의 `→ false`다.
+  - 잡히는 쪽이 많아도 거르기로 했다. 경고를 테스트하는 라이브러리에서 경고를 지키는 조건의 검출을 잃는 것은 로그 호출을 거를 때 이미 받아들인 손실과 같은 종류다. 대신 로그만 더하는 PR이 경고 테스트 없이 실패하지 않는다. i18next 사례 PR(`nyorori/case-log-guard-if`, 경고하는 `if` 두 개를 더함)은 3K 1T 6S로 실패했고, 이제 mutant가 없어 통과한다.
+  - upstream PR 13개의 계획은 그대로다.
 
 **타이머는 거르지 않는다.** `setTimeout(f, ms)`, `setInterval(f, ms)`과 그 인자는 변형한다.
 
@@ -836,10 +893,15 @@ return age >= 18
 
 - **연산자를 반드시 지정한다.** 줄 전체를 억제하는 방식은 없다.
 - **이유를 반드시 쓴다.** 형식이 틀리거나 이유가 없거나, 알 수 없는 연산자를 쓰면 문제로 보고하고 exit 1로 끝낸다.
-- 억제된 mutant도 실행한다. 테스트가 이미 잡는 mutant를 억제한 주석은 "불필요한 억제"로 보고하고 실패시킨다.
+- 억제된 mutant도 실행한다. 살아남은 것(프로파일로 예측한 것 포함)만 Ignored가 되고, 잡힌 것은 Killed나 Timeout 그대로다.
+- 주석이 가리키는 mutant가 하나도 살아남지 않았으면 "불필요한 억제"로 보고하고 실패시킨다. 주석 하나에 한 번, 잡힌 mutant를 모두 적는다.
+  - 이전에는 잡힌 mutant가 하나만 있어도 불필요하다고 했다. 그러면 빠른 경로를 억제할 길이 없었다. es-toolkit `chunk`에 `if (arr.length === 0) { return []; }`를 더하면 아래 반복문도 `[]`를 돌려주므로 Condition `→ false`는 equivalent이고, `→ true`는 테스트가 잡는다. Condition을 억제하면 `→ true` 때문에 지우라고 하고, 지우면 살아남는 `→ false`가 돌아와 다시 실패했다. 이제는 `→ true`가 Killed, `→ false`가 Ignored로 통과한다.
+- 테스트가 실행하지 않는 코드에는 억제가 적용되지 않는다. 그 mutant는 NoCoverage로 남아 실패하고, 이유는 `no test runs this code, and a suppression does not apply to untested code`다. 어노테이션도 그렇게 말한다.
+  - 이전에는 Ignored가 되어, 테스트가 전혀 없는 새 함수도 억제 주석 하나로 그 부분이 통과했다. 억제의 이유는 변경이 왜 보이지 않는지를 말할 뿐, 테스트가 없는 것을 대신하지 않는다.
+  - 그 주석은 mutant를 가리키므로 "해당 mutant 없음"으로 보고하지 않는다. 테스트를 더한 뒤의 실행이 필요한지를 가린다.
 - 이 PR이 추가한 억제 주석이 아무 mutant에도 해당하지 않으면 실패시킨다. 그래야 낡은 주석이 쌓이지 않는다.
   - 주석은 토큰이 아니므로, 이 PR이 추가한 억제인지는 줄로 본다. 주석이 있는 줄을 바꿨으면(들여쓰기만 바꿔도) 새 억제로 표시한다.
-  - 대상 줄에서 공백이나 주석만 바꾼 경우에는 실패시키지 않는다. 블록의 들여쓰기를 바꾸면 억제 주석과 대상 줄이 모두 바뀐 줄이 되지만, 대상 줄에는 범위 안의 mutant가 없다. 이때 지우라고 하면 틀린 안내다.
+  - 대상 줄에서 공백이나 주석, 타입만 바꾼 경우에는 실패시키지 않는다. 블록의 들여쓰기를 바꾸면 억제 주석과 대상 줄이 모두 바뀐 줄이 되지만, 대상 줄에는 범위 안의 mutant가 없다. 이때 지우라고 하면 틀린 안내다.
   - 범위가 토큰 단위로 좁아져서, 이전에는 필요했던 억제에 해당하는 mutant가 없어질 수 있다. 이 PR이 추가한 억제라면 지우라고 알린다. es-toolkit PR 2047에서 `arr.length - 1`의 Arithmetic을 억제했다면 이제는 그 억제가 문제로 보고된다.
 
 ### L3. 이 PR이 새로 추가한 억제 → `warn`
@@ -919,6 +981,7 @@ return age >= 18
   - probe 함수 이름(`__nyorori_v`, `__nyorori_b0` 등)이 사용자 코드와 겹치지 않는다고 가정한다. `__nyorori_h`와 같다.
   - 호출 probe의 spread는 `Array.prototype[Symbol.iterator]`를 부른다. 이것을 바꾸는 코드는 기준 실행에서 그 호출을 더 보게 된다.
 - **토큰 단위 범위.** 토큰이 같으면 같은 코드로 본다("범위 규칙"의 남은 한계). 다시 쓴 코드에서 diff가 우연히 맞춘 식이나, 이름이 가리키는 변수만 바뀐 식은 범위 밖이 된다. 틀리는 방향은 mutant를 놓치는 쪽이다.
+  - 타입만 고친 것은 oxc-parser의 AST로 가린다. 실행되는 토큰을 타입으로 잘못 표시하면 그 변경의 mutant를 놓친다.
 - **문자열 `+`의 문법 규칙.** 타입 주석과 내장 객체를 믿는다(L1 참고). 주석과 다른 값이 들어오거나 내장 객체를 덮어쓴 코드에서는 숫자 `+`의 mutant를 놓친다.
 - **타입으로 불필요한 방어 코드.**
   - TypeScript 7.1이 본 타입을 믿는다. 타입 검사를 통과하면서 null을 넣는 길("남은 구멍")로 null이 오는데 테스트가 그 경우를 지나지 않으면, 필요한 `?.`가 "아마 불필요"로 목록에 오르고 CI는 통과한다. 원래라면 테스트가 없다고 실패했을 곳이다. 목록의 이유가 타입을 밝히므로 사람이 볼 수 있다.
@@ -934,10 +997,14 @@ return age >= 18
   - async 함수가 돌려주는 `Promise.resolve(x)`에도 만들지 않는다. `x`가 native promise가 아니면 `return x`와는 함수의 promise가 resolve되는 microtask 시점만 다르다. 그 순서에 기대는 테스트만 잡을 수 있으므로 받아들였다. `await Promise.resolve(x)`와 `await x`는 시점까지 같다.
   - 기본 import한 모듈의 함수(`path.dirname(f)`)에는 만들지 않으므로, 그런 함수를 더한 수정은 놓친다.
   - 정규식 mutant는 CLI를 돌리는 Node가 컴파일하는지로 거른다. 세션은 같은 Node로 뜨므로 테스트도 같은 엔진에서 돈다.
+- **`Revert`.**
+  - 리터럴 하나를 리터럴 하나로 바꾼 곳에만 만든다. 다른 토큰과 함께 바꾼 곳(`age > 17`→`age >= 18`)은 그 식의 다른 mutant가 맡는다.
+  - 에러 메시지는 이름(`…Error`)과 `throw`로만 알아본다. 다른 이름의 에러 팩토리(`fail('…')`)나 사용자에게 보이는 문구(`label: 'Save'`)의 Revert는 테스트가 문구를 확인하지 않으면 살아남아 억제 주석이 필요하다. 측정한 저장소에는 없었다.
+  - 문자열을 확인하는 테스트가 있는 에러 메시지의 변경은 놓친다.
 - **로그 필터.**
   - 이름으로 판단한다. 로거 이름에 로그 레벨 메서드가 있지만 로거가 아닌 객체의 호출은 변형하지 않아서, 그 mutant를 놓친다. 이름이 다른 로거(`out.warn(…)`, `debug('x')`나 `log('x')`처럼 함수로 부르는 로거, `logger.child({ id }).info(…)`)는 거르지 않아서, 그 mutant가 살아남으면 억제 주석이 필요하다.
   - 경고를 테스트하는 라이브러리에서는 그 검출을 잃는다. i18next에서는 로그 호출 24곳 중 7곳을 테스트가 확인했다("로그 필터의 측정" 참고). 경고 호출을 더하거나 지우는 PR은 그 경고를 테스트하지 않아도 통과한다.
-  - 로그만 하는 `if`의 조건(`if (err) this.logger.warn(…)`의 `err`)은 변형한다. Google은 자식이 모두 arid인 노드도 arid로 보지만, 여기서는 하지 않았다. i18next `src`에는 그런 `if`가 8곳, 그 조건의 mutant가 30개 있다. 그중 몇 곳은 위의 테스트가 확인하는 경고를 지킨다.
+  - 로그만 하는 `if`는 조건까지 변형하지 않으므로, 경고를 지키는 조건의 검출도 잃는다. i18next `src`에서는 그 조건의 mutant 32개 중 22개를 테스트가 잡았다("로그 필터의 측정" 참고). 조건에 부수 효과가 있어도 건너뛴다.
   - 메트릭 이름은 Google 논문의 예(모니터링 값의 증가)만 근거로 하고, 트레이싱과 메서드 이름 목록은 우리가 정했다. 측정한 저장소에 그런 호출이 없었다.
 - **브라우저 모드.** 지원하지 않는다. 그 project의 테스트가 바뀐 코드를 실행하면 exit 2로 멈춘다.
 - **실행 시간.**

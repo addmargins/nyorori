@@ -13,6 +13,7 @@ export const OPERATORS = [
     'CallUnwrap',
     'CallStatement',
     'Regex',
+    'Revert',
 ];
 export function isOperator(name) {
     return OPERATORS.includes(name);

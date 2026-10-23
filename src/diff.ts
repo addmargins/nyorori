@@ -1,7 +1,22 @@
+import { parseSync, visitorKeys, type Node } from 'oxc-parser'
+
 /** Part of a file's text: offsets [start, end), in UTF-16 code units like oxc's spans. */
 export interface Range {
   start: number
   end: number
+  /**
+   * On the place of a deletion: an operand went with its operator, and the
+   * expression that ends (`'end'`) or starts (`'start'`) here lost it.
+   * `size <= 0 || !Number.isInteger(size)` → `size <= 0` cuts at the end
+   * of `size <= 0`, → `!Number.isInteger(size)` at the start of what is left.
+   */
+  cut?: 'start' | 'end'
+  /**
+   * On a changed token that took the place of one literal of the base: that
+   * literal's text. `maxReplaces || 1000` → `maxReplaces || 500` gives `1000`
+   * on `500` (see the Revert operator).
+   */
+  before?: string
 }
 
 /** What the branch changed in one file. */
@@ -32,22 +47,34 @@ export interface Hunk {
  * inserted or replaced token is changed. Tokens deleted with nothing put in
  * their place leave an empty range between the tokens around them: an
  * expression around the deletion changed (`a && b && c` → `a && c`), one next
- * to it did not.
+ * to it did not, unless the deletion took an operand of its own (see
+ * Range.cut).
  *
  * Without `before` (an added file, or an old version git cannot show), every
  * token of the hunks is new.
+ *
+ * In a TypeScript `file`, a token that only TypeScript reads (see typeSpans)
+ * is not a change when it is inserted or deleted, so an edit of types alone
+ * changes nothing: `(a: any)` → `(a: unknown)`, `a < b` → `(a as number) <
+ * (b as number)`. Such tokens still line the two versions up as before.
  */
-export function changedRanges(before: string | undefined, after: string, hunks: readonly Hunk[]): Range[] {
-  const old = before === undefined ? undefined : { tokens: tokenize(before), lines: lineStarts(before), length: before.length }
-  const tokens = tokenize(after)
+export function changedRanges(before: string | undefined, after: string, hunks: readonly Hunk[], file?: string): Range[] {
+  const read = (text: string) => {
+    const tokens = tokenize(text)
+    if (file !== undefined && TYPESCRIPT.test(file)) markTypes(tokens, typeSpans(file, text))
+    return tokens
+  }
+  const old = before === undefined ? undefined : { tokens: read(before), lines: lineStarts(before), length: before.length }
+  const tokens = read(after)
   const lines = lineStarts(after)
   const ranges: Range[] = []
   for (const hunk of hunks) {
     const region = lineRegion(lines, after.length, hunk.newStart, hunk.newCount)
     // Unknown old lines match nothing.
-    const removed = old ? overlapping(old.tokens, lineRegion(old.lines, old.length, hunk.oldStart, hunk.oldCount))
-      : hunk.oldCount > 0 ? [{ start: 0, end: 0, key: '' }] : []
-    diffTokens(removed, overlapping(tokens, region), region.start, ranges)
+    const removed = old ? old.tokens.slice(...overlapping(old.tokens, lineRegion(old.lines, old.length, hunk.oldStart, hunk.oldCount)))
+      : hunk.oldCount > 0 ? [{ start: 0, end: 0, key: '', kind: 'punct' as const }] : []
+    const [from, to] = overlapping(tokens, region)
+    diffTokens(removed, tokens.slice(from, to), { at: region.start, previous: tokens[from - 1]?.end, next: tokens[to]?.start }, ranges, before)
   }
   return normalize(ranges)
 }
@@ -55,7 +82,8 @@ export function changedRanges(before: string | undefined, after: string, hunks: 
 /**
  * The changes in [start, end): ranges that overlap it, and places of a
  * deletion strictly inside it. A deletion just before or after an expression
- * did not change it.
+ * did not change it; where it cut the expression short (see Range.cut), the
+ * mutation planner looks for the expression itself.
  */
 export function changesIn(ranges: readonly Range[], start: number, end: number): readonly Range[] {
   // Disjoint and sorted, so the ends are sorted too.
@@ -90,13 +118,13 @@ function lineRegion(starts: number[], length: number, line: number, count: numbe
   return { start: offset(line - 1), end: offset(line - 1 + count) }
 }
 
-/** The tokens with a character in `region`; for an empty region, those that span it. */
-function overlapping(tokens: Token[], region: Range): Token[] {
+/** The indices [from, to) of the tokens with a character in `region`; for an empty region, of those that span it. */
+function overlapping(tokens: Token[], region: Range): [number, number] {
   const lo = firstEndingAfter(tokens, region.start)
   let end = lo
   // For an empty region, at most a token around it, like a template literal the hunk adds a line to.
   while (end < tokens.length && tokens[end]!.start < region.end) end++
-  return tokens.slice(lo, end)
+  return [lo, end]
 }
 
 /** Above this many edits in one hunk, every new token of it counts as changed. */
@@ -106,15 +134,22 @@ const EQUAL = 0
 const DELETE = 1
 const INSERT = 2
 
+// Binary and logical operators. Deleted at the edge of a run, they took an operand with them (see Range.cut).
+const OPERATORS = new Set(['||', '&&', '??', '|', '^', '&', '==', '!=', '===', '!==', '<', '>', '<=', '>=', '<<', '>>', '>>>', '+', '-', '*', '/', '%', '**', 'in', 'instanceof'])
+
 /**
  * Adds to `out` the changes from `before` to `after`, two token runs of one
- * hunk. `at` stands for where tokens were deleted when `after` has none.
+ * hunk. `at` stands for where tokens were deleted when `after` has none;
+ * `previous` and `next` are where the tokens just outside the run end and
+ * start. `base` is the text of `before`'s tokens, if git could show it.
  */
-function diffTokens(before: Token[], after: Token[], at: number, out: Range[]): void {
+function diffTokens(before: Token[], after: Token[], around: { at: number; previous?: number; next?: number }, out: Range[], base?: string): void {
   const ids = new Map<string, number>()
   const id = (token: Token) => {
-    let value = ids.get(token.key)
-    if (value === undefined) ids.set(token.key, (value = ids.size))
+    // A name that only TypeScript reads is not the one that runs: `x: T` → `declare x: T` drops the field `x`.
+    const key = token.type ? `type ${token.key}` : token.key
+    let value = ids.get(key)
+    if (value === undefined) ids.set(key, (value = ids.size))
     return value
   }
   const a = before.map(id)
@@ -133,35 +168,75 @@ function diffTokens(before: Token[], after: Token[], at: number, out: Range[]): 
     ?? [...Array<number>(endA - lo).fill(DELETE), ...Array<number>(endB - lo).fill(INSERT)]
 
   const changed = new Uint8Array(after.length)
-  const deletedAt = (j: number) => {
-    const place = j < after.length ? after[j]!.start : after.length > 0 ? after.at(-1)!.end : at
-    out.push({ start: place, end: place })
+  // `first` and `last`: the first and last of the deleted tokens that run.
+  const deletedAt = (j: number, first: Token, last: Token) => {
+    // `a > 0 || b` → `a > 0`: the operand went with the operator after `a > 0`; `a || b > 0` → `b > 0`: before `b > 0`.
+    const end = j > 0 ? after[j - 1]!.end : around.previous
+    const start = j < after.length ? after[j]!.start : around.next
+    if (OPERATORS.has(first.key) && end !== undefined) {
+      out.push({ start: end, end, cut: 'end' })
+    } else if (OPERATORS.has(last.key) && start !== undefined) {
+      out.push({ start, end: start, cut: 'start' })
+    } else {
+      const place = j < after.length ? after[j]!.start : after.length > 0 ? after.at(-1)!.end : around.at
+      out.push({ start: place, end: place })
+    }
   }
+  // The text of the base literal that a lone literal put in its place replaced, by its index in `after`.
+  const replaced = new Map<number, string>()
   // Between two kept tokens, deleted tokens matter only if nothing was inserted:
-  // any expression around the place also holds the inserted tokens.
+  // any expression around the place also holds the inserted tokens. Tokens
+  // that only TypeScript reads count as neither.
+  let i = lo
   let j = lo
-  let deleted = false
-  let inserted = false
+  // The tokens that run, deleted and inserted (by index), since the last kept one.
+  let deleted: Token[] = []
+  let inserted: number[] = []
+  const kept = () => {
+    if (deleted.length > 0 && inserted.length === 0) deletedAt(j, deleted[0]!, deleted.at(-1)!)
+    if (base !== undefined && deleted.length === 1 && inserted.length === 1) {
+      const was = deleted[0]!
+      if (sameKindOfLiteral(was, after[inserted[0]!]!)) replaced.set(inserted[0]!, base.slice(was.start, was.end))
+    }
+    deleted = []
+    inserted = []
+  }
   for (const op of ops) {
     if (op === INSERT) {
-      changed[j++] = 1
-      inserted = true
+      if (!after[j]!.type) {
+        changed[j] = 1
+        inserted.push(j)
+      }
+      j++
     } else if (op === DELETE) {
-      deleted = true
+      if (!before[i]!.type) deleted.push(before[i]!)
+      i++
     } else {
-      if (deleted && !inserted) deletedAt(j)
-      deleted = inserted = false
+      kept()
+      i++
       j++
     }
   }
-  if (deleted && !inserted) deletedAt(j)
+  kept()
   for (let t = 0; t < after.length; t++) {
     if (!changed[t]) continue
     let last = t
     while (changed[last + 1]) last++
-    out.push({ start: after[t]!.start, end: after[last]!.end })
+    const before = replaced.get(t)
+    out.push(last === t && before !== undefined ? { start: after[t]!.start, end: after[t]!.end, before } : { start: after[t]!.start, end: after[last]!.end })
     t = last
   }
+}
+
+/**
+ * Whether `was` and `now` are literals that can stand for each other: a
+ * number, string, regex, `true` or `false` for any of them, and a template
+ * chunk for a chunk with the same ends (`` `a${ `` for `` `b${ ``).
+ */
+function sameKindOfLiteral(was: Token, now: Token): boolean {
+  const literal = (token: Token) => token.kind === 'number' || token.kind === 'string' || token.kind === 'regex' || token.key === 'true' || token.key === 'false'
+  if (was.kind !== 'template' || now.kind !== 'template') return literal(was) && literal(now)
+  return was.key[0] === now.key[0] && was.key.endsWith('${') === now.key.endsWith('${')
 }
 
 /**
@@ -225,12 +300,196 @@ function normalize(ranges: Range[]): Range[] {
       result.push({ ...range })
     } else if (last.start === last.end) {
       // A deletion right before a changed token: whatever holds the place holds the token too.
-      if (range.end > last.end) last.end = range.end
+      if (range.end > last.end) {
+        last.end = range.end
+        delete last.cut
+        if (range.before !== undefined) last.before = range.before
+      } else {
+        last.cut ??= range.cut
+      }
     } else if (range.end > last.end) {
       last.end = range.end
+      delete last.before
     }
   }
   return result
+}
+
+const TYPESCRIPT = /\.[cm]?tsx?$/
+
+// Child keys that hold only types: `: T`, `<T>` and the types after `implements`.
+const TYPE_KEYS = new Set(['typeAnnotation', 'returnType', 'typeParameters', 'typeArguments', 'superTypeArguments', 'implements'])
+
+// Declarations that compile to nothing, whatever is in them.
+const TYPE_DECLARATIONS = new Set<string>([
+  'TSInterfaceDeclaration',
+  'TSTypeAliasDeclaration',
+  'TSDeclareFunction',
+  'TSIndexSignature',
+  'TSAbstractMethodDefinition',
+  'TSAbstractPropertyDefinition',
+  'TSAbstractAccessorProperty',
+])
+
+const CASTS = new Set<string>(['TSAsExpression', 'TSSatisfiesExpression', 'TSNonNullExpression', 'TSTypeAssertion'])
+
+// Modifiers of a class member that TypeScript checks and erases. Not of a parameter property, which they make assign a field.
+const MODIFIERS = /\b(?:private|protected|public|readonly|override)\b/g
+
+/** Marks the tokens that lie inside one of `spans`, which are sorted and disjoint. */
+function markTypes(tokens: Token[], spans: Range[]): void {
+  let i = 0
+  for (const token of tokens) {
+    while (i < spans.length && spans[i]!.end <= token.start) i++
+    const span = spans[i]
+    if (span && span.start <= token.start && token.end <= span.end) token.type = true
+  }
+}
+
+/**
+ * The parts of a TypeScript file that compile to nothing, sorted and merged:
+ * type annotations and return types, type parameters and arguments, `as T`,
+ * `satisfies T` and a non-null `!`, `<T>x`, interfaces, type aliases,
+ * `declare`d and abstract members and declarations, overload and index
+ * signatures, `implements …`, a `this` parameter, the `?` or `!` after a
+ * declared name, a class member's `private`, `readonly` or `override`, and
+ * parentheses that only a cast needs: `(a as number) < b` runs as `a < b`.
+ *
+ * Parameter properties (`constructor(private x)`) assign a field, enums and
+ * namespaces build objects, decorators run, and a field becomes `declare` or
+ * `abstract` only by losing the field it defines: none of that is left out.
+ * A file that does not parse has none, so all of it counts.
+ */
+function typeSpans(file: string, code: string): Range[] {
+  const parsed = parseSync(file, code)
+  if (parsed.errors.length > 0) return []
+  const spans: Range[] = []
+  const add = (start: number, end: number) => {
+    if (start < end) spans.push({ start, end })
+  }
+  // The `?` or `!` in [from, to): `a?: T`, `x!: T`, `m?() {}`.
+  const mark = (from: number, to: number, char: string) => {
+    const at = code.indexOf(char, from)
+    if (at >= 0 && at < to) add(at, at + 1)
+  }
+
+  // `private`, `readonly` and `override` before a class member's name.
+  const modifiers = (member: { start: number; decorators: Array<{ end: number }>; key: { start: number } }) => {
+    const from = member.decorators.at(-1)?.end ?? member.start
+    for (const match of code.slice(from, member.key.start).matchAll(MODIFIERS)) add(from + match.index, from + match.index + match[0].length)
+  }
+
+  // `newCallee`: what `new` calls, where `new (f() as F)()` is not `new f()()`.
+  const visit = (node: Node, newCallee: boolean): void => {
+    if (TYPE_DECLARATIONS.has(node.type) || ('declare' in node && node.declare === true)) return add(node.start, node.end)
+    switch (node.type) {
+      case 'TSAsExpression':
+      case 'TSSatisfiesExpression':
+      case 'TSNonNullExpression':
+        add(node.expression.end, node.end)
+        break
+      case 'TSTypeAssertion':
+        add(node.start, node.expression.start)
+        break
+      case 'ParenthesizedExpression':
+        if (CASTS.has(node.expression.type) && needsNoParens(uncast(node.expression), newCallee)) {
+          add(node.start, node.start + 1)
+          add(node.end - 1, node.end)
+        }
+        break
+      case 'MethodDefinition':
+        // An overload signature in a class.
+        if (node.value.type === 'TSEmptyBodyFunctionExpression') return add(node.start, node.end)
+        modifiers(node)
+        if (node.optional) mark(node.key.end, node.value.start, '?')
+        break
+      case 'PropertyDefinition':
+      case 'AccessorProperty': {
+        modifiers(node)
+        const next = node.typeAnnotation?.start ?? node.value?.start ?? node.end
+        if (node.optional) mark(node.key.end, next, '?')
+        if (node.definite) mark(node.key.end, next, '!')
+        break
+      }
+      case 'VariableDeclarator':
+        if (node.definite && node.id.type === 'Identifier') mark(node.id.start + node.id.name.length, node.id.typeAnnotation?.start ?? node.id.end, '!')
+        break
+      case 'Identifier': {
+        // oxc's types say no identifier is optional, but a parameter's is: `a?: T`.
+        const optional: unknown = Reflect.get(node, 'optional')
+        if (optional === true) mark(node.start + node.name.length, node.typeAnnotation?.start ?? node.end, '?')
+        break
+      }
+      case 'ClassDeclaration':
+      case 'ClassExpression': {
+        // The keyword is the last `implements` before the first type (one in a comment after it only leaves it counted).
+        const types = node.implements ?? []
+        const at = types.length > 0 ? code.lastIndexOf('implements', types[0]!.start - 1) : -1
+        if (at >= 0) add(at, types.at(-1)!.end)
+        break
+      }
+      case 'FunctionDeclaration':
+      case 'FunctionExpression': {
+        // `function f(this: Window, a)`: the parameter and its comma.
+        const [first, second] = node.params
+        if (first?.type === 'Identifier' && first.name === 'this') add(first.start, second?.start ?? first.end)
+        break
+      }
+    }
+    for (const key of visitorKeys[node.type] ?? []) {
+      const value: unknown = Reflect.get(node, key)
+      for (const child of Array.isArray(value) ? value : [value]) {
+        if (!isNode(child)) continue
+        if (TYPE_KEYS.has(key)) add(child.start, child.end)
+        else visit(child, passesNewCallee(node, key) && (newCallee || node.type === 'NewExpression'))
+      }
+    }
+  }
+  visit(parsed.program, false)
+  return normalize(spans)
+}
+
+// Where the callee of `new` reaches: `new (a.b as any)()`, `new (f() as F).x()`.
+function passesNewCallee(node: Node, key: string): boolean {
+  if (node.type === 'NewExpression') return key === 'callee'
+  return (node.type === 'MemberExpression' && key === 'object') || node.type === 'ParenthesizedExpression' || CASTS.has(node.type)
+}
+
+function uncast(node: Node): Node {
+  while (node.type === 'TSAsExpression' || node.type === 'TSSatisfiesExpression' || node.type === 'TSNonNullExpression' || node.type === 'TSTypeAssertion') {
+    node = node.expression
+  }
+  return node
+}
+
+/**
+ * Whether parentheses around `node` change nothing once its casts are gone:
+ * `(a as T).b` is `(a).b`, which is `a.b`. Not around an operator, an
+ * optional chain (`(a?.b as T).c` throws where `a?.b.c` does not), a number
+ * (`(1 as number).toFixed()`), a call that `new` calls, or anything that a
+ * statement or an arrow body would read differently (`{`, `function`).
+ */
+function needsNoParens(node: Node, newCallee: boolean): boolean {
+  switch (node.type) {
+    case 'Identifier':
+    case 'ThisExpression':
+    case 'MemberExpression':
+    case 'ParenthesizedExpression':
+    case 'ArrayExpression':
+    case 'TemplateLiteral':
+    case 'TaggedTemplateExpression':
+      return true
+    case 'Literal':
+      return typeof node.value !== 'number' && typeof node.value !== 'bigint'
+    case 'CallExpression':
+      return !newCallee
+    default:
+      return false
+  }
+}
+
+function isNode(value: unknown): value is Node {
+  return typeof value === 'object' && value !== null && 'type' in value && typeof value.type === 'string'
 }
 
 interface Token {
@@ -238,6 +497,9 @@ interface Token {
   end: number
   /** What is compared: the text, less what cannot change behaviour, plus a line break where it can. */
   key: string
+  kind: Kind
+  /** Only TypeScript reads it (see typeSpans): inserting or deleting it changes nothing that runs. */
+  type?: boolean
 }
 
 type Kind = 'word' | 'number' | 'string' | 'template' | 'regex' | 'punct'
@@ -281,7 +543,7 @@ function tokenize(text: string): Token[] {
     const raw = text.slice(i, end)
     let key = kind === 'string' ? stringKey(raw) : raw
     if (newline && ((previous && RESTRICTED.has(previous.text)) || raw === '++' || raw === '--')) key += '\n'
-    tokens.push({ start: i, end, key })
+    tokens.push({ start: i, end, key, kind })
     previous = { kind, text: raw }
     newline = false
     i = end

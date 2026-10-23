@@ -5,7 +5,7 @@ import { generate } from '../src/mutate/generate.ts'
 import { instrument } from '../src/mutate/instrument.ts'
 import { SLOTS } from '../src/mutate/profile.ts'
 import { OPERATORS, type Operator } from '../src/types.ts'
-import { addedLines } from './changes.ts'
+import { addedLines, changes } from './changes.ts'
 
 const SOURCE = `function compare(a, b) { return a >= b && a !== 3 }
 function arith(x) { return -x * 2 + x % 3 - (x / 4) }
@@ -34,8 +34,8 @@ describe('instrument', () => {
   const instrumented = instrument('file.js', SOURCE, sites).code
   const state = (active: number) => ({ active, limit: 0, hits: null, count: 0, exceeded: false })
 
-  test('covers every operator but the call and regex ones, which have their own source below', () => {
-    const below = new Set<Operator>(['CallUnwrap', 'CallStatement', 'Regex'])
+  test('covers every operator but the call, regex and revert ones, which have their own sources below', () => {
+    const below = new Set<Operator>(['CallUnwrap', 'CallStatement', 'Regex', 'Revert'])
     expect(new Set(mutants.map((m) => m.operator))).toEqual(new Set(OPERATORS.filter((operator) => !below.has(operator))))
   })
 
@@ -354,6 +354,45 @@ async function main() {
         expect(await run(profiledCode, planned.mutant.id)).toBe(expected)
       },
     )
+  })
+})
+
+describe('reverted literals', () => {
+  // No semicolons, and the regex opens a statement after a block.
+  const before = `function limits(o, s) {
+  const out = []
+  out.push(o.max || 1000, \`\${2n ** 3n}\`, s.split(/,/).length, \`n=\${o.n}!\`)
+  if (o.n) { out.push(o.n) }
+  /^x/.test(s) && out.push('x')
+  out.push(o.n > 10 ? 'big' : 'small')
+  return out
+}
+function main() {
+  return JSON.stringify([limits({ max: 0, n: 12 }, 'x,y;z'), limits({ max: 3 }, 'y')])
+}`
+  const after = before.replace('1000', '500').replace('3n', '4n').replace('/,/', '/[,;]/').replace('!`', '?`').replace('/^x/', '/^y/')
+    .replace('10 ?', '20 ?').replace("'big'", "'large'")
+  const { sites, mutants } = generate('file.js', after, changes(before, after, 'file.js'), 1)
+  const plain = instrument('file.js', after, sites).code
+  const state = (active: number) => ({ active, limit: 0, hits: null, count: 0, exceeded: false })
+  const cases = sites.flatMap((site) => site.mutants.map((planned) => ({ site, planned, label: `${planned.mutant.id} ${planned.mutant.line}:${planned.mutant.column} ${planned.mutant.operator} ${planned.mutant.description}` })))
+
+  test('puts back each literal that took the place of another', () => {
+    expect(mutants.filter((m) => m.operator === 'Revert').map((m) => `${m.line}:${m.column} ${m.description}`)).toEqual([
+      '3:21 `500` → `1000` (before this PR)',
+      '3:35 `4n` → `3n` (before this PR)',
+      '3:49 `/[,;]/` → `/,/` (before this PR)',
+      // A template's chunk: the site is the whole template.
+      '3:73 `?` → `!` (before this PR)',
+      '5:3 `/^y/` → `/^x/` (before this PR)',
+      '6:18 `20` → `10` (before this PR)',
+      "6:23 `'large'` → `'big'` (before this PR)",
+    ])
+    expect(plain.split('\n').find((line) => line.includes('/^y/.test(s)'))).toMatch(/^  \{ \(__nyorori_h\(/)
+  })
+
+  test.each(cases)('mutant $label behaves like the source with only that change', ({ site, planned }) => {
+    expect(evaluate(plain, state(planned.mutant.id))).toBe(evaluate(applyMutant(after, site, planned), state(0)))
   })
 })
 

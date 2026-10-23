@@ -31,8 +31,8 @@ export function deletedFiles(cwd, base) {
     const names = git(root, ['diff', '--name-only', '-z', '--no-ext-diff', '--find-renames', '--diff-filter=D', base, '--']);
     return names.split('\0').filter(Boolean).map((file) => path.resolve(root, file));
 }
-/** What changed in a file whose new version is `code` (see changedRanges). */
-export function fileChanges(cwd, diff, code) {
+/** What changed in `file`, whose new version is `code` (see changedRanges). */
+export function fileChanges(cwd, file, diff, code) {
     let before;
     if (diff.blob) {
         try {
@@ -42,7 +42,7 @@ export function fileChanges(cwd, diff, code) {
             // Then every token of the changed lines counts as new, as when only lines were compared.
         }
     }
-    return { lines: diff.lines, ranges: changedRanges(before, code, diff.hunks) };
+    return { lines: diff.lines, ranges: changedRanges(before, code, diff.hunks, file) };
 }
 export function parseDiff(diff, root) {
     const result = new Map();
