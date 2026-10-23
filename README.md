@@ -69,7 +69,7 @@ npx nyorori run --base origin/main
 | Timeout | 무한 루프 등으로 시간 초과 | 통과 |
 | Survived | 관련 테스트가 모두 통과, 또는 [기준 실행의 프로파일](#기준-실행의-프로파일)로 보아 통과할 것이 확실함 | 실패 |
 | NoCoverage | 바뀐 코드를 실행하는 테스트가 없음 | 실패 |
-| Ignored | 억제 주석으로 제외 | 통과. 요약에 표시 |
+| Ignored | 살아남았지만 억제 주석으로 제외 | 통과. 요약에 표시 |
 
 `--json`의 Survived와 NoCoverage 결과에는 모두 `reason`이 있습니다. [기준 실행의 프로파일](#기준-실행의-프로파일)이 이유를 알면 그 이유이고, 아니면 텍스트 출력과 같은 `every test still passes with this change`나 `no test runs this code`입니다. `--dry-run`은 판정하지 않으므로 `reason`이 없습니다.
 
@@ -252,10 +252,12 @@ return age >= 18
 
 - 연산자와 이유를 반드시 적어야 합니다.
 - 주석은 diff에 그대로 보입니다. 이 PR이 추가한 억제는 경고 어노테이션과 job summary 맨 위에 따로 표시됩니다.
+- 억제해도 mutant는 실행합니다. 살아남은 것만 Ignored가 되고, 테스트가 잡은 것은 Killed로 남습니다. 그래서 `if (arr.length === 0) return []`처럼 `→ false`는 equivalent이고 `→ true`는 잡히는 빠른 경로도 `Condition`으로 억제할 수 있습니다.
+- 테스트가 실행하지 않는 코드에는 억제가 적용되지 않습니다. NoCoverage로 실패하고, 이유에 그렇게 표시됩니다.
 - 다음 경우에는 실패합니다.
   - 형식이 틀린 주석
   - 억제할 mutant가 없는 새 주석. 들여쓰기만 바꾼 줄처럼 대상 줄에서 공백이나 주석, 타입만 바꿨다면 실패하지 않습니다.
-  - 테스트가 이미 잡는 mutant를 억제하는 주석
+  - 가리키는 mutant를 테스트가 모두 잡는 주석
 
 ## 개발
 
