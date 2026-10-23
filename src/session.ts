@@ -11,7 +11,10 @@ import type { Reporter, TestModule, TestProject, TestSpecification, Vitest } fro
 import { SLOTS } from './mutate/profile.ts'
 import { PROVIDE, type ModuleResult, type Request, type Response, type SpecRef } from './protocol.ts'
 import type { FilePlan, NotJudgedReason } from './types.ts'
-import { checkVitestVersion, findVitest, ProjectError } from './vitest.ts'
+import { checkVitestVersion, findVitest, ProjectError, type VitestFeatures } from './vitest.ts'
+
+/** Vitest's default `benchmark` globs. Vitest 4 resolves the option only in benchmark mode. */
+const BENCHMARK = { include: ['**/*.{bench,benchmark}.?(c|m)[jt]s?(x)'], exclude: ['**/node_modules/**', '**/.git/**'] }
 
 /** Vitest's and Vite's config files: vitest.config.ts, vite.config.mjs, vitest.unit.config.ts, ... */
 const CONFIG = /^vite(?:st)?(?:\.[\w-]+)?\.config\./
@@ -23,7 +26,7 @@ interface VitePlugin {
 }
 
 // The probe buffer goes back as the records of the probes that ran, keyed by probe key.
-const SETUP = `import { inject, afterAll } from 'vitest'
+const setup = (features: VitestFeatures) => `import { inject, afterAll } from 'vitest'
 const s = (globalThis.__nyorori ??= {})
 s.active = inject(${JSON.stringify(PROVIDE.active)}) ?? 0
 s.limit = inject(${JSON.stringify(PROVIDE.limit)}) ?? 0
@@ -32,7 +35,7 @@ const probes = inject(${JSON.stringify(PROVIDE.probes)}) ?? 0
 s.prof = probes > 0 ? new Float64Array(probes * ${SLOTS}) : null
 s.count = 0
 s.exceeded = false
-afterAll(({}, suite) => {
+afterAll((${features.afterAllContext ? '{}, ' : ''}suite) => {
   if (s.hits !== null) suite.meta.nyororiHits = s.hits
   if (s.prof !== null) {
     const records = {}
@@ -74,7 +77,7 @@ function send(message: Response): void {
 async function init(root: string, candidates: string[], exclude: string[], dir: string): Promise<Omit<Extract<Response, { type: 'ready' }>, 'type'>> {
   const vitestDir = findVitest(root)
   const pkg = JSON.parse(readFileSync(path.join(vitestDir, 'package.json'), 'utf8'))
-  checkVitestVersion(pkg.version)
+  const features = checkVitestVersion(pkg.version)
   const entry = pkg.exports['./node'].default ?? pkg.exports['./node']
   const { createVitest } = (await import(pathToFileURL(path.join(vitestDir, entry)).href)) as typeof import('vitest/node')
 
@@ -83,7 +86,7 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
   // can stay in the CLI's temporary directory instead of the project's node_modules.
   setupDir = dir
   const setupFile = path.join(dir, 'setup.mjs')
-  writeFileSync(setupFile, SETUP)
+  writeFileSync(setupFile, setup(features))
 
   const plugin = {
     name: 'nyorori',
@@ -127,10 +130,11 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
       reporters: [collector],
       // The on-disk transform cache is keyed by source, not by plan: a later
       // run would reuse code instrumented with another run's mutant ids.
-      fsModuleCache: false,
+      ...(features.fsModuleCacheOption === 'top-level' ? { fsModuleCache: false } : ({ experimental: { fsModuleCache: false } } as object)),
       related: candidates,
       // As in CI: `false` means 'new' outside CI, which writes missing snapshots and passes.
-      update: 'none',
+      // Vitest 4.0 takes no 'none'; see below.
+      update: features.updateNone ? 'none' : false,
       // Hits and profiles are attributed per test file by the setup file, which
       // Vitest runs only once per worker under `isolate: false` here, so later
       // files would record nothing and their code would look untested.
@@ -144,6 +148,13 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
     },
     { plugins: [plugin] },
   )
+  if (!features.updateNone) {
+    // What Vitest 4.0's own enableSnapshotUpdate() does for 'all', for the
+    // workers (through every project's serialized config) and the CLI side.
+    const internal = vitest as unknown as { configOverride: Record<string, unknown>; snapshot: { options: { updateSnapshot: string } } }
+    internal.configOverride.snapshotOptions = { updateSnapshot: 'none', snapshotEnvironment: null }
+    internal.snapshot.options.updateSnapshot = 'none'
+  }
   // Code that never passes through the plugin looks untested, so these setups
   // would fail the PR with false NoCoverage. Their tests must not judge
   // anything; planning stops if they run the changed code (see unsupported).
@@ -156,13 +167,18 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
       // Vitest gives such a project its own Vite server and does not pass it the root's plugins.
       // With its own vitest.config or vite.config in its own directory, that config works as a root.
       const configFile = project.vite.config.configFile
+      const ownConfig = configFile && configFile !== vitest.vite.config.configFile
       const dir = path.relative(root, project.config.root)
-      const alone = configFile && configFile !== vitest.vite.config.configFile && dir !== '' && /^vite(?:st)?\.config\./.test(path.basename(configFile))
+      const alone = ownConfig && dir !== '' && /^vite(?:st)?\.config\./.test(path.basename(configFile))
+      // Vitest 4 starts a server for every project in test.projects, even one that sets only test options.
+      const inline4 = features.major === 4 && !ownConfig
       unsupported.set(project.name, [
-        `${name} has its own Vite config (Vite options such as plugins, resolve or alias, or its own config file), so nyorori cannot instrument the code its tests run.`,
+        inline4
+          ? `${name} gets its own Vite server, as every project in test.projects does in Vitest 4, so nyorori cannot instrument the code its tests run.`
+          : `${name} has its own Vite config (Vite options such as plugins, resolve or alias, or its own config file), so nyorori cannot instrument the code its tests run.`,
         alone
           ? `Run nyorori on that project alone with --root ${dir} (the Action's working-directory), where its config file is.`
-          : `${notYet} A project with its own directory and config file can be run alone with --root (the Action's working-directory).`,
+          : `${notYet} A project with its own directory and config file can be run alone with --root (the Action's working-directory).${inline4 ? ' Vitest 5 shares the root\'s server with projects that set only test options.' : ''}`,
       ])
     } else if (project.config.experimental?.viteModuleRunner === false) {
       unsupported.set(project.name, [`${name} sets experimental.viteModuleRunner: false, which skips the Vite transform nyorori instruments code with.`, notYet])
@@ -178,7 +194,8 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
   // matchesTestGlob() knows only `include`: type tests (`*.test-d.ts`) and
   // benchmarks are test files too, whether or not typecheck or benchmark is enabled.
   const otherTests = vitest.projects.flatMap((project) => {
-    const { typecheck, benchmark } = project.config
+    const { typecheck } = project.config
+    const benchmark = { ...BENCHMARK, ...project.config.benchmark }
     const dir = project.config.dir || project.config.root
     return [typecheck, benchmark].map((globs) => ({ dir, matches: globMatcher(globs.include, globs.exclude) }))
   })

@@ -95,13 +95,20 @@ describe('findVitest', () => {
 })
 
 describe('checkVitestVersion', () => {
-  test('accepts Vitest 5 and later', () => {
-    for (const version of ['5.0.0', '5.0.5', '5.1.0-beta.1', '6.0.0']) expect(() => checkVitestVersion(version)).not.toThrow()
+  test('accepts Vitest 4 and later, and tells what differs', () => {
+    expect(checkVitestVersion('4.0.0')).toEqual({ major: 4, fsModuleCacheOption: 'experimental', updateNone: false, afterAllContext: false })
+    expect(checkVitestVersion('4.0.18')).toEqual({ major: 4, fsModuleCacheOption: 'experimental', updateNone: false, afterAllContext: false })
+    for (const version of ['4.1.0', '4.1.12']) {
+      expect(checkVitestVersion(version)).toEqual({ major: 4, fsModuleCacheOption: 'experimental', updateNone: true, afterAllContext: true })
+    }
+    for (const version of ['5.0.0', '5.0.5', '5.1.0-beta.1', '6.0.0']) {
+      expect(checkVitestVersion(version)).toEqual({ major: Number(version[0]), fsModuleCacheOption: 'top-level', updateNone: true, afterAllContext: true })
+    }
   })
 
   test('rejects older or unreadable versions', () => {
-    for (const version of ['4.1.11', '4.0.14', '3.2.7', 'next']) {
-      expect(() => checkVitestVersion(version)).toThrow(`nyorori needs Vitest 5 or later; this project uses Vitest ${version}.`)
+    for (const version of ['3.2.7', '3.0.0', 'next']) {
+      expect(() => checkVitestVersion(version)).toThrow(`nyorori needs Vitest 4 or later; this project uses Vitest ${version}.`)
     }
   })
 })

@@ -9,15 +9,22 @@ import type { Report } from '../src/run.ts'
 
 const REPO = path.resolve(import.meta.dirname, '..')
 const CLI = path.join(REPO, 'src', 'cli.ts')
+/**
+ * The fixtures live under BASE/.tmp, so `vitest` resolves to BASE's node_modules:
+ * ours, or another install named by NYORORI_E2E_VITEST (CI runs them against Vitest 4).
+ */
+const BASE = process.env.NYORORI_E2E_VITEST ? path.resolve(process.env.NYORORI_E2E_VITEST) : REPO
+const VITEST: string = JSON.parse(readFileSync(module.createRequire(path.join(BASE, 'package.json')).resolve('vitest/package.json'), 'utf8')).version
+const VITEST_4 = VITEST.startsWith('4.')
 
 type Files = Record<string, string>
 
 /**
- * A git repository under .tmp (so `vitest` resolves to ours) with a base commit
- * and a head commit. A file that is null in `head` is deleted.
+ * A git repository under BASE/.tmp with a base commit and a head commit. A file
+ * that is null in `head` is deleted.
  */
 function project(name: string, base: Files, head: Record<string, string | null>): string {
-  const dir = path.join(REPO, '.tmp', `e2e-${name}`)
+  const dir = path.join(BASE, '.tmp', `e2e-${name}`)
   rmSync(dir, { recursive: true, force: true })
   const write = (files: Record<string, string | null>) => {
     for (const [file, content] of Object.entries(files)) {
@@ -680,6 +687,11 @@ registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescrip
       'test/sum.spec.ts': "import { expect, test } from 'vitest'\nimport { sum } from '../src/age'\ntest('sum', () => { expect(sum(4)).toBe(6) })\n",
     }, { 'src/age.ts': AGE_HEAD })
     const { status, report, output } = nyorori(dir)
+    if (VITEST_4) {
+      expect(status, output).toBe(2)
+      expect(output).toContain('nyorori: Vitest project "unit" gets its own Vite server, as every project in test.projects does in Vitest 4')
+      return
+    }
     expect(status, output).toBe(1)
     expect(statuses(report!)).toEqual([
       'src/age.ts:2 ComparisonBoundary `>=` → `>`: Survived',
@@ -697,7 +709,8 @@ registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescrip
   })
 
   describe('judges with the projects it can instrument when the others do not run the changed code', () => {
-    test('an inline project with its own Vite config', () => {
+    // In Vitest 4 the other inline project has a server of its own too (see above).
+    test.skipIf(VITEST_4)('an inline project with its own Vite config', () => {
       const dir = project('projects-inline', {
         'vitest.config.ts': `export default {
   test: {
@@ -729,14 +742,16 @@ registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescrip
       }, { 'packages/a/src/a.ts': changed, 'src/b.ts': changed })
       const refused = nyorori(dir)
       expect(refused.status, refused.output).toBe(2)
-      expect(refused.output).toContain(
-        "nyorori: Vitest project \"a\" has its own Vite config (Vite options such as plugins, resolve or alias, or its own config file), so nyorori cannot instrument the code its tests run. Its tests run the changed code: packages/a/test/a.test.ts. Run nyorori on that project alone with --root packages/a (the Action's working-directory), where its config file is.",
-      )
       expect(refused.leftovers).toEqual([])
-
-      const rest = nyorori(dir, '--exclude', 'packages/**')
-      expect(rest.status, rest.output).toBe(1)
-      expect(statuses(rest.report!)).toEqual(['src/b.ts:2 ComparisonBoundary `>=` → `>`: Survived'])
+      // In Vitest 4 the inline project "root" has a server of its own too, and comes first.
+      if (!VITEST_4) {
+        expect(refused.output).toContain(
+          "nyorori: Vitest project \"a\" has its own Vite config (Vite options such as plugins, resolve or alias, or its own config file), so nyorori cannot instrument the code its tests run. Its tests run the changed code: packages/a/test/a.test.ts. Run nyorori on that project alone with --root packages/a (the Action's working-directory), where its config file is.",
+        )
+        const rest = nyorori(dir, '--exclude', 'packages/**')
+        expect(rest.status, rest.output).toBe(1)
+        expect(statuses(rest.report!)).toEqual(['src/b.ts:2 ComparisonBoundary `>=` → `>`: Survived'])
+      }
 
       const alone = nyorori(dir, '--root', 'packages/a')
       expect(alone.status, alone.output).toBe(1)
@@ -760,7 +775,8 @@ registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescrip
 }
 `)
       expect(status, output).toBe(2)
-      expect(output).toContain('nyorori: Vitest project "aliased" has its own Vite config')
+      // In Vitest 4 the project "unit" has a server of its own too, and comes first.
+      expect(output).toContain(VITEST_4 ? 'nyorori: Vitest project "unit" gets its own Vite server' : 'nyorori: Vitest project "aliased" has its own Vite config')
       expect(output).toContain('Its tests run the changed code: test/age.test.ts. This setup is not supported yet.')
       expect(output).not.toContain('    at ')
       expect(leftovers).toEqual([])
@@ -968,7 +984,9 @@ export function total(item) {
     })
 
     test('a second run with different mutant ids does not reuse cached instrumentation', () => {
-      const dir = project('warm-cache', base, head)
+      // The on-disk module cache, as a project would turn it on; in Vitest 4 it is experimental and off by default.
+      const cache = VITEST_4 ? '{ experimental: { fsModuleCache: true } }' : '{ fsModuleCache: true }'
+      const dir = project('warm-cache', { ...base, 'vitest.config.ts': `export default { test: ${cache} }\n` }, head)
       // b.ts gets mutant id 1 here and id 2 below, with the same source.
       expect(statuses(nyorori(dir, '--exclude', 'src/a.ts').report!)).toEqual([expected[1]])
       const { report, output } = nyorori(dir)

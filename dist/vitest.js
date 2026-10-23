@@ -23,11 +23,16 @@ export function findVitest(root) {
         return vitest;
     throw new ProjectError(`Cannot find vitest from ${root}. Install vitest (or vite-plus) in the project first.`);
 }
-/** nyorori relies on Vitest 5's Node API; older versions fail in ways that look like test results. */
+/**
+ * nyorori relies on the Node API of Vitest 4 and 5; older versions fail in
+ * ways that look like test results.
+ */
 export function checkVitestVersion(version) {
-    const major = Number(/^(\d+)\./.exec(version)?.[1]);
-    if (!(major >= 5))
-        throw new ProjectError(`nyorori needs Vitest 5 or later; this project uses Vitest ${version}.`);
+    const [major = NaN, minor = NaN] = (/^(\d+)\.(\d+)\./.exec(version)?.slice(1) ?? []).map(Number);
+    if (!(major >= 4))
+        throw new ProjectError(`nyorori needs Vitest 4 or later; this project uses Vitest ${version}.`);
+    const since41 = major > 4 || minor >= 1;
+    return { major, fsModuleCacheOption: major >= 5 ? 'top-level' : 'experimental', updateNone: since41, afterAllContext: since41 };
 }
 function resolvePackage(require, name) {
     try {
