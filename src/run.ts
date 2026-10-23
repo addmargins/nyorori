@@ -44,6 +44,8 @@ export interface RunOptions {
   types: boolean
   /** Report mutants the baseline profile shows to survive without running them. Off, they run and wrong predictions are reported. */
   predict: boolean
+  /** Mutate an `if` that only logs, its test included, instead of leaving it out like the log calls in it (see GenerateOptions). */
+  logGuards: boolean
 }
 
 export interface Report {
@@ -68,6 +70,8 @@ export interface Report {
   /** Whether type information decided which `+` are string concatenation (and are not mutated), and which `?.` and `??` are unnecessary. */
   types: TypesUsage
   dryRun: boolean
+  /** Run with --log-guards: an `if` that only logs was mutated, its test included. */
+  logGuards: boolean
 }
 
 /** The run cannot produce a verdict: bad input, failing baseline, or a tool failure. */
@@ -110,6 +114,7 @@ export async function run(options: RunOptions): Promise<Report> {
     problems: [],
     types: options.types ? typesNotAsked() : { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
     dryRun: options.dryRun,
+    logGuards: options.logGuards,
   }
   const listNotJudged = () => {
     report.notJudged = notJudged.map(({ file, reason }) => ({ file: relative(file), reason })).sort((a, b) => a.file.localeCompare(b.file))
@@ -142,14 +147,14 @@ export async function run(options: RunOptions): Promise<Report> {
     let types: TypeOracle | undefined
     if (options.types) {
       // Generation is synchronous, so the type checker answers everything it will ask beforehand.
-      const answers = await askTypes(root, sources.map(({ file, code, changes }) => typeQuestions(file, code, changes)))
+      const answers = await askTypes(root, sources.map(({ file, code, changes }) => typeQuestions(file, code, changes, options)))
       report.types = answers.usage
       types = answers
     }
     for (const { file, code, changes } of sources) {
       let generated: ReturnType<typeof generate>
       try {
-        generated = generate(file, code, changes, mutants.length + 1, types)
+        generated = generate(file, code, changes, mutants.length + 1, types, options)
       } catch (error) {
         if (error instanceof ParseError) throw new RunError(`Cannot parse ${relative(file)}: ${error.message}`)
         throw error

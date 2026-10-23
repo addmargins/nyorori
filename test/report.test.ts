@@ -20,6 +20,7 @@ test('equivalent mutants are counted, but neither annotated nor failing', () => 
     problems: [],
     types: { backend: 'typescript', files: 1, untyped: [] },
     dryRun: false,
+    logGuards: false,
   }
   expect(formatText(report)).toBe('nyorori: 1 mutant in 1 changed file: 1 Killed\n  2 mutants dropped as equivalent (TCE)')
   expect(formatSummary(report)).toContain('(1 Killed).\n\n2 mutants dropped as equivalent (TCE).\n')
@@ -43,6 +44,7 @@ test('TypeScript files judged without types get one line of text, and nothing el
     problems: [],
     types: { backend: 'none', reason, untyped: [{ file: '/repo/src/a.ts', reason }, { file: '/repo/src/b.ts', reason }] },
     dryRun: false,
+    logGuards: false,
   }
   expect(formatText(report)).toBe(`nyorori: 1 mutant in 1 changed file: 1 Killed
   2 TypeScript files without type information for \`+\` (${reason}); string concatenation there may be mutated`)
@@ -76,6 +78,7 @@ test('a predicted survivor shows why no test can notice it; skipped string `+` i
     problems: [],
     types: { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
     dryRun: false,
+    logGuards: false,
   }
   expect(formatText(report)).toBe(`nyorori: 2 mutants in 1 changed file: 2 Survived
   Survived   src/a.js:2:14  OptionalChaining  \`?.\` → \`.\`  (${reason})
@@ -112,6 +115,7 @@ test('with --no-predict, a survivor the profile got wrong is reported, without f
     problems: [],
     types: { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
     dryRun: false,
+    logGuards: false,
   }
   expect(formatText(report)).toBe(`nyorori: 1 mutant in 1 changed file: 1 Killed
   MISPREDICT src/a.js:3:9  ComparisonBoundary  \`<\` → \`<=\`  (predicted to survive: no test has \`x === lo\`; Killed when run)`)
@@ -137,6 +141,7 @@ test('`?.` and `??` unnecessary by types are counted and listed in the summary, 
     problems: [],
     types: { backend: 'typescript', files: 1, untyped: [] },
     dryRun: false,
+    logGuards: false,
   }
   expect(formatText(report)).toBe(`nyorori: 1 mutant in 1 changed file: 1 Killed
   1 mutant unnecessary by types: \`?.\` or \`??\` where the type can't be null or undefined and no test made it so`)
@@ -180,6 +185,7 @@ describe('changed files that were not judged', () => {
     problems: [],
     types: { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
     dryRun: false,
+    logGuards: false,
   }
 
   test('a component file stops the run with exit code 2 and says how to leave it out', () => {

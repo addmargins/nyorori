@@ -26,6 +26,9 @@ inputs:
   predict:
     description: Set to 'false' to run mutants that the baseline profile predicts to survive, instead of reporting them without running.
     default: 'true'
+  log-guards:
+    description: Set to 'true' to also mutate an `if` that only logs, its test included, for a project whose tests check its warnings. The log calls themselves are never mutated.
+    default: 'false'
 
 runs:
   using: composite
@@ -45,6 +48,7 @@ runs:
         NYORORI_TIMEOUT: ${{ inputs.timeout }}
         NYORORI_TYPES: ${{ inputs.types }}
         NYORORI_PREDICT: ${{ inputs.predict }}
+        NYORORI_LOG_GUARDS: ${{ inputs.log-guards }}
       run: |
         args=(run --base "$NYORORI_BASE" --timeout "$NYORORI_TIMEOUT")
         while IFS= read -r glob; do
@@ -53,4 +57,5 @@ runs:
         if [ -n "$NYORORI_MAX_MUTANTS" ]; then args+=(--max-mutants "$NYORORI_MAX_MUTANTS"); fi
         if [ "$NYORORI_TYPES" = 'false' ]; then args+=(--no-types); fi
         if [ "$NYORORI_PREDICT" = 'false' ]; then args+=(--no-predict); fi
+        if [ "$NYORORI_LOG_GUARDS" = 'true' ]; then args+=(--log-guards); fi
         node "$GITHUB_ACTION_PATH/dist/cli.js" "${args[@]}"

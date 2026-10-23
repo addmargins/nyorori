@@ -58,9 +58,10 @@ const SUPPRESS_RE = /^nyorori-ignore-next-line\s+([A-Za-z]+(?:\s*,\s*[A-Za-z]+)*
  * plan). Mutants that minify to the original code are set aside in
  * `equivalent`. Ids start at `firstId`. Where the syntax cannot tell string
  * `+` from numeric `+`, `types` answers from the operand types (see typeQuestions).
+ * `options.logGuards` mutates an `if` that only logs too.
  */
-export function generate(file, code, changes, firstId, types = NO_TYPES) {
-    const { parsed, lines, sites } = plan(file, code, changes, types);
+export function generate(file, code, changes, firstId, types = NO_TYPES, options = {}) {
+    const { parsed, lines, sites } = plan(file, code, changes, types, options);
     const sorted = [...sites.values()].sort((a, b) => a.start - b.start || b.end - a.end);
     // Before ids are assigned, so each remaining site keeps a contiguous id range.
     const { sites: ordered, equivalent } = dropEquivalent(file, code, sorted);
@@ -87,7 +88,7 @@ export function generate(file, code, changes, firstId, types = NO_TYPES) {
  * before generation, which stays synchronous. A file that does not parse has
  * no questions; generate() reports it.
  */
-export function typeQuestions(file, code, changes) {
+export function typeQuestions(file, code, changes, options = {}) {
     const questions = { file, plus: [], guarded: [] };
     const recorder = {
         plus: (_, left, right) => {
@@ -100,7 +101,7 @@ export function typeQuestions(file, code, changes) {
         },
     };
     try {
-        plan(file, code, changes, recorder);
+        plan(file, code, changes, recorder, options);
     }
     catch (error) {
         if (!(error instanceof ParseError))
@@ -117,7 +118,7 @@ export function typeQuestions(file, code, changes) {
  * function; it takes the function's header instead, from its start (or its
  * method name) to the `{`.
  */
-function plan(file, code, changes, types) {
+function plan(file, code, changes, types, options) {
     const parsed = parseSync(file, code);
     if (parsed.errors.length > 0) {
         throw new ParseError(parsed.errors[0].message);
@@ -674,7 +675,8 @@ function plan(file, code, changes, types) {
         if (context === 'log')
             return context;
         // An `if` that only logs gets no mutant, its test included; so does `err && logger.warn(…)`.
-        if ((node.type === 'IfStatement' || node.type === 'ExpressionStatement') && isArid(node))
+        // With logGuards they are mutated, and only the log calls inside are left out, as anywhere.
+        if (!options.logGuards && (node.type === 'IfStatement' || node.type === 'ExpressionStatement') && isArid(node))
             return 'log';
         const inner = 'async' in node && node.async ? 'async' : FUNCTIONS.has(node.type) ? 'function' : context;
         if (inner !== 'module')

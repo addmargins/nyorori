@@ -63,6 +63,17 @@ export interface GenerateResult {
 
 export class ParseError extends Error {}
 
+/** What the run asks for beyond the defaults (see RunOptions). */
+export interface GenerateOptions {
+  /**
+   * Mutate an `if` that only logs, its test included, and a guard written as
+   * a statement (`err && logger.warn(…)`), as any other code. A library
+   * that tests its warnings kills most of those mutants. The log calls
+   * themselves still get none.
+   */
+  logGuards?: boolean
+}
+
 // Child keys that only hold TypeScript types or decorators; nothing in them runs as a mutable expression.
 const TYPE_KEYS = new Set([
   'typeAnnotation',
@@ -129,9 +140,17 @@ const SUPPRESS_RE = /^nyorori-ignore-next-line\s+([A-Za-z]+(?:\s*,\s*[A-Za-z]+)*
  * plan). Mutants that minify to the original code are set aside in
  * `equivalent`. Ids start at `firstId`. Where the syntax cannot tell string
  * `+` from numeric `+`, `types` answers from the operand types (see typeQuestions).
+ * `options.logGuards` mutates an `if` that only logs too.
  */
-export function generate(file: string, code: string, changes: Changes, firstId: number, types = NO_TYPES): GenerateResult {
-  const { parsed, lines, sites } = plan(file, code, changes, types)
+export function generate(
+  file: string,
+  code: string,
+  changes: Changes,
+  firstId: number,
+  types = NO_TYPES,
+  options: GenerateOptions = {},
+): GenerateResult {
+  const { parsed, lines, sites } = plan(file, code, changes, types, options)
   const sorted = [...sites.values()].sort((a, b) => a.start - b.start || b.end - a.end)
   // Before ids are assigned, so each remaining site keeps a contiguous id range.
   const { sites: ordered, equivalent } = dropEquivalent(file, code, sorted)
@@ -159,7 +178,7 @@ export function generate(file: string, code: string, changes: Changes, firstId: 
  * before generation, which stays synchronous. A file that does not parse has
  * no questions; generate() reports it.
  */
-export function typeQuestions(file: string, code: string, changes: Changes): FileQuestions {
+export function typeQuestions(file: string, code: string, changes: Changes, options: GenerateOptions = {}): FileQuestions {
   const questions: FileQuestions = { file, plus: [], guarded: [] }
   const recorder: TypeOracle = {
     plus: (_, left, right) => {
@@ -172,7 +191,7 @@ export function typeQuestions(file: string, code: string, changes: Changes): Fil
     },
   }
   try {
-    plan(file, code, changes, recorder)
+    plan(file, code, changes, recorder, options)
   } catch (error) {
     if (!(error instanceof ParseError)) throw error
   }
@@ -188,7 +207,13 @@ export function typeQuestions(file: string, code: string, changes: Changes): Fil
  * function; it takes the function's header instead, from its start (or its
  * method name) to the `{`.
  */
-function plan(file: string, code: string, changes: Changes, types: TypeOracle): { parsed: ParseResult; lines: number[]; sites: Map<string, Site> } {
+function plan(
+  file: string,
+  code: string,
+  changes: Changes,
+  types: TypeOracle,
+  options: GenerateOptions,
+): { parsed: ParseResult; lines: number[]; sites: Map<string, Site> } {
   const parsed = parseSync(file, code)
   if (parsed.errors.length > 0) {
     throw new ParseError(parsed.errors[0]!.message)
@@ -699,7 +724,8 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
     if (node.type === 'ExpressionStatement') statements.set(node.start, node)
     if (context === 'log') return context
     // An `if` that only logs gets no mutant, its test included; so does `err && logger.warn(…)`.
-    if ((node.type === 'IfStatement' || node.type === 'ExpressionStatement') && isArid(node)) return 'log'
+    // With logGuards they are mutated, and only the log calls inside are left out, as anywhere.
+    if (!options.logGuards && (node.type === 'IfStatement' || node.type === 'ExpressionStatement') && isArid(node)) return 'log'
     const inner = 'async' in node && node.async ? 'async' : FUNCTIONS.has(node.type) ? 'function' : context
     if (inner !== 'module') mutate(node, parent, context)
     return isLogging(node) || isRecordStatement(node) ? 'log' : inner

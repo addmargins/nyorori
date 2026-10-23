@@ -446,7 +446,7 @@ nyorori는 비동기 API를 쓴다. 동기 API는 응답을 기다리는 동안 
   - 바이너리 패키지가 없으면(지원하지 않는 플랫폼, 다른 플랫폼에서 만든 `node_modules`) 첫 요청이 `Unable to resolve @typescript/typescript-linux-x64. …`로 실패하고 문법 규칙으로 돌아간다. 바이너리 패키지를 지운 `npm ci` 결과로 확인했다.
   - `npm ci --omit=optional`로는 nyorori를 쓸 수 없다. oxc의 바인딩이 optional이고, 빌드에 쓰는 `tsc`도 바로 그 네이티브 바이너리다. typescript@7.0.2를 쓰던 이전에도 같았다.
 - **미리 묻기.** mutant 생성(`generate()`)은 동기이고 API는 비동기다. 그래서 `run.ts`가 생성 전에 물을 것을 모아 한 번에 묻고, `generate()`는 답을 맵에서 찾기만 한다.
-  - 물을 것은 `typeQuestions()`가 모은다. `generate()`의 계획 단계(파싱, 스코프 순회, 지점 수집)를 그대로 돌리면서 타입을 기록만 하는 오라클을 넘긴다. 그래서 묻는 `+`는 생성이 실제로 묻게 될 것과 정확히 같다. 범위 안에 있고, 변형하는 코드(함수 안, 로그 호출의 인자 밖)에 있고, 문법 규칙이 문자열로 정하지 못한 `+`다.
+  - 물을 것은 `typeQuestions()`가 모은다. `generate()`의 계획 단계(파싱, 스코프 순회, 지점 수집)를 그대로 돌리면서 타입을 기록만 하는 오라클을 넘긴다. 그래서 묻는 `+`는 생성이 실제로 묻게 될 것과 정확히 같다. 범위 안에 있고, 변형하는 코드(함수 안, 로그 호출의 인자 밖)에 있고, 문법 규칙이 문자열로 정하지 못한 `+`다. 로그만 하는 `if`의 조건도 `--log-guards`일 때만 변형하므로, 두 함수는 같은 옵션(`GenerateOptions`)을 받는다.
   - 파싱과 순회를 한 번 더 하는 비용은 626줄 파일 전체를 바뀐 것으로 쳤을 때 25~40ms였다. TCE는 하지 않는다.
   - `?.`와 `??`는 `FileQuestions.guarded`로 같은 배치에 묻는다. 생성이 프로파일 규칙을 붙이는 mutant가 지키는 값이다. 멤버 `a?.b`의 `a`, 호출 probe를 넣을 수 있는 `f?.()`의 `f`, `a ?? b`의 `a`다. 이것도 mutant가 생기는 곳, 곧 바뀐 범위를 담은 지점에서만 묻는다.
   - JavaScript 파일의 `guarded`는 버린다. TypeScript가 JavaScript에서 추론한 타입은 null에 대해 믿을 수 없기 때문이다.
@@ -679,6 +679,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
     - `this.logger?.warn(…)`을 담은 `if`는 건너뛰지 않는다. 그 `?.`는 위처럼 코드가 하는 일이다. `return`이나 다른 호출을 같이 하는 갈래가 있어도 건너뛰지 않는다(`if (a) { logger.warn(a); return }`).
     - 조건의 부수 효과는 보지 않는다. `if ((m = re.exec(s)) === null) logger.warn(…)`도 건너뛰므로, 대입을 건너뛰는 `→ true`를 놓친다. es-toolkit과 i18next의 `src`에는 그런 조건이 없었다.
     - `if`와 식 문만이다. 로그만 하는 함수의 FunctionBody는 그대로 만든다.
+    - `--log-guards`(Action은 `log-guards: true`)면 이 규칙만 끈다. 그런 `if`와 문을 규칙이 없던 때처럼 다른 코드와 똑같이 변형한다. 그 안의 로그 호출과 인자, 메트릭 호출 문은 그래도 건너뛴다. 경고를 테스트하는 라이브러리를 위한 것이다(아래 "로그 필터의 측정"). 기본값은 꺼짐이고, 켰는지는 `--json`의 `logGuards`에 남는다.
 - `!!x`에서는 바깥 `!`만 변형한다. 안쪽을 빼도 결과가 같은 `!x`이기 때문이다.
 - `x.length >= 0` 같은 항상 참인 조건은 `true`로 바꾸지 않는다.
 - 조건이 이미 `true`/`false` 리터럴이면 Condition mutant를 만들지 않는다. BooleanLiteral mutant와 겹치기 때문이다.
@@ -765,6 +766,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 - 로그만 하는 `if` 규칙은 모든 줄을 바뀐 것으로 쳤을 때 i18next `src`에서 2572개 중 32개를 더 없앤다. 8곳(`BackendConnector.js` 224·225, `Interpolator.js` 172, `Translator.js` 205·286, `i18next.js` 174·206·208)의 조건에 있던 Condition 16개, Negation 7개, Logical 6개, Equality 1개, Regex 2개다. es-toolkit `src`에서는 0개다.
   - 32개를 같은 방법으로 돌렸다. 10개가 살아남고 22개가 잡혔다. 잡은 테스트는 위의 세 파일이다. `Interpolator.js` 172의 8개는 모두 `security.test.js`가, `Translator.js` 205의 3개는 `translator.translate.returnObject.test.js`가, `Translator.js` 286, `i18next.js` 174·206, `BackendConnector.js` 224의 `→ true`는 `i18next.hasLoadedNamespace.test.js`가 잡았다. 살아남은 것은 `loaded namespace`와 `initialized` 로그를 지키는 225·208의 조건 전부, 206의 `→ false`와 `!this.initializedStoreOnce`, 224의 `→ false`다.
   - 잡히는 쪽이 많아도 거르기로 했다. 경고를 테스트하는 라이브러리에서 경고를 지키는 조건의 검출을 잃는 것은 로그 호출을 거를 때 이미 받아들인 손실과 같은 종류다. 대신 로그만 더하는 PR이 경고 테스트 없이 실패하지 않는다. i18next 사례 PR(`nyorori/case-log-guard-if`, 경고하는 `if` 두 개를 더함)은 3K 1T 6S로 실패했고, 이제 mutant가 없어 통과한다.
+  - 다만 22개는 실제 검출이므로, 그것이 필요한 저장소를 위해 `--log-guards`로 이 규칙을 끌 수 있게 했다. 끄면 규칙이 없던 때와 같다. 사례 PR도 `--log-guards`로 돌리면 다시 10개, 3K 1T 6S(exit 1)다. 살아남는 6개는 테스트가 없는 두 경고의 조건이다. 로그 호출을 거르는 규칙에는 이런 옵션을 두지 않았다. 그쪽은 살아남는 것(25개)이 잡히는 것(7개)보다 많았다.
   - upstream PR 13개의 계획은 그대로다.
 
 **타이머는 거르지 않는다.** `setTimeout(f, ms)`, `setInterval(f, ms)`과 그 인자는 변형한다.
@@ -1005,7 +1007,7 @@ return age >= 18
 - **로그 필터.**
   - 이름으로 판단한다. 로거 이름에 로그 레벨 메서드가 있지만 로거가 아닌 객체의 호출은 변형하지 않아서, 그 mutant를 놓친다. 이름이 다른 로거(`out.warn(…)`, `debug('x')`나 `log('x')`처럼 함수로 부르는 로거, `logger.child({ id }).info(…)`)는 거르지 않아서, 그 mutant가 살아남으면 억제 주석이 필요하다.
   - 경고를 테스트하는 라이브러리에서는 그 검출을 잃는다. i18next에서는 로그 호출 24곳 중 7곳을 테스트가 확인했다("로그 필터의 측정" 참고). 경고 호출을 더하거나 지우는 PR은 그 경고를 테스트하지 않아도 통과한다.
-  - 로그만 하는 `if`는 조건까지 변형하지 않으므로, 경고를 지키는 조건의 검출도 잃는다. i18next `src`에서는 그 조건의 mutant 32개 중 22개를 테스트가 잡았다("로그 필터의 측정" 참고). 조건에 부수 효과가 있어도 건너뛴다.
+  - 로그만 하는 `if`는 조건까지 변형하지 않으므로, 경고를 지키는 조건의 검출도 잃는다. i18next `src`에서는 그 조건의 mutant 32개 중 22개를 테스트가 잡았다("로그 필터의 측정" 참고). 조건에 부수 효과가 있어도 건너뛴다. 경고를 테스트하는 저장소는 `--log-guards`로 이 검출을 되찾을 수 있지만, 그러면 테스트하지 않은 경고의 조건도 실패한다.
   - 메트릭 이름은 Google 논문의 예(모니터링 값의 증가)만 근거로 하고, 트레이싱과 메서드 이름 목록은 우리가 정했다. 측정한 저장소에 그런 호출이 없었다.
 - **브라우저 모드.** 지원하지 않는다. 그 project의 테스트가 바뀐 코드를 실행하면 exit 2로 멈춘다.
 - **실행 시간.**

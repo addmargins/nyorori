@@ -19,6 +19,7 @@ Options:
   --dry-run           List the mutants without running tests
   --no-types          Start no TypeScript: tell string \`+\` by syntax only, and list no \`?.\` or \`??\` as unnecessary
   --no-predict        Run the mutants the baseline profile shows to survive, and report wrong predictions
+  --log-guards        Also mutate an \`if\` that only logs, its test included, for projects that test their warnings
   -h, --help          Show this help
 
 Exit codes: 0 all mutants detected, 1 findings, 2 the run could not judge the change.`
@@ -37,6 +38,7 @@ async function main(argv: string[]): Promise<number> {
       'dry-run': { type: 'boolean', default: false },
       types: { type: 'boolean', default: true },
       predict: { type: 'boolean', default: true },
+      'log-guards': { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
     allowNegative: true,
@@ -60,6 +62,7 @@ async function main(argv: string[]): Promise<number> {
     dryRun: values['dry-run'],
     types: values.types,
     predict: values.predict,
+    logGuards: values['log-guards'],
   })
 
   console.log(formatText(report))

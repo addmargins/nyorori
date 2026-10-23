@@ -32,6 +32,7 @@ jobs:
         #   max-mutants: 300
         #   types: false # TypeScript 없이: 문자열 `+`는 문법으로만, 타입으로 불필요한 `?.`·`??`는 가리지 않음
         #   predict: false # 살아남을 것으로 예측한 mutant도 실제로 실행
+        #   log-guards: true # 로그만 하는 `if`도 조건까지 변형(경고를 테스트하는 라이브러리)
 ```
 
 - 문제가 된 mutant는 PR diff의 해당 줄에 어노테이션으로 표시되고, 요약은 job summary에 실립니다. 토큰 권한은 필요 없습니다.
@@ -61,6 +62,7 @@ npx nyorori run --base origin/main
 | `--dry-run` | 테스트를 돌리지 않고 mutant 목록만 출력 |
 | `--no-types` | TypeScript를 띄우지 않음. 문자열 `+`를 문법으로만 가리고, [타입으로 불필요한 방어 코드](#타입으로-불필요한-방어-코드)도 가리지 않음. [문자열 `+`](#문자열-) 참고 |
 | `--no-predict` | 기준 실행의 프로파일로 살아남는 것이 확실한 mutant도 실행하고, 예측이 틀린 mutant를 알림. [기준 실행의 프로파일](#기준-실행의-프로파일) 참고 |
+| `--log-guards` | 로그만 하는 `if`도 조건까지 변형함. 로그 호출 자체는 그래도 변형하지 않음. `--json`의 `logGuards`에 남음. [로그 호출](#로그-호출) 참고 |
 
 종료 코드는 세 가지입니다.
 
@@ -255,8 +257,13 @@ Vitest 4는 `test.projects`의 project마다, inline project라도 Vite 서버�
   - receiver 이름이 `metrics`, `statsd`, `telemetry`, `tracer`이거나 `Metrics`, `Telemetry`, `Tracer`로 끝나고, 메서드가 `increment`, `decrement`, `gauge`, `histogram`, `timing`, `distribution`, `record`, `addEvent`, `setAttribute`, `setAttributes`, `setStatus`, `recordException`인 호출입니다. 값을 쓰면 변형합니다.
 
 로그만 하는 `if`는 조건까지 변형하지 않습니다(`if (err) this.logger.warn(…)`). 갈래(`else` 포함)에 위의 로그 호출과 메트릭 호출 문, 빈 블록, 또 그런 `if`만 있는 경우입니다. 문으로 쓴 `err && logger.warn(…)`도 같습니다. `this.logger?.warn(…)`이나 `return`처럼 다른 일을 하는 갈래가 있으면 변형합니다.
+
+- `--log-guards`(Action은 `log-guards: true`)를 주면 이런 `if`와 문도 다른 코드처럼 조건까지 변형합니다. 그 안의 로그 호출 자체는 그래도 변형하지 않습니다.
+- 경고를 테스트하는 라이브러리를 위한 옵션입니다. 그런 테스트는 경고를 지키는 조건의 mutant를 대부분 잡습니다. i18next `src`에서 이 규칙이 없애는 mutant 32개 중 22개를 경고 테스트(`security`, `translate.returnObject`, `hasLoadedNamespace`)가 잡았습니다.
+- 기본값은 꺼짐입니다. 로그만 더하는 PR이 경고 테스트 없이도 통과하게 하려는 것입니다.
+
 `setTimeout`과 `setInterval`은 변형합니다. 콜백은 코드가 하는 일이고, fake timer로 테스트할 수 있습니다.
-경고를 테스트하는 라이브러리라면 그 경고 호출과 경고만 지키는 조건에는 mutant가 없습니다. 이름이 다른 로거(`out.warn(…)`, `debug('…')`)는 거르지 않으므로, 그 mutant가 살아남으면 [억제 주석](#equivalent-mutant-억제)을 쓰세요.
+경고를 테스트하는 라이브러리라도 경고 호출 자체에는 mutant가 없고, 경고만 지키는 조건에는 `--log-guards`를 줄 때만 생깁니다. 이름이 다른 로거(`out.warn(…)`, `debug('…')`)는 거르지 않으므로, 그 mutant가 살아남으면 [억제 주석](#equivalent-mutant-억제)을 쓰세요.
 
 ### 문자열 `+`
 

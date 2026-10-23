@@ -304,6 +304,26 @@ test('hasTodo', () => { expect(hasTodo('todo: x')).toBe(true); expect(hasTodo('d
     expect(output).toContain('Survived   src/limits.js:2:25  Revert  `500` → `1000`, as before this PR  (every test still passes with this change)')
   })
 
+  test('with --log-guards, mutates an `if` that only logs, which a test of the warning kills', () => {
+    const clamp = (guard: string) => `export function clamp(n, logger) {\n${guard}  return Math.max(n, 0)\n}\n`
+    const dir = project('log-guards', {
+      'src/clamp.js': clamp(''),
+      'test/clamp.test.js': "import { expect, test, vi } from 'vitest'\nimport { clamp } from '../src/clamp.js'\ntest('warns about a negative number only', () => {\n  const logger = { warn: vi.fn() }\n  expect([clamp(-1, logger), clamp(0, logger)]).toEqual([0, 0])\n  expect(logger.warn).toHaveBeenCalledTimes(1)\n})\n",
+    }, { 'src/clamp.js': clamp("  if (n < 0) logger.warn('negative')\n") })
+    const skipped = nyorori(dir)
+    expect(skipped.status, skipped.output).toBe(0)
+    expect(skipped.output).toContain('nyorori: no mutants in the changed code of 1 judged file.')
+    expect(skipped.report!.logGuards).toBe(false)
+    const { status, report, output } = nyorori(dir, '--log-guards')
+    expect(status, output).toBe(0)
+    expect(report!.logGuards).toBe(true)
+    expect(statuses(report!)).toEqual([
+      'src/clamp.js:2 Condition `n < 0` → `true`: Killed',
+      'src/clamp.js:2 Condition `n < 0` → `false`: Killed',
+      'src/clamp.js:2 ComparisonBoundary `<` → `<=`: Killed',
+    ])
+  })
+
   test('a reasoned suppression turns a survivor into a reported, passing Ignored', () => {
     const dir = project('suppress', { 'src/age.ts': AGE_BASE, 'test/age.test.ts': AGE_TEST }, {
       'src/age.ts': AGE_HEAD.replace('  return age >= 18', '  // nyorori-ignore-next-line ComparisonBoundary -- callers validate age first\n  return age >= 18'),

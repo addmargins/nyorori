@@ -62,6 +62,7 @@ export async function run(options) {
         problems: [],
         types: options.types ? typesNotAsked() : { backend: 'none', reason: 'disabled with --no-types', untyped: [] },
         dryRun: options.dryRun,
+        logGuards: options.logGuards,
     };
     const listNotJudged = () => {
         report.notJudged = notJudged.map(({ file, reason }) => ({ file: relative(file), reason })).sort((a, b) => a.file.localeCompare(b.file));
@@ -97,14 +98,14 @@ export async function run(options) {
         let types;
         if (options.types) {
             // Generation is synchronous, so the type checker answers everything it will ask beforehand.
-            const answers = await askTypes(root, sources.map(({ file, code, changes }) => typeQuestions(file, code, changes)));
+            const answers = await askTypes(root, sources.map(({ file, code, changes }) => typeQuestions(file, code, changes, options)));
             report.types = answers.usage;
             types = answers;
         }
         for (const { file, code, changes } of sources) {
             let generated;
             try {
-                generated = generate(file, code, changes, mutants.length + 1, types);
+                generated = generate(file, code, changes, mutants.length + 1, types, options);
             }
             catch (error) {
                 if (error instanceof ParseError)

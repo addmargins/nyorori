@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest'
-import { generate } from '../src/mutate/generate.ts'
+import { generate, typeQuestions } from '../src/mutate/generate.ts'
 import { addedLines, changes } from './changes.ts'
 
 function all(code: string): Set<number> {
@@ -651,33 +651,68 @@ describe('log filter', () => {
     expect(onCall(call)).toEqual(expected)
   })
 
+  // Lines 2 to 6 only log.
+  const guards = [
+    'export class C { #logger; async f(a, b) {',
+    '  if (a > 1) this.logger.warn(a)',
+    '  if (a > 2) { logger.warn(a); } else if (b) { console.log(b) } else {}',
+    "  if (a > 3) { if (b > 1) log.info(b); metrics.increment('x'); ; }",
+    '  a > 4 && logger.warn(a)',
+    '  b ? logger.warn(a) : await log.info(b)',
+    // A branch that does something else, a `?.` that keeps a missing logger from throwing.
+    '  if (a > 5) { logger.warn(a); return }',
+    '  if (a > 6) this.logger?.warn(a)',
+    '  if (a > 7) logger.warn(a); else g(a)',
+    '} }',
+  ].join('\n')
+  const notGuards = [
+    '7:7 Condition `a > 5` → `true`',
+    '7:7 Condition `a > 5` → `false`',
+    '7:9 ComparisonBoundary `>` → `>=`',
+    '8:7 Condition `a > 6` → `true`',
+    '8:7 Condition `a > 6` → `false`',
+    '8:9 ComparisonBoundary `>` → `>=`',
+    '8:25 OptionalChaining `?.` → `.`',
+    '9:7 Condition `a > 7` → `true`',
+    '9:7 Condition `a > 7` → `false`',
+    '9:9 ComparisonBoundary `>` → `>=`',
+    '9:35 CallStatement `g(a)` removed',
+  ]
+
   test('skips all of an `if` that only logs, its test included, and the same guard as an expression', () => {
-    const code = [
-      'export class C { #logger; async f(a, b) {',
-      '  if (a > 1) this.logger.warn(a)',
-      '  if (a > 2) { logger.warn(a); } else if (b) { console.log(b) } else {}',
-      "  if (a > 3) { if (b > 1) log.info(b); metrics.increment('x'); ; }",
-      '  a > 4 && logger.warn(a)',
-      '  b ? logger.warn(a) : await log.info(b)',
-      // A branch that does something else, a `?.` that keeps a missing logger from throwing.
-      '  if (a > 5) { logger.warn(a); return }',
-      '  if (a > 6) this.logger?.warn(a)',
-      '  if (a > 7) logger.warn(a); else g(a)',
-      '} }',
-    ].join('\n')
-    expect(mutants(code).filter((m) => !m.startsWith('1:'))).toEqual([
-      '7:7 Condition `a > 5` → `true`',
-      '7:7 Condition `a > 5` → `false`',
-      '7:9 ComparisonBoundary `>` → `>=`',
-      '8:7 Condition `a > 6` → `true`',
-      '8:7 Condition `a > 6` → `false`',
-      '8:9 ComparisonBoundary `>` → `>=`',
-      '8:25 OptionalChaining `?.` → `.`',
-      '9:7 Condition `a > 7` → `true`',
-      '9:7 Condition `a > 7` → `false`',
-      '9:9 ComparisonBoundary `>` → `>=`',
-      '9:35 CallStatement `g(a)` removed',
+    expect(mutants(guards).filter((m) => !m.startsWith('1:'))).toEqual(notGuards)
+  })
+
+  test('with logGuards, mutates the `if` that only logs and the same guard as an expression, but still not the log calls', () => {
+    const { mutants } = generate('file.ts', guards, addedLines(guards, all(guards)), 1, undefined, { logGuards: true })
+    expect(mutants.map((m) => `${m.line}:${m.column} ${m.operator} ${m.description}`).filter((m) => !m.startsWith('1:'))).toEqual([
+      '2:7 Condition `a > 1` → `true`',
+      '2:7 Condition `a > 1` → `false`',
+      '2:9 ComparisonBoundary `>` → `>=`',
+      '3:7 Condition `a > 2` → `true`',
+      '3:7 Condition `a > 2` → `false`',
+      '3:9 ComparisonBoundary `>` → `>=`',
+      '3:43 Condition `b` → `true`',
+      '3:43 Condition `b` → `false`',
+      '4:7 Condition `a > 3` → `true`',
+      '4:7 Condition `a > 3` → `false`',
+      '4:9 ComparisonBoundary `>` → `>=`',
+      '4:20 Condition `b > 1` → `true`',
+      '4:20 Condition `b > 1` → `false`',
+      '4:22 ComparisonBoundary `>` → `>=`',
+      '5:9 Logical `&&` → `||`',
+      '5:5 ComparisonBoundary `>` → `>=`',
+      '6:3 Condition `b` → `true`',
+      '6:3 Condition `b` → `false`',
+      ...notGuards,
     ])
+  })
+
+  test('asks the type checker about a `+` in a log guard only when the guard is mutated', () => {
+    const code = 'export function f(a: number, b: number) {\n  if (a + b > 1) logger.warn(a)\n}\n'
+    const changes = addedLines(code, [2])
+    expect(typeQuestions('f.ts', code, changes).plus).toEqual([])
+    expect(typeQuestions('f.ts', code, changes, { logGuards: true }).plus).toHaveLength(1)
   })
 })
 
