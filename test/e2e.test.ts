@@ -732,6 +732,34 @@ registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescrip
       expect(output).not.toContain('WARNING')
     })
 
+    test('takes the first reason that fits: setup and config files are not the coverage warnings they also match', () => {
+      // Vitest leaves setup and config files out of coverage itself; here coverage.include and coverage.exclude would also catch them.
+      const coverage = "coverage: { include: ['src/**'], exclude: ['src/testing/**'] }"
+      const dir = project('first-reason', {
+        'vitest.config.ts': `export default { test: { ${coverage} } }\n`,
+        'src/a.ts': lib,
+        'test/a.test.ts': spec('a'),
+      }, {
+        'vitest.config.ts': `export default { test: { setupFiles: ['src/testing/setup.ts'], globalSetup: ['scripts/global-setup.ts'], ${coverage} } }\n`,
+        'src/testing/setup.ts': 'globalThis.ready = true\n',
+        'scripts/global-setup.ts': 'export default function setup(): void {}\n',
+        // Not the config that is loaded: a config by its name.
+        'vitest.e2e.config.ts': "export default { test: { include: ['e2e/**'] } }\n",
+        'src/a.ts': changed,
+      })
+      // A test file comes before --exclude too.
+      const { status, report, output } = nyorori(dir, '--exclude', 'src/testing/**')
+      expect(status, output).toBe(1)
+      expect(statuses(report!)).toEqual(['src/a.ts:2 ComparisonBoundary `>=` → `>`: Survived'])
+      expect(report!.notJudged).toEqual([
+        { file: 'scripts/global-setup.ts', reason: 'test' },
+        { file: 'src/testing/setup.ts', reason: 'test' },
+        { file: 'vitest.config.ts', reason: 'config' },
+        { file: 'vitest.e2e.config.ts', reason: 'config' },
+      ])
+      expect(output).not.toContain('WARNING')
+    })
+
     test('says plainly when coverage.include matches none of the changed source files', () => {
       // zustand's coverage.include: a glob that ends in a slash matches directories only.
       const dir = project('coverage-none', {

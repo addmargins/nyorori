@@ -417,6 +417,26 @@ describe('Revert', () => {
       "6:51 Revert `' '` → `'0'`, as before this PR",
     ])
   })
+
+  test('puts back nothing that is not a value: an import path, a directive, a tagged template, a property name, a JSX attribute', () => {
+    const before = [
+      "import { a } from './old'",
+      'export function Link({ to, n }) {',
+      "  'use cache'",
+      '  const q = sql`select * from old where n = ${n}`',
+      "  const o = { 'key-old': n, ['k-old']: n }",
+      '  return <a href="/old" title={\'old\'} data-n={1}>{a}{q}{o}</a>',
+      '}',
+    ].join('\n')
+    const after = before.replaceAll('old', 'new').replace('use cache', 'use server').replace('{1}', '{2}')
+    const file = 'file.jsx'
+    // A computed key and a JSX expression are values.
+    expect(generate(file, after, changes(before, after, file), 1).mutants.map((m) => `${m.line}:${m.column} ${m.operator} ${m.description}`)).toEqual([
+      "5:30 Revert `'k-new'` → `'k-old'`, as before this PR",
+      "6:32 Revert `'new'` → `'old'`, as before this PR",
+      '6:47 Revert `2` → `1`, as before this PR',
+    ])
+  })
 })
 
 describe('scope', () => {
@@ -522,6 +542,23 @@ describe('scope of a change', () => {
     ])
     // A statement deleted next to an expression took nothing from it.
     expect(changed('export function f(a: number) {\n  g(a)\n  return a > 0\n}\n', 'export function f(a: number) {\n  return a > 0\n}\n')).toEqual([])
+  })
+
+  test('finds what lost an operand under a `!`', () => {
+    const f = (test: string) => `export function f(x) {\n  if (${test}) return 1\n  return 0\n}\n`
+    // `!isArray(x)` lost `|| isArguments(x)`: the negation, and not the call inside it, as with a middle deletion.
+    expect(changed(f('!isArray(x) || isArguments(x)'), f('!isArray(x)'))).toEqual([
+      '2:7 Condition `!isArray(x)` → `true`',
+      '2:7 Condition `!isArray(x)` → `false`',
+      '2:7 Negation `!isArray(x)` → `isArray(x)`',
+    ])
+    // In the parentheses of a `!`, `x.length > 0` lost `&& x.ok`.
+    expect(changed(f('!(x.length > 0 && x.ok)'), f('!(x.length > 0)'))).toEqual([
+      '2:7 Condition `!(x.length > 0)` → `true`',
+      '2:7 Condition `!(x.length > 0)` → `false`',
+      '2:7 Negation `!(x.length > 0)` → `(x.length > 0)`',
+      '2:18 ComparisonBoundary `>` → `>=`',
+    ])
   })
 
   test('mutates nothing in a reformatted function', () => {
