@@ -34,7 +34,7 @@ nyorori run --base <ref>
                   대상 파일마다 hunk 안의 옛 토큰과 새 토큰을 diff → "바뀐 범위"
   2. 세션 시작     Vitest를 띄운 별도 프로세스(session)를 시작한다
                   세션이 Vitest 설정으로 대상 파일을 거른다
-                  (테스트 파일, coverage.exclude, --exclude 제외)
+                  (테스트·타입 테스트·벤치마크 파일, coverage.exclude, --exclude 제외)
   3. mutant 생성   먼저 문법 규칙이 모르는 범위 안의 `+`와, TS 파일에서 `?.`·`??`가 지키는 값을 모아
                   TypeScript에 한꺼번에 묻는다. TypeScript 프로세스는 이때만 떠 있다
                   oxc-parser로 파싱 → 바뀐 범위를 담은 지점에만 mutant를 만든다
@@ -42,7 +42,7 @@ nyorori run --base <ref>
                   → 억제 주석 읽기 (L2)
   4. 계측          모든 mutant를 파일에 한꺼번에 넣는다 (mutant schemata)
                   파일마다 두 벌을 만든다: probe 없는 계측(plain)과 probe를 넣은 계측(profiled)
-                  Vite 플러그인(enforce: 'pre')이 원본 대신 계측된 코드를 돌려준다
+                  Vite 플러그인(enforce: 'pre', transform order: 'pre')이 원본 대신 계측된 코드를 돌려준다
   5. 기준 실행     원본 그대로(mutant 0)로 관련 테스트를 profiled 계측으로 실행한다
                   - 실패가 하나라도 있으면 exit 2로 중단한다 (mutant를 판정할 수 없음)
                   - 테스트 파일마다 각 mutant 지점이 몇 번 실행됐는지(hit) 기록한다
@@ -110,7 +110,7 @@ profiled 계측은 원본 분기 안에 probe를 더 넣는다("실행 시간 �
 
 다음은 개별 mutant의 판정이 아니라 실행 전체를 exit 2로 끝낸다.
 - 계측한 코드가 파싱되지 않는 경우
-- 다른 플러그인이 먼저 소스를 바꿔 놓아 계측할 수 없는 경우
+- 다른 플러그인이 먼저 소스를 바꿔 놓아 계측할 수 없는 경우. 그 파일을 import하는 테스트가 실패하지만 테스트 탓이 아니므로, 기준 실행의 실패로 보고하지 않고 그 파일과 nyorori보다 먼저 transform이 도는 플러그인 이름을 알린다("구현 구조" 참고).
 - 계측 플러그인이 닿지 않는 Vitest project가 있는 경우 (남은 위험의 "여러 project 설정" 참고)
 
 NoCoverage는 테스트를 돌리지 않고 판정하므로 비용이 들지 않는다.
@@ -167,6 +167,7 @@ TCE로 버린 mutant와, 실행 시간에 문자열 연결로 확인되어 건�
 - 모듈 최상위 코드는 import 시점에 한 번만 실행되므로 대상에서 뺀다. 함수 안(매개변수 기본값 포함)의 코드만 대상이다.
 - 파일 기준으로 다음은 제외한다.
   - 테스트 파일: Vitest의 `matchesTestGlob`
+  - 타입 테스트와 벤치마크: project마다 `typecheck.include`에서 `typecheck.exclude`를 뺀 것, `benchmark.include`에서 `benchmark.exclude`를 뺀 것. `matchesTestGlob`은 `include`만 보므로 따로 본다. 켜져 있지 않아도 뺀다. 테스트 파일이라서 그 안의 코드를 실행하는 테스트가 없고, 대상에 넣으면 NoCoverage로 거짓 실패한다.
   - Vitest `coverage.include`/`coverage.exclude`에 따라 빠지는 파일: 기본값에서 설정 파일 등
   - `--exclude`에 걸리는 파일
   - `.d.ts`
@@ -352,6 +353,9 @@ action.yml               composite action: 런타임 의존성만 설치하고 �
 - setup 파일은 CLI가 실행마다 만드는 임시 디렉터리(`os.tmpdir()` 아래 `nyorori-*`)에 둔다.
   - setup 파일은 `'vitest'`를 import한다. Vitest의 `vitest:resolve-core` 플러그인은 bare `'vitest'`를 import하는 파일의 위치와 상관없이 실행 중인 Vitest의 dist로 해석한다. 그래서 사용자의 `node_modules`에 쓰지 않아도 된다. `pool: 'threads'`, `isolate: false`, `vmThreads`에서도 확인했다.
   - CLI는 세션을 SIGKILL하므로 세션이 스스로 지울 수 없다. 그래서 디렉터리는 CLI가 만들고 실행이 끝나면 지운다. CLI가 먼저 죽으면 세션이 IPC 연결이 끊길 때 지운다.
+- 계측 플러그인의 transform은 `enforce: 'pre'`에 더해 `order: 'pre'`로 둔다. Vite는 `order: 'pre'`인 transform을 먼저, 플러그인 순서대로 돌린다. Vitest 자신의 `vitest:meta-env-replacer`(`import.meta.env`를 바꿈)와 vite-plugin-solid도 `enforce: 'pre'`라서, `enforce`만으로는 이들이 먼저 파일을 바꾸었다. 그래서 `import.meta.env`를 쓰는 파일(zustand의 devtools 미들웨어)이나 Solid 컴포넌트(solid-query)를 바꾼 PR이 "mutant 없이도 테스트가 실패한다"며 exit 2가 됐다.
+  - 그래도 바뀐 내용이 오면(더 앞의 `order: 'pre'` transform, 내용을 바꾸는 `load` 훅) 계측하지 않고 실행을 멈춘다. `configResolved`에서 nyorori보다 먼저 도는 transform의 플러그인 이름을 모아 두었다가 함께 알린다. 어느 플러그인이 바꿨는지까지는 알 수 없다.
+- `createVitest` 전에 Vitest CLI(`prepareVitest`)처럼 `TEST=true`, `VITEST=true`, `NODE_ENV ??= 'test'`를 설정한다. 설정하지 않으면 Vite가 `NODE_ENV`를 `development`로 정하고, 워커도 그 값을 받는다. element-plus에서는 이 때문에 기준 실행에서 spec 파일 152개 중 16개가 실패했다.
 - `createVitest` 직후에 모든 project가 계측 플러그인을 거치는지 확인한다. 플러그인이 닿지 않는 project의 코드는 테스트가 실행하지 않는 것처럼 보이므로, 판정하기 전에 project 이름과 함께 exit 2로 멈춘다.
 
 GitHub Action에서는 `::error file=…,line=…` 워크플로 명령을 쓴다.
@@ -866,7 +870,7 @@ return age >= 18
   - project마다 설정 파일이 있는 monorepo는 `--root`로 그 디렉터리를 가리키면 그 설정이 루트 설정이 되므로 돌릴 수 있다.
 - **`experimental.viteModuleRunner: false`.** Vite transform을 거치지 않고 Node가 직접 import하므로 계측되지 않는다. 같은 이유로 시작할 때 exit 2로 멈춘다.
 - **Vitest의 임시 디렉터리.** 실행이 정상적으로 끝나면 CLI가 세션에 `vitest.close()`를 요청하므로, Vitest가 `os.tmpdir()`에 만드는 임시 디렉터리도 지워진다(5초 안에 답이 없으면 SIGKILL). 무한 루프 때문에 강제 종료한 세션의 임시 디렉터리는 남는다.
-- **스냅샷 테스트.** `update: false`로 실행하므로, mutant가 스냅샷을 바꾸면 killed가 된다.
+- **스냅샷 테스트.** `update: 'none'`으로 실행하므로, mutant가 스냅샷을 바꾸면 killed가 된다. `update: false`는 CI가 아닐 때 `'new'`가 되어 없는 스냅샷을 쓰고 통과시켰다. 그래서 로컬 실행이 CI와 다르게 판정했다. 이제 없는 스냅샷은 CI에서처럼 기준 실행의 실패다.
 - **flaky 테스트.** 실행한 mutant는 우연히 killed로 판정되는 방향이라서 판정이 느슨해질 뿐, 거짓 실패는 만들지 않는다. 기준 실행이 실패하면 전체를 중단한다. 프로파일 예측은 다르다(아래 "프로파일 예측" 참고).
 - **TypeScript 7.1 beta API 의존.**
   - 7.1 정식판 전의 beta(`7.1.0-beta`, 2026-10-20)다. 정식판까지 API가 바뀔 수 있다. 7.0.2의 `unstable/` API와도 이미 다르다(`updateSnapshot`/`getProject` → `createSnapshot`/`Snapshot.update`/`getDefaultProjectForFile`).

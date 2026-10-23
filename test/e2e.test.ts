@@ -40,8 +40,9 @@ function nyorori(dir: string, ...args: string[]): { status: number | null; outpu
 
 /** The same, with options for Node itself. */
 function nyororiNode(node: string[], dir: string, ...args: string[]): ReturnType<typeof nyorori> {
-  // Keep the outer Vitest's worker settings away from the nested one.
-  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('VITEST') && key !== 'NODE_OPTIONS' && key !== 'GITHUB_ACTIONS'))
+  // Keep the outer Vitest's settings (VITEST*, NODE_ENV, TEST) and CI's away from the nested one.
+  const outer = new Set(['NODE_OPTIONS', 'NODE_ENV', 'TEST', 'CI', 'GITHUB_ACTIONS'])
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('VITEST') && !outer.has(key)))
   // A private TMPDIR shows whether the run removed its temporary directories.
   const tmp = mkdtempSync(path.join(os.tmpdir(), 'nyorori-e2e-'))
   const result = spawnSync(process.execPath, [...node, CLI, 'run', '--base', 'HEAD~1', '--json', 'report.json', ...args], { cwd: dir, encoding: 'utf8', env: { ...env, TMPDIR: tmp } })
@@ -558,6 +559,20 @@ registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescrip
     expect(output).toContain('nyorori: no mutants in the changed code.')
   })
 
+  test('leaves out type tests and benchmarks, enabled or not', () => {
+    const dir = project('type-tests', {
+      'src/sum.ts': 'export function sum(a: number, b: number): number {\n  return a + b\n}\n',
+      'test/sum.test.ts': "import { expect, it } from 'vitest'\nimport { sum } from '../src/sum'\nit('adds', () => { expect(sum(1, 2)).toBe(3) })\n",
+      'test/sum.test-d.ts': "import { expectTypeOf, it } from 'vitest'\nimport { sum } from '../src/sum'\nit('types', () => { expectTypeOf(sum).toBeFunction() })\n",
+    }, {
+      'test/sum.test-d.ts': "import { expectTypeOf, it } from 'vitest'\nimport { sum } from '../src/sum'\nit('types', () => {\n  expectTypeOf(sum).toBeFunction()\n  expectTypeOf(sum(1, 2)).toBeNumber()\n})\n",
+      'bench/sum.bench.ts': "import { bench } from 'vitest'\nimport { sum } from '../src/sum'\nbench('sum', () => {\n  sum(1, 2)\n})\n",
+    })
+    const { status, report, output } = nyorori(dir)
+    expect(status, output).toBe(0)
+    expect(report!.results).toEqual([])
+  })
+
   test('runs Vitest projects that share the root Vite server', () => {
     const dir = project('projects', {
       'vitest.config.ts': `export default {
@@ -869,6 +884,59 @@ export function total(item) {
       const { status, report, output } = nyorori(dir)
       expect(status, output).toBe(1)
       expect(statuses(report!)).toEqual(['a', 'b', 'c'].map((f) => `src/${f}.ts:2 ComparisonBoundary \`>=\` → \`>\`: Survived`))
+    })
+
+    test("code that reads import.meta.env is instrumented before Vitest's own plugin rewrites it", () => {
+      const env = "export const mode = (): string => import.meta.env.MODE\n\n"
+      const dir = project('meta-env', { 'src/a.ts': env + lib, 'test/a.test.ts': spec('a') }, { 'src/a.ts': env + changed })
+      const { status, report, output } = nyorori(dir)
+      expect(status, output).toBe(1)
+      expect(statuses(report!)).toEqual(['src/a.ts:4 ComparisonBoundary `>=` → `>`: Survived'])
+    })
+
+    test('a plugin that changes a file before nyorori stops the run without blaming the tests', () => {
+      const dir = project('plugin-first', {
+        'vitest.config.ts': `export default {
+  plugins: [{
+    name: 'banner',
+    enforce: 'pre',
+    transform: { order: 'pre', handler: (code: string, id: string) => (id.endsWith('/src/a.ts') ? '// banner\\n' + code : undefined) },
+  }],
+}
+`,
+        'src/a.ts': lib,
+        'test/a.test.ts': spec('a'),
+      }, { 'src/a.ts': changed })
+      const { status, output, leftovers } = nyorori(dir)
+      expect(status, output).toBe(2)
+      expect(output).toContain("nyorori: src/a.ts was changed by another Vite plugin before nyorori could instrument it, so its mutants cannot be judged. Vite plugins whose transform runs before nyorori's: banner.")
+      expect(output).not.toContain('Tests fail')
+      expect(output).not.toContain('    at ')
+      expect(leftovers).toEqual([])
+    })
+
+    test('tests see the environment the Vitest CLI sets', () => {
+      const dir = project('node-env', {
+        'src/a.ts': lib,
+        'test/a.test.ts': `${spec('a')}it('env', () => {
+  expect([process.env.NODE_ENV, process.env.TEST, process.env.VITEST]).toEqual(['test', 'true', 'true'])
+})
+`,
+      }, { 'src/a.ts': changed })
+      const { status, report, output } = nyorori(dir)
+      expect(status, output).toBe(1)
+      expect(statuses(report!)).toEqual(['src/a.ts:2 ComparisonBoundary `>=` → `>`: Survived'])
+    })
+
+    test('a missing snapshot fails the baseline, as in CI, instead of being written', () => {
+      const dir = project('snapshot', { 'src/a.ts': lib, 'test/a.test.ts': spec('a') }, {
+        'src/a.ts': changed,
+        'test/b.test.ts': "import { expect, it } from 'vitest'\nimport { big } from '../src/a'\nit('snapshot', () => {\n  expect(big(5)).toMatchSnapshot()\n})\n",
+      })
+      const { status, output } = nyorori(dir)
+      expect(status, output).toBe(2)
+      expect(output).toContain('Tests fail without any mutant, so mutants cannot be judged:\n  test/b.test.ts: ')
+      expect(existsSync(path.join(dir, 'test', '__snapshots__'))).toBe(false)
     })
 
     test('a changed Vitest config does not pull in the whole suite', () => {

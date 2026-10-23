@@ -54,6 +54,10 @@ let setupDir;
 const plans = new Map();
 /** Whether the plugin serves the profiled instrumentation (the baseline) rather than the plain one. */
 let profiling = false;
+/** The plugins whose transform runs before nyorori's (`order: 'pre'`, earlier in the list). */
+let transformsBefore = [];
+/** A planned file that reached the transform already changed: the run cannot judge it, whatever the tests say. */
+let changedBefore;
 // runTestSpecifications() returns every module the instance has ever run, so
 // a file that failed for an earlier mutant would count as failing for later
 // ones too. The reporter receives only the modules of the run that just ended.
@@ -85,17 +89,34 @@ async function init(root, candidates, exclude, dir) {
         // which serves only allowed directories; the setup file lives outside the project.
         configResolved(config) {
             config.server.fs.allow.push(dir);
+            // Vite runs the `order: 'pre'` transforms first, in plugin order, then the rest.
+            transformsBefore = config.plugins
+                .slice(0, config.plugins.indexOf(plugin))
+                .filter((p) => typeof p.transform === 'object' && p.transform.order === 'pre')
+                .map((p) => p.name);
         },
-        transform(code, id) {
-            const plan = plans.get(id.split('?')[0]);
-            if (!plan)
-                return undefined;
-            if (code !== plan.original) {
-                throw new Error(`nyorori: ${plan.file} reached the transform already changed by another plugin; it cannot be mutated.`);
-            }
-            return profiling ? plan.profiled : { code: plan.instrumented, map: plan.map };
+        // `order: 'pre'`, not only `enforce: 'pre'`: plugins such as Vitest's own
+        // vitest:meta-env-replacer (`import.meta.env`) or vite-plugin-solid are
+        // `enforce: 'pre'` too, and would otherwise rewrite the file first.
+        transform: {
+            order: 'pre',
+            handler(code, id) {
+                const plan = plans.get(id.split('?')[0]);
+                if (!plan)
+                    return undefined;
+                if (code !== plan.original) {
+                    changedBefore ??= plan.file;
+                    throw new Error(`nyorori: ${plan.file} reached the transform already changed by another plugin; it cannot be mutated.`);
+                }
+                return profiling ? plan.profiled : { code: plan.instrumented, map: plan.map };
+            },
         },
     };
+    // As the Vitest CLI does (prepareVitest): Vite would otherwise set NODE_ENV
+    // to 'development', and tests or configs that check it would behave unlike `vitest run`.
+    process.env.TEST = 'true';
+    process.env.VITEST = 'true';
+    process.env.NODE_ENV ??= 'test';
     vitest = await createVitest('test', {
         root,
         watch: false,
@@ -104,7 +125,8 @@ async function init(root, candidates, exclude, dir) {
         // run would reuse code instrumented with another run's mutant ids.
         fsModuleCache: false,
         related: candidates,
-        update: false,
+        // As in CI: `false` means 'new' outside CI, which writes missing snapshots and passes.
+        update: 'none',
         // Hits and profiles are attributed per test file by the setup file, which
         // Vitest runs only once per worker under `isolate: false` here, so later
         // files would record nothing and their code would look untested.
@@ -136,11 +158,20 @@ async function init(root, candidates, exclude, dir) {
     const coverageInclude = config.coverage.include?.length ? picomatch(config.coverage.include, { dot: true }) : () => true;
     const coverageExclude = picomatch(config.coverage.exclude, { dot: true });
     const userExclude = exclude.length > 0 ? picomatch(exclude, { dot: true }) : () => false;
+    // matchesTestGlob() knows only `include`: type tests (`*.test-d.ts`) and
+    // benchmarks are test files too, whether or not typecheck or benchmark is enabled.
+    const otherTests = vitest.projects.flatMap((project) => {
+        const { typecheck, benchmark } = project.config;
+        const dir = project.config.dir || project.config.root;
+        return [typecheck, benchmark].map((globs) => ({ dir, matches: globMatcher(globs.include, globs.exclude) }));
+    });
     const eligible = candidates.filter((file) => {
         const relative = path.relative(config.root, file);
         if (relative.startsWith('..') || path.isAbsolute(relative))
             return false;
         if (vitest.projects.some((project) => project.matchesTestGlob(file)))
+            return false;
+        if (otherTests.some(({ dir, matches }) => matches(path.relative(dir, file))))
             return false;
         return coverageInclude(relative) && !coverageExclude(relative) && !userExclude(relative);
     });
@@ -150,6 +181,19 @@ async function init(root, candidates, exclude, dir) {
     config.related = eligible;
     config.forceRerunTriggers = [];
     return eligible;
+}
+/**
+ * A file another plugin changed before nyorori's transform makes its tests
+ * fail to load. That says nothing about the tests, so the run stops here.
+ */
+function checkTransforms() {
+    if (changedBefore === undefined)
+        return;
+    const file = path.relative(vitest.config.root, changedBefore);
+    const which = transformsBefore.length > 0
+        ? `Vite plugins whose transform runs before nyorori's: ${transformsBefore.join(', ')}.`
+        : "No plugin's transform runs before nyorori's, so a plugin's load hook probably changed it.";
+    throw new ProjectError(`${file} was changed by another Vite plugin before nyorori could instrument it, so its mutants cannot be judged. ${which} Leave the file out with --exclude to judge the rest.`);
 }
 function toRef(spec) {
     return { project: spec.project.name, moduleId: spec.moduleId, pool: spec.pool };
@@ -187,6 +231,7 @@ async function run(active, limit, collect, profile, refs) {
     const started = performance.now();
     lastRun = undefined;
     await vitest.runTestSpecifications(refs.map(fromRef));
+    checkTransforms();
     if (!lastRun)
         throw new Error('Vitest finished a run without reporting it');
     const result = lastRun;
@@ -220,7 +265,8 @@ process.on('message', async (request) => {
             case 'plan': {
                 for (const file of request.files)
                     plans.set(file.file, file);
-                const specs = await vitest.getRelevantTestSpecifications();
+                // Finding the related tests transforms their imports too.
+                const specs = await vitest.getRelevantTestSpecifications().finally(checkTransforms);
                 send({ type: 'planned', specs: specs.map(toRef) });
                 break;
             }
@@ -249,6 +295,14 @@ function poolOf(refs, module) {
     if (!ref)
         throw new Error(`Vitest reported ${module.moduleId}, which this run did not ask for`);
     return ref.pool;
+}
+/** Matches paths relative to a project's directory, as Vitest globs its test files. */
+function globMatcher(include = [], exclude = []) {
+    if (include.length === 0)
+        return () => false;
+    const included = picomatch([...include], { dot: true });
+    const excluded = exclude.length > 0 ? picomatch([...exclude], { dot: true }) : () => false;
+    return (relative) => included(relative) && !excluded(relative);
 }
 /** Vitest's serialized errors may have no prototype, so `String(error)` can throw. */
 function describeError(error) {

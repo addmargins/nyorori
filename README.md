@@ -86,7 +86,7 @@ npx nyorori run --base origin/main
 
 다음은 제외합니다.
 
-- 테스트 파일
+- 테스트 파일. 타입 테스트(`typecheck.include`, 기본값 `*.test-d.ts` 등)와 벤치마크(`benchmark.include`, 기본값 `*.bench.ts` 등)도 켜져 있든 아니든 테스트 파일입니다.
 - 타입 선언
 - Vitest `coverage.exclude`에 걸리는 파일(설정 파일 등)
 
@@ -163,6 +163,9 @@ Vite에 영향을 주지 않는 `test` 옵션(`name`, `include`, `environment` �
 그 밖에 알아 둘 점:
 
 - 브라우저 모드 project도 지원하지 않습니다(exit 2).
+- nyorori의 플러그인은 다른 플러그인의 transform보다 먼저(`order: 'pre'`) 바뀐 파일을 계측합니다. 그래도 다른 플러그인이 먼저 파일을 바꾸면(그 플러그인도 `order: 'pre'`이고 더 앞에 있거나, `load` 훅이 내용을 바꾸는 경우) 그 파일을 판정할 수 없으므로, 먼저 도는 플러그인 이름과 함께 exit 2로 끝납니다. 그 파일은 `--exclude`로 빼세요.
+- `vitest run`처럼 `NODE_ENV`(설정되어 있지 않을 때만 `test`), `TEST`, `VITEST` 환경 변수를 설정합니다.
+- 스냅샷은 CI처럼 갱신하지 않습니다(`update: 'none'`). 없는 스냅샷은 쓰지 않고 실패하므로, 로컬에서도 스냅샷 파일을 커밋하지 않은 테스트가 있으면 기준 실행이 실패해 exit 2가 됩니다.
 - Yarn PnP(Plug'n'Play)에서는 Action의 `node`가 Vitest를 찾지 못합니다. `.yarnrc.yml`에 `nodeLinker: node-modules`를 두세요.
 - nyorori는 테스트 파일마다 실행 기록을 모으려고 `isolate: true`로 실행합니다. `isolate: false`인 프로젝트에서는 평소보다 느릴 수 있습니다.
 - 기준 실행은 값 종류를 기록하느라 조금 느립니다. 실행 시간을 직접 재서 단언하는 테스트(예: ReDoS 방어 테스트)는 기준 실행에서 실패해 exit 2가 될 수 있습니다.
