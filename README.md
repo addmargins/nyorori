@@ -187,6 +187,7 @@ Vite에 영향을 주지 않는 `test` 옵션(`name`, `include`, `environment` �
 | `CallUnwrap` | 함수 호출 → 첫 인자. `toInteger(x)`→`x`, `this.getValue(x)`→`x`, `Math.min(i, n)`→`i`. 문자열·배열을 바꾸는 메서드 → receiver. `s.trim()`→`s`, `xs.map(f)`→`xs` |
 | `CallStatement` | 값을 버리는 호출 문 → 호출 제거. `unmatched.delete(key)`, `await save(x)`→`await undefined` |
 | `Regex` | 정규식 리터럴: flag 하나 제거(`/a/gi`→`/a/i`), 그룹 밖의 `^`·`$` 제거, `[abc]`↔`[^abc]`, `\d`↔`\D`, `\w`↔`\W`, `\s`↔`\S` |
+| `Revert` | 이 PR이 바꾼 리터럴을 옛 값으로 되돌림: `maxReplaces || 500`→`maxReplaces || 1000`. 수, 정규식, 문자열, 템플릿 조각 |
 
 호출과 정규식 연산자는 값을 감싸는 함수나 변환을 더하거나(`normalizeZero(x)`, `.map(normalizeZero)`), 호출 문을 더하거나(`set.delete(key)`), 정규식 flag를 더한 수정에도 mutant가 생기게 합니다.
 
@@ -202,6 +203,13 @@ Vite에 영향을 주지 않는 `test` 옵션(`name`, `include`, `environment` �
 - `CallStatement`는 `super(…)`와 [로그 호출](#로그-호출)을 지우지 않습니다.
 - 정규식 mutant는 모두 `new RegExp`로 컴파일되는지 확인하고, 되지 않으면 버립니다. `^`·`$`가 없는 패턴의 `m`, `.`가 없는 패턴의 `s`는 빼도 같으므로 빼지 않습니다.
 - 이 셋은 [기준 실행의 프로파일](#기준-실행의-프로파일)로 예측하지 않고 실제로 실행합니다. 호출은 인자를 그대로 돌려주어도 부수 효과가 있을 수 있기 때문입니다.
+
+`Revert`는 리터럴 하나만 바꾼 수정(기본값 `1000`→`500`, 정규식의 패턴)에도 그 변경을 확인하는 mutant가 생기게 합니다. 그 리터럴을 담은 식의 다른 mutant는 값과 상관없이 잡히기 때문입니다. 설명은 `` `500` → `1000` (before this PR) ``이고, 살아남으면 새 값을 확인하는 테스트가 없다는 뜻입니다.
+
+- 옛 리터럴 하나를 같은 자리의 새 리터럴 하나로 바꾼 곳에만 만듭니다. 다른 토큰도 함께 바꿨으면 그 식의 다른 mutant가 맡습니다.
+- 에러 메시지(`throw`하는 값, `new TypeError('…')`처럼 이름이 `Error`로 끝나는 것의 인자)와 [로그 호출](#로그-호출)의 문자열에는 만들지 않습니다. 문구를 확인하지 않는 테스트가 흔하기 때문입니다.
+- 속성 이름, import 경로, JSX 속성, tagged template의 문자열에도 만들지 않습니다. `true`↔`false`와 정규식 flag 하나를 더한 것은 `BooleanLiteral`과 `Regex`가 이미 되돌립니다.
+- 값이 같은 리터럴(`0x10`→`16`)로 바꾼 것은 압축 결과가 같으므로 버립니다(TCE).
 
 ### 로그 호출
 

@@ -13,6 +13,7 @@ export const OPERATORS = [
   'CallUnwrap',
   'CallStatement',
   'Regex',
+  'Revert',
 ] as const
 
 export type Operator = (typeof OPERATORS)[number]

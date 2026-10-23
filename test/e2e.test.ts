@@ -268,6 +268,22 @@ test('hasTodo', () => { expect(hasTodo('todo: x')).toBe(true); expect(hasTodo('d
     expect(output).toContain('Survived   src/fix.js:29:16  Regex  `/…/i` → `/…/`  (every test still passes with this change)')
   })
 
+  test('reverts a changed literal, which survives where no test checks the new value', () => {
+    const limits = "export function maxItems(options) {\n  return options.max || 1000\n}\n\nexport function slug(s) {\n  return s.replace(/[^a-z]+/g, '-')\n}\n"
+    const dir = project('revert', {
+      'src/limits.js': limits,
+      // Checks that there is a default, not which one; and checks digits in a slug.
+      'test/limits.test.js': "import { expect, test } from 'vitest'\nimport { maxItems, slug } from '../src/limits.js'\ntest('maxItems', () => { expect(maxItems({ max: 3 })).toBe(3); expect(maxItems({})).toBeGreaterThan(0) })\ntest('slug', () => { expect(slug('a1 b')).toBe('a1-b') })\n",
+    }, { 'src/limits.js': limits.replace('1000', '500').replace('[^a-z]', '[^a-z0-9]') })
+    const { status, report, output } = nyorori(dir)
+    expect(status, output).toBe(1)
+    expect(statuses(report!).filter((s) => s.includes(' Revert '))).toEqual([
+      'src/limits.js:2 Revert `500` → `1000` (before this PR): Survived',
+      'src/limits.js:6 Revert `/[^a-z0-9]+/g` → `/[^a-z]+/g` (before this PR): Killed',
+    ])
+    expect(output).toContain('Survived   src/limits.js:2:25  Revert  `500` → `1000` (before this PR)  (every test still passes with this change)')
+  })
+
   test('a reasoned suppression turns a survivor into a reported, passing Ignored', () => {
     const dir = project('suppress', { 'src/age.ts': AGE_BASE, 'test/age.test.ts': AGE_TEST }, {
       'src/age.ts': AGE_HEAD.replace('  return age >= 18', '  // nyorori-ignore-next-line ComparisonBoundary -- callers validate age first\n  return age >= 18'),

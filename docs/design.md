@@ -209,6 +209,7 @@ TCE로 버린 mutant와, 실행 시간에 문자열 연결로 확인되어 건�
 | `CallUnwrap` | 함수 호출 → 첫 인자. `toInteger(x)`→`x`, `this.getValue(x)`→`x`, `Math.min(i, n)`→`i`. 문자열·배열을 바꾸는 메서드 → receiver. `s.trim()`→`s`, `xs.map(f)`→`xs`. 그 밖의 메서드 호출에는 만들지 않음 |
 | `CallStatement` | 값을 버리는 호출 문 → 호출 제거. `unmatched.delete(key)`→`undefined`, `await save(x)`→`await undefined` |
 | `Regex` | 정규식 리터럴: flag 하나 제거, 최상위 `^`·`$` 제거, 문자 클래스 부정(`[abc]`↔`[^abc]`), `\d`↔`\D`, `\w`↔`\W`, `\s`↔`\S` |
+| `Revert` | 이 PR이 리터럴 하나를 다른 리터럴 하나로 바꾼 곳: 옛 리터럴로 되돌림. `500`→`1000`, `/^['"]+/`→`/^'+/`. 수, bigint, 정규식, 문자열, 템플릿 조각. 에러 메시지와 로그 인자에는 만들지 않음 |
 
 문자열 리터럴→`""`과 배열/객체 리터럴 비우기는 오탐이 많아 2차로 미룬다.
 
@@ -328,6 +329,32 @@ es-toolkit과 i18next의 upstream PR 13개를 다시 돌려 보니, 고친 코�
 - `generate()` 전체는 중앙값 1.7~1.8초에서 2.4~2.5초가 됐다. 늘어난 mutant 하나에 약 1ms로, 대부분 TCE가 mutant마다 파일을 압축하는 비용이다.
 - 실제 PR에서는 바뀐 범위를 담은 호출 수에 비례한다. 늘어나는 비용의 대부분은 mutant 실행이다.
 - 메서드 규칙을 바꾼 뒤 지금의 `src`(16개 파일, 3876줄)로 같은 측정을 하면 `CallUnwrap`은 664개에서 510개가 된다. 첫 인자가 395개, receiver가 115개다. 빠진 것은 대부분 조회와 조건(`get`, `has`, `charCodeAt`, `startsWith`, `test`, `join`)이고, 기본 import한 `path`의 함수(`path.dirname(f)` 등 14개)도 빠졌다.
+
+#### 바꾼 리터럴 되돌리기
+
+리터럴만 바꾼 수정에는 그 변경을 확인하는 mutant가 없었다. i18next 사례 PR(`nyorori/case-literal-default`)은 `maxReplaces`의 기본값을 1000에서 500으로 바꿨다. 바뀐 `500`을 담은 식의 mutant(`maxReplaces || 500`의 `||`→`&&`, 기본값 객체를 돌려주는 화살표 함수의 FunctionBody)는 숫자와 상관없이 잡혀서 "All 2 mutants detected"로 통과했다. 정규식의 패턴만 바꾼 사례 PR(`nyorori/case-regex-body`)도 같다. 새 패턴의 Regex mutant는 생기지만, 옛 패턴으로 돌아가도 테스트가 실패하는지는 묻지 않는다.
+
+**`Revert`.** 토큰 diff가 옛 리터럴 토큰 하나를 같은 자리의 새 리터럴 토큰 하나로 바꿨으면(그 사이에 실행되는 다른 토큰을 넣거나 지우지 않았으면) 옛 텍스트를 되돌리는 mutant를 만든다. 설명은 `` `500` → `1000` (before this PR) ``이다. 살아남으면 새 값을 확인하는 테스트가 없다는 뜻이다.
+- 리터럴 토큰은 수(bigint 포함), 문자열, 정규식, `true`·`false`, 템플릿 조각이다. 종류가 달라도 된다(`'_'`→`/_/g`). 템플릿 조각은 끝이 같은 조각끼리만 짝짓는다(`` `a${ ``와 `` `b${ ``). 옛 텍스트는 base의 blob에서 읽으므로 따옴표도 옛 그대로다.
+- 지점은 리터럴 노드이고, 템플릿 조각이면 템플릿 리터럴 전체에서 그 조각만 바꾼다. 앵커는 리터럴(조각)의 시작이다.
+- 값이 아닌 리터럴에는 만들지 않는다: 속성 이름(`{ 1: a }`, 계산하는 `[2]`는 값), import·export의 경로, JSX 속성, 문 하나인 리터럴(`'use strict'`), tagged template의 조각(tag가 문자열 배열을 받으므로 괄호로 감쌀 수 없다). 모듈 최상위 코드는 다른 연산자처럼 대상이 아니다.
+- 같은 지점의 다른 mutant와 대체 텍스트가 같으면 만들지 않는다. 그래서 `true`→`false`는 BooleanLiteral이, flag 하나를 더한 정규식(`/a/`→`/a/g`)은 Regex의 flag 제거가 맡는다. 같은 지점에서 Revert를 맨 나중에 만들어서, 이전부터 있던 mutant의 이름이 그대로다.
+- 값이 같은 리터럴로 바꾼 것(`0x10`→`16`, `1`→`1e0`)의 Revert는 TCE가 버린다.
+- 프로파일로 예측하지 않는다. 실행해서 판정한다.
+
+**문자열.** 에러 메시지, 로그 인자, 사용자에게 보이는 글은 테스트 없이 자주 바뀐다. 그래서 문자열을 넣기 전에 따로 쟀다.
+- upstream PR 13개와 사례 PR 28개에는 문자열의 Revert가 하나도 없었다. 생긴 Revert는 4개로, 수 2개(사례 #10)와 정규식 2개(사례 #12, PR 2399의 `'_'`→`/_/g`)다.
+- 그래서 두 저장소의 최근 커밋 300개씩에서 `src`의 리터럴을 하나만 바꾼 곳을 모두 찾았다. 문자열(템플릿 조각 포함)은 39개였다. 30개는 모듈 최상위의 import 경로라 대상이 아니다. 3개는 i18next의 로그 메시지(후원 안내 문구)라 로그 필터가 이미 거른다. 남은 6개는 모두 코드가 쓰는 문자열이었다. es-toolkit `words`의 정규식을 만드는 템플릿 조각 3개, `isDeepKey`의 `'['`→`'.'`, `deburr`의 `'\ufe23'`→`'\ufe2f'`, i18next `Interpolator`의 nesting 정규식을 만드는 템플릿 조각이다. 그 커밋에서 하나씩 적용하고 `vitest related`로 돌리니 6개 모두 잡혔다. i18next의 것은 옛 정규식의 ReDoS로 테스트가 끝나지 않았다(nyorori에서는 Timeout). 잡음은 없었다.
+- `throw`나 `new …Error(…)` 안의 메시지는 600개 커밋에 하나도 없었다. 그래도 로그와 같은 이유로 뺀다. 메시지는 사람이 읽는 글이고, 그 문구를 확인하지 않는 테스트(`toThrow()`)가 흔하다. es-toolkit처럼 메시지를 정확히 확인하는 저장소에서는 그만큼의 검출을 잃는다.
+  - 빼는 것은 던지는 값, 이름이 `Error`로 끝나는 생성자나 함수(`TypeError`, `createError`, `errors.NotFoundError`)의 인자, 그리고 그 안에서 `+`, `&&`·`||`·`??`의 피연산자와 `?:`의 갈래다. `` throw new Error(`bad ${s}: ` + (a ? 'one' : 'two')) ``의 문자열과 조각이 모두 빠진다.
+  - JSX의 글(텍스트)은 리터럴 토큰이 아니고, JSX 속성 문자열은 값이 아니라서 대상이 아니다.
+- 문자열을 아예 빼면 위의 6개도 빠진다. 모두 테스트가 잡는 진짜 동작이다. 그래서 메시지와 로그만 뺐다.
+
+**결과.**
+- 사례 #10: Revert `500` → `1000` 2개(`Interpolator.js`, `defaults.js`)가 살아남는다. 2K로 통과하던 것이 2K 2S로 실패한다. 새 기본값을 확인하는 테스트가 없는 실제 공백이다.
+- 사례 #12: Revert `` `/^['"]+|['"]+$/g` → `/^'+|'+$/g` ``가 살아남는다(4K 2S에서 4K 3S). PR이 더한 테스트는 결과가 문자열인지만 확인해서, 큰따옴표를 벗기는지 아무도 보지 않는다. 실제 공백이다.
+- upstream PR 2399(i18next, `code?.replace('_', '-')`→`code?.replace(/_/g, '-')`): `/_/g` → `'_'`를 테스트가 잡는다(4K에서 5K). 다른 mutant의 판정은 그대로다. upstream PR 13개 중 Revert가 생긴 것은 이것뿐이다.
+- 커밋 300개씩에서 생긴 Revert는 11개였다(수 4, 정규식 1, 문자열 2, 템플릿 조각 4). 모두 잡혔다(Killed 10, ReDoS로 끝나지 않은 것 1). 테스트와 함께 병합된 커밋이라 공백의 증거는 아니지만, Revert가 잡음을 만들지 않는다는 증거다.
 
 ## 구현 구조
 
@@ -639,6 +666,7 @@ N은 그 mutant 지점의 hit 수를 모든 테스트 파일에 대해 더한 �
 - 같은 지점의 mutant끼리 대체 텍스트가 같으면 하나만 만든다. `if (check(true))`의 CallUnwrap `→ true`는 Condition `→ true`와 같다.
 - `CallUnwrap`은 첫 인자가 콜백인 함수 호출, 변환이 아닌 메서드 호출, 바로 읽고 버리는 사본(`xs.slice().map(f)`), `.call`/`.apply`/`.bind`, 다른 호출의 callee인 호출, 값을 버리는 호출 문, 둘레의 코드가 어차피 하는 변환(`if (Boolean(x))`, `` `${String(x)}` ``, `await Promise.resolve(x)`)은 만들지 않는다. `CallStatement`는 `super(…)`를 지우지 않는다("호출과 정규식" 참고).
 - `Regex`는 `^`·`$`가 없는 패턴의 `m`, `.`가 없는 패턴의 `s`를 빼지 않는다. 빼도 같은 정규식이다. 컴파일되지 않는 mutant도 만들지 않는다.
+- `Revert`는 에러 메시지(던지는 값과 `new …Error(…)`의 인자)의 문자열과 템플릿 조각에 만들지 않는다. 로그 인자처럼 사람이 읽는 글이다("바꾼 리터럴 되돌리기" 참고).
 - `x * 1`, `x / 1`, `x * 1n`, `x / 1n`은 `*`↔`/` 변형을 만들지 않는다.
   - bigint에서도 `x * 1n`과 `x / 1n`은 같은 값이다. `x`가 bigint가 아니면 둘 다 같은 메시지의 TypeError를 던진다(Symbol이면 `Cannot convert a Symbol value to a number`, 그 밖에는 `Cannot mix BigInt and other types, use explicit conversions`). 0n, 음수, 2^100 크기의 bigint, 수, `-0`, NaN, 문자열, null, undefined, boolean, 객체, bigint를 주는 `valueOf`, Symbol, `Object(3n)`의 21가지로 확인했다. `valueOf`도 양쪽에서 한 번씩 불린다.
   - 리터럴의 값으로 비교하므로 `0x1n`도 같다.
@@ -937,6 +965,10 @@ return age >= 18
   - async 함수가 돌려주는 `Promise.resolve(x)`에도 만들지 않는다. `x`가 native promise가 아니면 `return x`와는 함수의 promise가 resolve되는 microtask 시점만 다르다. 그 순서에 기대는 테스트만 잡을 수 있으므로 받아들였다. `await Promise.resolve(x)`와 `await x`는 시점까지 같다.
   - 기본 import한 모듈의 함수(`path.dirname(f)`)에는 만들지 않으므로, 그런 함수를 더한 수정은 놓친다.
   - 정규식 mutant는 CLI를 돌리는 Node가 컴파일하는지로 거른다. 세션은 같은 Node로 뜨므로 테스트도 같은 엔진에서 돈다.
+- **`Revert`.**
+  - 리터럴 하나를 리터럴 하나로 바꾼 곳에만 만든다. 다른 토큰과 함께 바꾼 곳(`age > 17`→`age >= 18`)은 그 식의 다른 mutant가 맡는다.
+  - 에러 메시지는 이름(`…Error`)과 `throw`로만 알아본다. 다른 이름의 에러 팩토리(`fail('…')`)나 사용자에게 보이는 문구(`label: 'Save'`)의 Revert는 테스트가 문구를 확인하지 않으면 살아남아 억제 주석이 필요하다. 측정한 저장소에는 없었다.
+  - 문자열을 확인하는 테스트가 있는 에러 메시지의 변경은 놓친다.
 - **로그 필터.**
   - 이름으로 판단한다. 로거 이름에 로그 레벨 메서드가 있지만 로거가 아닌 객체의 호출은 변형하지 않아서, 그 mutant를 놓친다. 이름이 다른 로거(`out.warn(…)`, `debug('x')`나 `log('x')`처럼 함수로 부르는 로거, `logger.child({ id }).info(…)`)는 거르지 않아서, 그 mutant가 살아남으면 억제 주석이 필요하다.
   - 경고를 테스트하는 라이브러리에서는 그 검출을 잃는다. i18next에서는 로그 호출 24곳 중 7곳을 테스트가 확인했다("로그 필터의 측정" 참고). 경고 호출을 더하거나 지우는 PR은 그 경고를 테스트하지 않아도 통과한다.

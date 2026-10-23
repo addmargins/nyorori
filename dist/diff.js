@@ -32,9 +32,9 @@ export function changedRanges(before, after, hunks, file) {
         const region = lineRegion(lines, after.length, hunk.newStart, hunk.newCount);
         // Unknown old lines match nothing.
         const removed = old ? old.tokens.slice(...overlapping(old.tokens, lineRegion(old.lines, old.length, hunk.oldStart, hunk.oldCount)))
-            : hunk.oldCount > 0 ? [{ start: 0, end: 0, key: '' }] : [];
+            : hunk.oldCount > 0 ? [{ start: 0, end: 0, key: '', kind: 'punct' }] : [];
         const [from, to] = overlapping(tokens, region);
-        diffTokens(removed, tokens.slice(from, to), { at: region.start, previous: tokens[from - 1]?.end, next: tokens[to]?.start }, ranges);
+        diffTokens(removed, tokens.slice(from, to), { at: region.start, previous: tokens[from - 1]?.end, next: tokens[to]?.start }, ranges, before);
     }
     return normalize(ranges);
 }
@@ -98,9 +98,10 @@ const OPERATORS = new Set(['||', '&&', '??', '|', '^', '&', '==', '!=', '===', '
 /**
  * Adds to `out` the changes from `before` to `after`, two token runs of one
  * hunk. `at` stands for where tokens were deleted when `after` has none;
- * `previous` and `next` are where the tokens just outside the run end and start.
+ * `previous` and `next` are where the tokens just outside the run end and
+ * start. `base` is the text of `before`'s tokens, if git could show it.
  */
-function diffTokens(before, after, around, out) {
+function diffTokens(before, after, around, out, base) {
     const ids = new Map();
     const id = (token) => {
         // A name that only TypeScript reads is not the one that runs: `x: T` → `declare x: T` drops the field `x`.
@@ -142,18 +143,32 @@ function diffTokens(before, after, around, out) {
             out.push({ start: place, end: place });
         }
     };
+    // The text of the base literal that a lone literal put in its place replaced, by its index in `after`.
+    const replaced = new Map();
     // Between two kept tokens, deleted tokens matter only if nothing was inserted:
     // any expression around the place also holds the inserted tokens. Tokens
     // that only TypeScript reads count as neither.
     let i = lo;
     let j = lo;
+    // The tokens that run, deleted and inserted (by index), since the last kept one.
     let deleted = [];
-    let inserted = false;
+    let inserted = [];
+    const kept = () => {
+        if (deleted.length > 0 && inserted.length === 0)
+            deletedAt(j, deleted[0], deleted.at(-1));
+        if (base !== undefined && deleted.length === 1 && inserted.length === 1) {
+            const was = deleted[0];
+            if (sameKindOfLiteral(was, after[inserted[0]]))
+                replaced.set(inserted[0], base.slice(was.start, was.end));
+        }
+        deleted = [];
+        inserted = [];
+    };
     for (const op of ops) {
         if (op === INSERT) {
             if (!after[j].type) {
                 changed[j] = 1;
-                inserted = true;
+                inserted.push(j);
             }
             j++;
         }
@@ -163,25 +178,33 @@ function diffTokens(before, after, around, out) {
             i++;
         }
         else {
-            if (deleted.length > 0 && !inserted)
-                deletedAt(j, deleted[0], deleted.at(-1));
-            deleted = [];
-            inserted = false;
+            kept();
             i++;
             j++;
         }
     }
-    if (deleted.length > 0 && !inserted)
-        deletedAt(j, deleted[0], deleted.at(-1));
+    kept();
     for (let t = 0; t < after.length; t++) {
         if (!changed[t])
             continue;
         let last = t;
         while (changed[last + 1])
             last++;
-        out.push({ start: after[t].start, end: after[last].end });
+        const before = replaced.get(t);
+        out.push(last === t && before !== undefined ? { start: after[t].start, end: after[t].end, before } : { start: after[t].start, end: after[last].end });
         t = last;
     }
+}
+/**
+ * Whether `was` and `now` are literals that can stand for each other: a
+ * number, string, regex, `true` or `false` for any of them, and a template
+ * chunk for a chunk with the same ends (`` `a${ `` for `` `b${ ``).
+ */
+function sameKindOfLiteral(was, now) {
+    const literal = (token) => token.kind === 'number' || token.kind === 'string' || token.kind === 'regex' || token.key === 'true' || token.key === 'false';
+    if (was.kind !== 'template' || now.kind !== 'template')
+        return literal(was) && literal(now);
+    return was.key[0] === now.key[0] && was.key.endsWith('${') === now.key.endsWith('${');
 }
 /**
  * Myers' O(ND) diff of two id sequences: the operations that turn `a` into
@@ -248,6 +271,8 @@ function normalize(ranges) {
             if (range.end > last.end) {
                 last.end = range.end;
                 delete last.cut;
+                if (range.before !== undefined)
+                    last.before = range.before;
             }
             else {
                 last.cut ??= range.cut;
@@ -255,6 +280,7 @@ function normalize(ranges) {
         }
         else if (range.end > last.end) {
             last.end = range.end;
+            delete last.before;
         }
     }
     return result;
@@ -477,7 +503,7 @@ function tokenize(text) {
         let key = kind === 'string' ? stringKey(raw) : raw;
         if (newline && ((previous && RESTRICTED.has(previous.text)) || raw === '++' || raw === '--'))
             key += '\n';
-        tokens.push({ start: i, end, key });
+        tokens.push({ start: i, end, key, kind });
         previous = { kind, text: raw };
         newline = false;
         i = end;

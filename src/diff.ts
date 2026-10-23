@@ -11,6 +11,12 @@ export interface Range {
    * of `size <= 0`, → `!Number.isInteger(size)` at the start of what is left.
    */
   cut?: 'start' | 'end'
+  /**
+   * On a changed token that took the place of one literal of the base: that
+   * literal's text. `maxReplaces || 1000` → `maxReplaces || 500` gives `1000`
+   * on `500` (see the Revert operator).
+   */
+  before?: string
 }
 
 /** What the branch changed in one file. */
@@ -66,9 +72,9 @@ export function changedRanges(before: string | undefined, after: string, hunks: 
     const region = lineRegion(lines, after.length, hunk.newStart, hunk.newCount)
     // Unknown old lines match nothing.
     const removed = old ? old.tokens.slice(...overlapping(old.tokens, lineRegion(old.lines, old.length, hunk.oldStart, hunk.oldCount)))
-      : hunk.oldCount > 0 ? [{ start: 0, end: 0, key: '' }] : []
+      : hunk.oldCount > 0 ? [{ start: 0, end: 0, key: '', kind: 'punct' as const }] : []
     const [from, to] = overlapping(tokens, region)
-    diffTokens(removed, tokens.slice(from, to), { at: region.start, previous: tokens[from - 1]?.end, next: tokens[to]?.start }, ranges)
+    diffTokens(removed, tokens.slice(from, to), { at: region.start, previous: tokens[from - 1]?.end, next: tokens[to]?.start }, ranges, before)
   }
   return normalize(ranges)
 }
@@ -134,9 +140,10 @@ const OPERATORS = new Set(['||', '&&', '??', '|', '^', '&', '==', '!=', '===', '
 /**
  * Adds to `out` the changes from `before` to `after`, two token runs of one
  * hunk. `at` stands for where tokens were deleted when `after` has none;
- * `previous` and `next` are where the tokens just outside the run end and start.
+ * `previous` and `next` are where the tokens just outside the run end and
+ * start. `base` is the text of `before`'s tokens, if git could show it.
  */
-function diffTokens(before: Token[], after: Token[], around: { at: number; previous?: number; next?: number }, out: Range[]): void {
+function diffTokens(before: Token[], after: Token[], around: { at: number; previous?: number; next?: number }, out: Range[], base?: string): void {
   const ids = new Map<string, number>()
   const id = (token: Token) => {
     // A name that only TypeScript reads is not the one that runs: `x: T` → `declare x: T` drops the field `x`.
@@ -175,39 +182,61 @@ function diffTokens(before: Token[], after: Token[], around: { at: number; previ
       out.push({ start: place, end: place })
     }
   }
+  // The text of the base literal that a lone literal put in its place replaced, by its index in `after`.
+  const replaced = new Map<number, string>()
   // Between two kept tokens, deleted tokens matter only if nothing was inserted:
   // any expression around the place also holds the inserted tokens. Tokens
   // that only TypeScript reads count as neither.
   let i = lo
   let j = lo
+  // The tokens that run, deleted and inserted (by index), since the last kept one.
   let deleted: Token[] = []
-  let inserted = false
+  let inserted: number[] = []
+  const kept = () => {
+    if (deleted.length > 0 && inserted.length === 0) deletedAt(j, deleted[0]!, deleted.at(-1)!)
+    if (base !== undefined && deleted.length === 1 && inserted.length === 1) {
+      const was = deleted[0]!
+      if (sameKindOfLiteral(was, after[inserted[0]!]!)) replaced.set(inserted[0]!, base.slice(was.start, was.end))
+    }
+    deleted = []
+    inserted = []
+  }
   for (const op of ops) {
     if (op === INSERT) {
       if (!after[j]!.type) {
         changed[j] = 1
-        inserted = true
+        inserted.push(j)
       }
       j++
     } else if (op === DELETE) {
       if (!before[i]!.type) deleted.push(before[i]!)
       i++
     } else {
-      if (deleted.length > 0 && !inserted) deletedAt(j, deleted[0]!, deleted.at(-1)!)
-      deleted = []
-      inserted = false
+      kept()
       i++
       j++
     }
   }
-  if (deleted.length > 0 && !inserted) deletedAt(j, deleted[0]!, deleted.at(-1)!)
+  kept()
   for (let t = 0; t < after.length; t++) {
     if (!changed[t]) continue
     let last = t
     while (changed[last + 1]) last++
-    out.push({ start: after[t]!.start, end: after[last]!.end })
+    const before = replaced.get(t)
+    out.push(last === t && before !== undefined ? { start: after[t]!.start, end: after[t]!.end, before } : { start: after[t]!.start, end: after[last]!.end })
     t = last
   }
+}
+
+/**
+ * Whether `was` and `now` are literals that can stand for each other: a
+ * number, string, regex, `true` or `false` for any of them, and a template
+ * chunk for a chunk with the same ends (`` `a${ `` for `` `b${ ``).
+ */
+function sameKindOfLiteral(was: Token, now: Token): boolean {
+  const literal = (token: Token) => token.kind === 'number' || token.kind === 'string' || token.kind === 'regex' || token.key === 'true' || token.key === 'false'
+  if (was.kind !== 'template' || now.kind !== 'template') return literal(was) && literal(now)
+  return was.key[0] === now.key[0] && was.key.endsWith('${') === now.key.endsWith('${')
 }
 
 /**
@@ -274,11 +303,13 @@ function normalize(ranges: Range[]): Range[] {
       if (range.end > last.end) {
         last.end = range.end
         delete last.cut
+        if (range.before !== undefined) last.before = range.before
       } else {
         last.cut ??= range.cut
       }
     } else if (range.end > last.end) {
       last.end = range.end
+      delete last.before
     }
   }
   return result
@@ -466,6 +497,7 @@ interface Token {
   end: number
   /** What is compared: the text, less what cannot change behaviour, plus a line break where it can. */
   key: string
+  kind: Kind
   /** Only TypeScript reads it (see typeSpans): inserting or deleting it changes nothing that runs. */
   type?: boolean
 }
@@ -511,7 +543,7 @@ function tokenize(text: string): Token[] {
     const raw = text.slice(i, end)
     let key = kind === 'string' ? stringKey(raw) : raw
     if (newline && ((previous && RESTRICTED.has(previous.text)) || raw === '++' || raw === '--')) key += '\n'
-    tokens.push({ start: i, end, key })
+    tokens.push({ start: i, end, key, kind })
     previous = { kind, text: raw }
     newline = false
     i = end

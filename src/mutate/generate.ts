@@ -206,6 +206,9 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
   const atCuts = new Map<string, Array<{ node: Node; parent: Node | null }>>()
   for (const { start, cut } of changes.ranges) if (cut) atCuts.set(`${cut}:${start}`, [])
   const cut = new Set<string>()
+  // The literals this branch put in place of others, as `start:end`, with the text of the ones they replaced (see revert).
+  const replaced = new Map<string, string>()
+  for (const { start, end, before } of changes.ranges) if (before !== undefined) replaced.set(`${start}:${end}`, before)
 
   /**
    * Whether `span` holds a change of its own. One in the block body of a
@@ -326,6 +329,9 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
   // as `Boolean(x)`, a template expression as `String(x)`, an awaited value as
   // `Promise.resolve(x)`. That call there changes nothing (see convert).
   const converted = new Map<Node, 'Boolean' | 'String' | 'Promise'>()
+  // Values that only make an error's message: `throw new TypeError('Expected a function')`,
+  // `throw 'bad ' + x`. Its text gets no Revert, like a log call's (see markMessages).
+  const messages = new Set<Node>()
   // A `console` declared in an enclosing scope (a parameter, an import, ...) is the code's own object.
   const isLogging = (node: Node) => (isConsoleCall(node) && !scopes.isDeclared('console')) || isLogCall(node)
 
@@ -371,6 +377,7 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
     else if (node.type === 'UnaryExpression' && node.operator === 'delete') references.add(unwrapReference(node.argument))
     else if (node.type === 'NewExpression') constructed.add(unwrapReference(node.callee))
     convert(node, parent, context)
+    markMessages(node)
     switch (node.type) {
       case 'BinaryExpression': {
         const entry = BINARY[node.operator]
@@ -430,13 +437,21 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
           for (const { at, literal, from, to } of regexMutations(node.regex.pattern, node.regex.flags)) {
             add(node, 'expression', node.start + at, 'Regex', literal, to === '' ? `\`${from}\` removed` : `\`${snippet(from)}\` → \`${snippet(to)}\``)
           }
-          break
+        } else if (typeof node.value === 'boolean') {
+          const other = String(!node.value)
+          add(node, 'expression', node.start, 'BooleanLiteral', other, `\`${node.value}\` → \`${other}\``)
         }
-        if (typeof node.value !== 'boolean') break
-        const other = String(!node.value)
-        add(node, 'expression', node.start, 'BooleanLiteral', other, `\`${node.value}\` → \`${other}\``)
+        // Last, so a mutant that another operator makes keeps its name: `true` → `false`, a flag removed.
+        if (isValue(node, parent) && !(typeof node.value === 'string' && messages.has(node))) revert(node, node.start, node.end)
         break
       }
+      case 'TemplateLiteral':
+        // The text of a tagged template is not a value: the tag gets it whole.
+        if (parent?.type === 'TaggedTemplateExpression' || messages.has(node)) break
+        for (const { start, end } of changesIn(changes.ranges, node.start, node.end)) {
+          if (!node.expressions.some((expression) => expression.start <= start && end <= expression.end)) revert(node, start, end)
+        }
+        break
       case 'IfStatement':
       case 'ConditionalExpression':
         condition(node.test, ['true', 'false'])
@@ -525,6 +540,22 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
   }
 
   /**
+   * `Revert`: the literal that this branch replaced, put back (see
+   * Range.before). A changed literal puts the expressions around it in
+   * scope, but none of their mutants says whether a test checks its new
+   * value: `maxReplaces || 500` gets `||` → `&&`, which tests kill whatever
+   * the number is. If this one survives, no test does. [start, end) is the
+   * literal's token in `site`: the literal itself, or a chunk of a template.
+   */
+  function revert(site: Node, start: number, end: number): void {
+    const before = replaced.get(`${start}:${end}`)
+    if (before === undefined) return
+    // A template chunk shows its text: `a` for `` `a${ ``.
+    const shown = (token: string) => snippet(site.type === 'TemplateLiteral' ? token.replace(/^[`}]|(?:`|\$\{)$/g, '') : token)
+    add(site, 'expression', start, 'Revert', edit(site, start, end, before), `\`${shown(code.slice(start, end))}\` → \`${shown(before)}\` (before this PR)`)
+  }
+
+  /**
    * Records the values that `node` converts (see converted). A test, the
    * operand of `!`, and both operands of an `&&` or `||` whose own value is
    * used that way are used only for their truthiness. An untagged template
@@ -563,6 +594,28 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
       case 'ArrowFunctionExpression':
         if (node.async && node.expression) converted.set(unwrap(node.body), 'Promise')
         break
+    }
+  }
+
+  /**
+   * Records the values that only make an error's message (see messages): what
+   * is thrown, the arguments of `new …Error(…)` or `…Error(…)`, and, within
+   * those, the operands of `+`, `&&`, `||`, `??` and the branches of `?:`.
+   * Messages are text for people, often reworded with no test that reads
+   * them; a log call's arguments are left out for the same reason.
+   */
+  function markMessages(node: Node): void {
+    if (node.type === 'ThrowStatement') messages.add(unwrap(node.argument))
+    else if ((node.type === 'NewExpression' || node.type === 'CallExpression') && /Error$/.test(calleeName(node.callee) ?? '')) {
+      for (const argument of node.arguments) messages.add(unwrap(argument))
+    }
+    if (!messages.has(node)) return
+    if ((node.type === 'BinaryExpression' && node.operator === '+') || node.type === 'LogicalExpression') {
+      messages.add(unwrap(node.left))
+      messages.add(unwrap(node.right))
+    } else if (node.type === 'ConditionalExpression') {
+      messages.add(unwrap(node.consequent))
+      messages.add(unwrap(node.alternate))
     }
   }
 
@@ -797,6 +850,16 @@ function unwrapReference(node: Node): Node {
   return node
 }
 
+/**
+ * Whether `literal` is a value the code computes: not a property name, an
+ * import source, a JSX attribute, or a statement of its own like `'use strict'`.
+ */
+function isValue(literal: Node, parent: Node | null): boolean {
+  if (!parent) return true
+  if ('key' in parent && parent.key === literal) return 'computed' in parent && parent.computed === true
+  return !['ImportDeclaration', 'ExportNamedDeclaration', 'ExportAllDeclaration', 'ImportAttribute', 'JSXAttribute', 'ExpressionStatement'].includes(parent.type)
+}
+
 function isBooleanLiteral(node: Node): boolean {
   return node.type === 'Literal' && typeof node.value === 'boolean'
 }
@@ -982,6 +1045,13 @@ function isCopy(call: CallExpression): boolean {
   const [first, ...rest] = call.arguments
   if (method === 'concat') return !first
   return method === 'slice' && rest.length === 0 && (!first || isNumber(first, 0))
+}
+
+/** The name a callee goes by: `Error`, `TypeError` in `errors.TypeError`, none in `make()`. */
+function calleeName(callee: Node): string | undefined {
+  const node = unwrapReference(callee)
+  if (node.type === 'Identifier') return node.name
+  return node.type === 'MemberExpression' && !node.computed && node.property.type === 'Identifier' ? node.property.name : undefined
 }
 
 /** The name of the method a call makes: `sort` in `xs.sort()`, none in `xs[k]()`. */

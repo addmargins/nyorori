@@ -366,6 +366,59 @@ describe('Regex', () => {
   })
 })
 
+describe('Revert', () => {
+  const changed = (before: string, after: string) =>
+    generate('file.js', after, changes(before, after, 'file.js'), 1).mutants.map((m) => `${m.line}:${m.column} ${m.operator} ${m.description}`)
+
+  test('puts back a number, bigint or regex literal that took the place of another', () => {
+    const before = [
+      'export function f(a, s, o) {',
+      '  const limit = a.max || 1000',
+      '  const big = 1n << 64n',
+      '  const parts = s.split(/,/)',
+      '  const on = o.on ?? false',
+      '  const key = { 1: a, [2]: s }',
+      '  return [limit, big, parts, on, key, 0x10]',
+      '}',
+    ].join('\n')
+    const after = before.replace('1000', '500').replace('64n', '32n').replace('/,/', '/[,;]/g').replace('?? false', '?? true')
+      .replace('1: a', '3: a').replace('[2]', '[4]').replace('0x10', '16')
+    expect(changed(before, after)).toEqual([
+      // `||` → `&&` is killed whatever the number is; only this says whether a test checks it.
+      '2:23 Logical `||` → `&&`',
+      '2:26 Revert `500` → `1000` (before this PR)',
+      '3:21 Revert `32n` → `64n` (before this PR)',
+      '4:26 Regex `[,;]` → `[^,;]`',
+      '4:31 Regex `/…/g` → `/…/`',
+      '4:25 Revert `/[,;]/g` → `/,/` (before this PR)',
+      // The same as BooleanLiteral, which keeps it; a property name is not a value; `16` minifies like `0x10`.
+      '5:19 Logical `o.on ?? true` → `o.on`',
+      '5:22 BooleanLiteral `true` → `false`',
+      '6:24 Revert `4` → `2` (before this PR)',
+    ])
+  })
+
+  test('puts back a string or a template chunk, but not the text of an error or a log call', () => {
+    const before = [
+      'export function f(a, s) {',
+      "  if (!a) throw new TypeError('Expected a function')",
+      "  if (s === 'x') throw new Error(`bad ${s}: ` + (a ? 'one' : 'two'))",
+      "  if (!s) return Promise.reject(createError('missing'))",
+      "  logger.warn('deprecated')",
+      "  return [s.split(','), `k=${a}`, s.padStart(2, '0')]",
+      '}',
+    ].join('\n')
+    const after = before.replace('Expected a function', 'Expected a callback').replace('bad ${', 'invalid ${').replace("'one'", "'1'")
+      .replace("'missing'", "'absent'").replace("'deprecated'", "'obsolete'").replace("split(',')", "split(';')").replace('`k=${', '`key=${')
+      .replace("'0'", "' '")
+    expect(changed(before, after).filter((m) => m.includes(' Revert '))).toEqual([
+      "6:19 Revert `';'` → `','` (before this PR)",
+      '6:25 Revert `key=` → `k=` (before this PR)',
+      "6:51 Revert `' '` → `'0'` (before this PR)",
+    ])
+  })
+})
+
 describe('scope', () => {
   test('only mutates sites on changed lines', () => {
     const code = ['function f(a) {', '  if (a > 1) return 1', '  return a === 2', '}'].join('\n')
@@ -508,9 +561,10 @@ describe('scope of a change', () => {
       '2:16 FunctionBody body → `return`',
       '5:11 FunctionBody body → `return`',
       '6:14 ComparisonBoundary `>` → `>=`',
+      '6:16 Revert `2` → `1` (before this PR)',
     ])
     // Only the body changed: the body site stays out.
-    expect(changed(before, before.replace('a > 1', 'a > 2'))).toEqual(['6:14 ComparisonBoundary `>` → `>=`'])
+    expect(changed(before, before.replace('a > 1', 'a > 2'))).toEqual(['6:14 ComparisonBoundary `>` → `>=`', '6:16 Revert `2` → `1` (before this PR)'])
   })
 
   test('leaves the call around a callback whose block body changed to the callback', () => {
