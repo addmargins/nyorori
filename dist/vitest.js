@@ -24,15 +24,15 @@ export function findVitest(root) {
     throw new ProjectError(`Cannot find vitest from ${root}. Install vitest (or vite-plus) in the project first.`);
 }
 /**
- * nyorori relies on the Node API of Vitest 4 and 5; older versions fail in
- * ways that look like test results.
+ * nyorori relies on the Node API of Vitest 4.1 and later; older versions fail
+ * in ways that look like test results. 4.0 has no `update: 'none'`: given
+ * `false`, it writes missing snapshots outside CI and passes.
  */
 export function checkVitestVersion(version) {
     const [major = NaN, minor = NaN] = (/^(\d+)\.(\d+)\./.exec(version)?.slice(1) ?? []).map(Number);
-    if (!(major >= 4))
-        throw new ProjectError(`nyorori needs Vitest 4 or later; this project uses Vitest ${version}.`);
-    const since41 = major > 4 || minor >= 1;
-    return { major, fsModuleCacheOption: major >= 5 ? 'top-level' : 'experimental', updateNone: since41, afterAllContext: since41 };
+    if (!(major > 4 || (major === 4 && minor >= 1)))
+        throw new ProjectError(`nyorori needs Vitest 4.1 or later; this project uses Vitest ${version}.`);
+    return { major, fsModuleCacheOption: major >= 5 ? 'top-level' : 'experimental' };
 }
 function resolvePackage(require, name) {
     try {

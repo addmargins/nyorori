@@ -36,14 +36,13 @@ jobs:
 ```
 
 - 문제가 된 mutant는 PR diff의 해당 줄에 어노테이션으로 표시되고, 요약은 job summary에 실립니다. 토큰 권한은 필요 없습니다.
-- 프로젝트에 Vitest 4.0 이상이나 Vite+(`vite-plus`)가 설치되어 있어야 합니다. nyorori는 프로젝트의 Vitest와 설정을 그대로 사용합니다. Vite+ 프로젝트에서는 `vp test`처럼 vite-plus에 들어 있는 Vitest를 씁니다.
+- 프로젝트에 Vitest 4.1 이상이나 Vite+(`vite-plus`)가 설치되어 있어야 합니다. nyorori는 프로젝트의 Vitest와 설정을 그대로 사용합니다. Vite+ 프로젝트에서는 `vp test`처럼 vite-plus에 들어 있는 Vitest를 씁니다.
 
 | Vitest | 지원 |
 |---|---|
 | 5.x | 지원 |
 | 4.1.x | 지원. 단, `test.projects`의 project는 [모두 Vite 서버를 따로 쓰므로](#지원하지-않는-vitest-설정) 판정하지 못함 |
-| 4.0.x | 4.1.x와 같음. 스냅샷을 갱신하지 않는 설정은 Vitest 내부 API로 함 |
-| 3.x 이하 | 지원하지 않음(exit 2) |
+| 4.0.x 이하 | 지원하지 않음(exit 2, `nyorori needs Vitest 4.1 or later`). 4.0에는 스냅샷을 갱신하지 않는 설정(`update: 'none'`)이 없음 |
 
 ## CLI
 
@@ -317,7 +316,7 @@ npm test
 - Action은 커밋된 `dist/`를 그대로 실행합니다. 런타임 의존성만 설치하고(`npm ci --omit=dev --ignore-scripts`) 빌드하지 않습니다.
 - `src/`를 바꿨다면 커밋하기 전에 `npm run build`로 `dist/`를 다시 만들어 같이 커밋하세요. CI는 `dist/`를 다시 빌드해서 커밋된 것과 다르면 실패합니다.
 - 테스트는 `src/`를 직접 실행하므로 `dist/`가 필요 없습니다.
-- e2e 테스트(`test/e2e.test.ts`)는 이 저장소의 Vitest 5로 fixture를 실행합니다. `NYORORI_E2E_VITEST`에 다른 Vitest를 설치한 디렉터리를 주면 그 Vitest로 실행합니다. CI는 Vitest 4.0.0(그때의 Vite 7.1과 함께)과 최신 4.x로도 실행합니다.
+- e2e 테스트(`test/e2e.test.ts`)는 이 저장소의 Vitest 5로 fixture를 실행합니다. `NYORORI_E2E_VITEST`에 다른 Vitest를 설치한 디렉터리를 주면 그 Vitest로 실행합니다. CI는 지원하는 가장 오래된 Vitest 4.1.0과 최신 4.x로도 실행합니다.
 
   ```sh
   npm install --prefix /tmp/vitest4 --legacy-peer-deps vitest@4 happy-dom@20.9.0

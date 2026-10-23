@@ -26,24 +26,21 @@ export function findVitest(root: string): string {
 
 /** What differs between the Vitest versions nyorori supports, as far as nyorori uses them. */
 export interface VitestFeatures {
+  /** Vitest 4 starts a Vite server for every project in test.projects, even one that sets only test options. */
   major: number
   /** Vitest 5 moved `experimental.fsModuleCache` to the top level. */
   fsModuleCacheOption: 'top-level' | 'experimental'
-  /** Vitest 4.1 takes `update: 'none'`. 4.0 takes a boolean, and `false` writes new snapshots outside CI. */
-  updateNone: boolean
-  /** Since 4.1 an afterAll hook gets `(context, suite)`; 4.0 passes the suite alone. */
-  afterAllContext: boolean
 }
 
 /**
- * nyorori relies on the Node API of Vitest 4 and 5; older versions fail in
- * ways that look like test results.
+ * nyorori relies on the Node API of Vitest 4.1 and later; older versions fail
+ * in ways that look like test results. 4.0 has no `update: 'none'`: given
+ * `false`, it writes missing snapshots outside CI and passes.
  */
 export function checkVitestVersion(version: string): VitestFeatures {
   const [major = NaN, minor = NaN] = (/^(\d+)\.(\d+)\./.exec(version)?.slice(1) ?? []).map(Number)
-  if (!(major >= 4)) throw new ProjectError(`nyorori needs Vitest 4 or later; this project uses Vitest ${version}.`)
-  const since41 = major > 4 || minor >= 1
-  return { major, fsModuleCacheOption: major >= 5 ? 'top-level' : 'experimental', updateNone: since41, afterAllContext: since41 }
+  if (!(major > 4 || (major === 4 && minor >= 1))) throw new ProjectError(`nyorori needs Vitest 4.1 or later; this project uses Vitest ${version}.`)
+  return { major, fsModuleCacheOption: major >= 5 ? 'top-level' : 'experimental' }
 }
 
 function resolvePackage(require: NodeJS.Require, name: string): string | undefined {

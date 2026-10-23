@@ -25,7 +25,7 @@ PR이 **추가하거나 바꾼 코드**에만 mutation을 넣고, 그 PR 시점�
 | 실행 시간 프로파일링 | 기준 실행에만 probe를 넣은 계측을 쓴다. mutant 실행은 probe 없는 계측을 쓴다 |
 | 프로파일로 살아남는 것이 확실한 mutant | 실행하지 않고 이유와 함께 Survived로 보고한다. `--no-predict`면 실행해서 예측을 검증한다 |
 | 타입도 프로파일도 null이 아니라고 하는 `?.`, `??` | 실행하지 않고 unnecessary by types로 따로 보고한다. CI를 실패시키지 않는다. TS 파일에서, config가 `strictNullChecks`를 켠 프로젝트만 본다 |
-| 지원하는 Vitest | 4.0 이상. 버전마다 다른 것은 `src/vitest.ts`의 `VitestFeatures`로 나눈다("남은 위험"의 "Vitest API 의존" 참고) |
+| 지원하는 Vitest | 4.1 이상. 버전마다 다른 것은 `src/vitest.ts`의 `VitestFeatures`로 나눈다("남은 위험"의 "Vitest API 의존" 참고) |
 
 ## 전체 흐름
 
@@ -932,16 +932,17 @@ return age >= 18
   - setup 파일을 `node_modules` 밖에 두는 것은 `vitest:resolve-core`가 bare `'vitest'`를 실행 중인 Vitest로 해석하는 동작에 기댄다. 4.0.0부터 있다.
   - 지원하지 않는 설정은 `project.vite.config.plugins`와 `project.config.experimental.viteModuleRunner`로 알아낸다.
 - **Vitest 4.**
-  - 4.0 이상을 지원한다. 쓰는 API를 4.0.0, 4.0.18, 4.1.0, 4.1.12의 소스와 하나씩 맞춰 보았다. `createVitest(mode, options, viteOverrides)`, `getRelevantTestSpecifications()`, `runTestSpecifications()`, `createSpecification(moduleId, locations, pool)`, `project.provide()`/`inject`, 리포터의 `onTestRunEnd(modules, errors)`, `TestModule`의 `meta()`·`ok()`·`errors()`·`diagnostic()`, `invalidateFile()`, `watcher.invalidates`, `matchesTestGlob()`, `vitest:resolve-core`, CLI의 환경 변수 설정은 4.0.0부터 같다.
+  - 4.1 이상을 지원한다. 쓰는 API를 4.0.0, 4.0.18, 4.1.0, 4.1.12의 소스와 하나씩 맞춰 보았다. `createVitest(mode, options, viteOverrides)`, `getRelevantTestSpecifications()`, `runTestSpecifications()`, `createSpecification(moduleId, locations, pool)`, `project.provide()`/`inject`, 리포터의 `onTestRunEnd(modules, errors)`, `TestModule`의 `meta()`·`ok()`·`errors()`·`diagnostic()`, `invalidateFile()`, `watcher.invalidates`, `matchesTestGlob()`, `vitest:resolve-core`, CLI의 환경 변수 설정은 4.0.0부터 같다.
   - 다른 것은 버전으로 나눈다(`VitestFeatures`).
-    - 디스크 캐시: Vitest 5는 `fsModuleCache`, 4는 `experimental.fsModuleCache`(4.0.0에는 없고 4.0.18에는 있다. 기본값은 꺼짐). 4에서도 프로젝트가 켰을 수 있으므로 끈다. 없는 버전에서는 무시된다.
-    - 스냅샷: 4.1부터 `update: 'none'`을 받는다. 4.0은 boolean만 받고 `'none'`을 truthy로 보아 모든 스냅샷을 갱신하게 된다. 그래서 4.0에는 `update: false`를 주고, Vitest 4.0의 `enableSnapshotUpdate()`가 `'all'`에 하는 일을 `'none'`으로 한다(`configOverride.snapshotOptions`와 `snapshot.options.updateSnapshot`). 내부 API지만 4.0.x는 더 나오지 않는다.
-    - setup 파일의 `afterAll`: 4.1부터 `(context, suite)`, 4.0은 `(suite)`
+    - 디스크 캐시: Vitest 5는 `fsModuleCache`, 4는 `experimental.fsModuleCache`(기본값은 꺼짐). 4에서도 프로젝트가 켰을 수 있으므로 끈다.
     - `benchmark` 설정: 4는 benchmark 모드에서만 기본값을 채운다. 그래서 기본 glob은 nyorori가 채운다.
-    - `experimental.viteModuleRunner`: 4.1부터 있다. 4.0에는 없으므로 검사할 것도 없다.
+  - 4.0은 지원하지 않는다. `nyorori needs Vitest 4.1 or later`로 exit 2다. 처음에는 4.0.0부터 지원했지만, 4.0에만 필요한 것이 둘 있었다.
+    - 스냅샷: 4.0의 `update`는 boolean만 받고 `'none'`을 truthy로 보아 모든 스냅샷을 갱신한다. 그래서 `update: false`를 주고, Vitest 4.0의 `enableSnapshotUpdate()`가 `'all'`에 하는 일을 `'none'`으로 했다. Vitest 내부(`configOverride.snapshotOptions`와 `snapshot.options.updateSnapshot`)에 직접 쓰는 것이다.
+    - setup 파일의 `afterAll`: 4.1부터 `(context, suite)`, 4.0은 `(suite)`다.
+    - 내부 API에 기대는 길을 남기기보다 4.1 이상만 지원하기로 했다. 4.0.x를 쓰는 프로젝트는 4.1로 올려야 한다.
   - Vitest 4는 `test.projects`의 project마다, `test` 옵션만 정한 inline project라도 Vite 서버를 따로 만든다(`initializeProject`). 그래서 4에서는 `test.projects`의 project를 모두 계측하지 못하고, 그 테스트가 바뀐 코드를 실행하면 exit 2다. 메시지도 Vite 옵션 대신 이것을 말한다. project마다 설정 파일이 있으면 `--root`로 그 project를 루트 설정으로 실행할 수 있다.
-  - Vitest 4.0.0은 지금의 Vite 7.3과 함께 쓰면 Vitest만으로도 테스트가 돌지 않는다(`Unknown method: getBuiltins`). 그때의 Vite 7.1과는 돈다.
-  - e2e 테스트는 `NYORORI_E2E_VITEST`가 가리키는 설치의 Vitest로도 돈다(fixture를 그 디렉터리의 `.tmp`에 만든다). CI의 `e2e-vitest-4` job이 Vitest 4.0.0(Vite 7.1.11)과 최신 4.x로 돌린다. 4에서 결과가 다른 것은 `test.projects` 테스트뿐이고, 테스트가 버전에 따라 기대를 나눈다.
+  - Vitest 4.0.0은 지금의 Vite 7.3과 함께 쓰면 Vitest만으로도 테스트가 돌지 않았다(`Unknown method: getBuiltins`). 4.1.0은 npm이 고르는 지금의 Vite(8.3.5)와 함께 돈다. 그래서 CI는 Vite를 고정하지 않는다.
+  - e2e 테스트는 `NYORORI_E2E_VITEST`가 가리키는 설치의 Vitest로도 돈다(fixture를 그 디렉터리의 `.tmp`에 만든다). CI의 `e2e-vitest-4` job이 Vitest 4.1.0과 최신 4.x로 돌린다. 4에서 결과가 다른 것은 `test.projects` 테스트뿐이고, 테스트가 버전에 따라 기대를 나눈다.
   - TanStack Query(Vitest 4.1.11, 0064fe8)에서 확인했다. `--root packages/query-core`로 `timeUntilStale`의 `||`를 `??`로, `partialMatchKey`의 `a === b`를 `b === a`로 바꾸면 7개 중 6개가 Killed, `staleTime ?? 0`이 예측한 Survived였다. `--root packages/react-query`로 `useQueryClient`에 테스트 없는 개발용 경고를 더하면 8개가 모두 Survived, 경고를 확인하는 테스트를 더하면 8개가 모두 Killed였다.
 - **여러 project 설정.**
   - 계측 플러그인은 `createVitest`로 루트 Vite 서버에만 넘긴다. setup 파일은 모든 project에 추가한다.

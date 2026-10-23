@@ -28,12 +28,12 @@ jobs:
 
   e2e-vitest-4:
     # The e2e fixtures against Vitest 4 (the normal run uses our Vitest 5): the
-    # oldest 4.0, with a Vite 7 of its day (newer ones break it), and the latest 4.x.
+    # oldest supported, 4.1.0, and the latest 4.x. Both run with the latest Vite they allow.
     name: e2e (${{ matrix.packages }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        packages: ['vitest@4.0.0 vite@7.1.11', 'vitest@4']
+        packages: ['vitest@4.1.0', 'vitest@4']
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5

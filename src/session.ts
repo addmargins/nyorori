@@ -11,7 +11,7 @@ import type { Reporter, TestModule, TestProject, TestSpecification, Vitest } fro
 import { SLOTS } from './mutate/profile.ts'
 import { PROVIDE, type ModuleResult, type Request, type Response, type SpecRef } from './protocol.ts'
 import type { FilePlan, NotJudgedReason } from './types.ts'
-import { checkVitestVersion, findVitest, ProjectError, type VitestFeatures } from './vitest.ts'
+import { checkVitestVersion, findVitest, ProjectError } from './vitest.ts'
 
 /** Vitest's default `benchmark` globs. Vitest 4 resolves the option only in benchmark mode. */
 const BENCHMARK = { include: ['**/*.{bench,benchmark}.?(c|m)[jt]s?(x)'], exclude: ['**/node_modules/**', '**/.git/**'] }
@@ -33,7 +33,7 @@ interface VitePlugin {
 }
 
 // The probe buffer goes back as the records of the probes that ran, keyed by probe key.
-const setup = (features: VitestFeatures) => `import { inject, afterAll } from 'vitest'
+const SETUP = `import { inject, afterAll } from 'vitest'
 const s = (globalThis.__nyorori ??= {})
 s.active = inject(${JSON.stringify(PROVIDE.active)}) ?? 0
 s.limit = inject(${JSON.stringify(PROVIDE.limit)}) ?? 0
@@ -42,7 +42,7 @@ const probes = inject(${JSON.stringify(PROVIDE.probes)}) ?? 0
 s.prof = probes > 0 ? new Float64Array(probes * ${SLOTS}) : null
 s.count = 0
 s.exceeded = false
-afterAll((${features.afterAllContext ? '{}, ' : ''}suite) => {
+afterAll(({}, suite) => {
   if (s.hits !== null) suite.meta.nyororiHits = s.hits
   if (s.prof !== null) {
     const records = {}
@@ -93,7 +93,7 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
   // can stay in the CLI's temporary directory instead of the project's node_modules.
   setupDir = dir
   const setupFile = path.join(dir, 'setup.mjs')
-  writeFileSync(setupFile, setup(features))
+  writeFileSync(setupFile, SETUP)
 
   const plugin = {
     name: 'nyorori',
@@ -140,8 +140,7 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
       ...(features.fsModuleCacheOption === 'top-level' ? { fsModuleCache: false } : ({ experimental: { fsModuleCache: false } } as object)),
       related: candidates,
       // As in CI: `false` means 'new' outside CI, which writes missing snapshots and passes.
-      // Vitest 4.0 takes no 'none'; see below.
-      update: features.updateNone ? 'none' : false,
+      update: 'none',
       // Hits and profiles are attributed per test file by the setup file, which
       // Vitest runs only once per worker under `isolate: false` here, so later
       // files would record nothing and their code would look untested.
@@ -155,13 +154,6 @@ async function init(root: string, candidates: string[], exclude: string[], dir: 
     },
     { plugins: [plugin] },
   )
-  if (!features.updateNone) {
-    // What Vitest 4.0's own enableSnapshotUpdate() does for 'all', for the
-    // workers (through every project's serialized config) and the CLI side.
-    const internal = vitest as unknown as { configOverride: Record<string, unknown>; snapshot: { options: { updateSnapshot: string } } }
-    internal.configOverride.snapshotOptions = { updateSnapshot: 'none', snapshotEnvironment: null }
-    internal.snapshot.options.updateSnapshot = 'none'
-  }
   // Code that never passes through the plugin looks untested, so these setups
   // would fail the PR with false NoCoverage. Their tests must not judge
   // anything; planning stops if they run the changed code (see unsupported).
