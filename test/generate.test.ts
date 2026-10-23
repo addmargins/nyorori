@@ -451,6 +451,26 @@ describe('scope of a change', () => {
     ])
   })
 
+  test('mutates an expression that lost its first or last operand, like one that lost a middle one', () => {
+    const before = 'export function chunk(arr: number[], size: number) {\n  if (size <= 0 || !Number.isInteger(size)) {\n    throw new Error()\n  }\n  return arr.filter((x) => x > 0 && x < size)\n}\n'
+    expect(changed(before, before.replace(' || !Number.isInteger(size)', '').replace(' && x < size', ''))).toEqual([
+      '2:7 Condition `size <= 0` → `true`',
+      '2:7 Condition `size <= 0` → `false`',
+      '2:12 ComparisonBoundary `<=` → `<`',
+      // The arrow function's body is what lost it.
+      '5:14 CallUnwrap `arr.filter((x) => x > 0)` → `arr`',
+      '5:28 FunctionBody `=> x > 0` → `=> undefined`',
+      '5:30 ComparisonBoundary `>` → `>=`',
+    ])
+    expect(changed(before, before.replace('size <= 0 || ', ''))).toEqual([
+      '2:7 Condition `!Number.isInteger(size)` → `true`',
+      '2:7 Condition `!Number.isInteger(size)` → `false`',
+      '2:7 Negation `!Number.isInteger(size)` → `Number.isInteger(size)`',
+    ])
+    // A statement deleted next to an expression took nothing from it.
+    expect(changed('export function f(a: number) {\n  g(a)\n  return a > 0\n}\n', 'export function f(a: number) {\n  return a > 0\n}\n')).toEqual([])
+  })
+
   test('mutates nothing in a reformatted function', () => {
     const before = 'export function clamp(x: number, lo: number, hi: number): number { if (x < lo) return lo; return x > hi ? hi : x }\n'
     const after = 'export function clamp(x: number, lo: number, hi: number): number {\n  if (x < lo) {\n    return lo;\n  }\n  return x > hi\n    ? hi\n    : x;\n}\n'

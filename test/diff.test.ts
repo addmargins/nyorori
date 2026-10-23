@@ -44,6 +44,14 @@ describe('changedRanges', () => {
     expect(diff('x = f(a, b)\n', 'x = f(c)\n')).toBe('x = f([c])\n')
   })
 
+  test('marks where an operand went with its operator, and which side lost it', () => {
+    // `a > 0` lost its last operand; `b` its first.
+    expect(changes('if (a > 0 || b) x()\n', 'if (a > 0) x()\n').ranges).toEqual([{ start: 9, end: 9, cut: 'end' }])
+    expect(changes('if (a > 0 || b) x()\n', 'if (b) x()\n').ranges).toEqual([{ start: 4, end: 4, cut: 'start' }])
+    // A deleted statement or argument took no operand.
+    expect(changes('g(a)\nf(a, b)\n', 'f(a)\n').ranges).toEqual([{ start: 0, end: 0 }, { start: 3, end: 3 }])
+  })
+
   test('marks a renamed name like any other replaced token', () => {
     expect(diff('function f(fromIndex) {\n  return fromIndex + 1\n}\n', 'function f(index) {\n  return index + 1\n}\n'))
       .toBe('function f([index]) {\n  return [index] + 1\n}\n')

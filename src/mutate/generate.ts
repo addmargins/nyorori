@@ -201,15 +201,21 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
 
   // The block bodies of functions, by start (filled by the first walk below).
   const blocks: Span[] = []
+  // The nodes at each place where an operand was cut off, outermost first (filled by the first walk), and the
+  // expressions that lost it, as `start:end` (see cutShort).
+  const atCuts = new Map<string, Array<{ node: Node; parent: Node | null }>>()
+  for (const { start, cut } of changes.ranges) if (cut) atCuts.set(`${cut}:${start}`, [])
+  const cut = new Set<string>()
 
   /**
    * Whether `span` holds a change of its own. One in the block body of a
    * function nested in it does not count: those statements belong to that
    * function and its sites, or `xs.forEach((x) => { … })` would be removed for
    * every edit in the callback. An expression body is part of the expression.
+   * An expression that lost an operand at its edge changed too.
    */
   function changed(span: Span): boolean {
-    return changesIn(changes.ranges, span.start, span.end).some(({ start, end }) =>
+    return cut.has(`${span.start}:${span.end}`) || changesIn(changes.ranges, span.start, span.end).some(({ start, end }) =>
       !inNestedBlock(span, Math.max(start, span.start), Math.min(end, span.end)))
   }
 
@@ -626,12 +632,15 @@ function plan(file: string, code: string, changes: Changes, types: TypeOracle): 
   // pass collects them all and the second also sees names declared below their
   // use: hoisted `var` and functions, or a module-level logger defined further down.
   // It also finds the block bodies that `changed` leaves to the functions they belong to.
-  walk(parsed.program, null, undefined, scopes, (node) => {
+  walk(parsed.program, null, undefined, scopes, (node, parent) => {
     if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') &&
       node.body?.type === 'BlockStatement') blocks.push(node.body)
+    atCuts.get(`end:${node.end}`)?.push({ node, parent })
+    atCuts.get(`start:${node.start}`)?.push({ node, parent })
     return undefined
   })
   blocks.sort((a, b) => a.start - b.start)
+  for (const nodes of atCuts.values()) for (const node of cutShort(nodes)) cut.add(`${node.start}:${node.end}`)
   scopes.freeze()
   walk<Context>(parsed.program, null, 'module', scopes, (node, parent, context) => {
     if (node.type === 'ExpressionStatement') statements.set(node.start, node)
@@ -743,6 +752,31 @@ function walk<T>(node: Node, parent: Node | null, state: T, scopes: Scopes, ente
     }
   }
   scopes.leave(node)
+}
+
+// Expressions that hold an operand at their edge more tightly than a binary operator would: `size <= 0`, `!x`, `a.b(c)`.
+const TIGHT = new Set<Node['type']>([
+  'BinaryExpression', 'LogicalExpression', 'UnaryExpression', 'UpdateExpression', 'AwaitExpression', 'MemberExpression', 'CallExpression',
+  'ChainExpression', 'TaggedTemplateExpression', 'TSAsExpression', 'TSSatisfiesExpression', 'TSNonNullExpression', 'TSTypeAssertion',
+  'TSInstantiationExpression',
+])
+
+/**
+ * Of `nodes`, which end (or start) where an operand was cut off with its
+ * operator, outermost first, those that lost it (see Range.cut). That is the
+ * expression left in the operand's place: from the innermost, up through
+ * what binds more tightly, so `size <= 0` and not its `0`. What holds it at
+ * the same place changed with it, like an arrow function whose body it is.
+ * None when it is an operand of a binary or logical expression around it:
+ * that one holds the place inside and changed anyway (`a && b && c` → `a && c`).
+ */
+function cutShort(nodes: Array<{ node: Node; parent: Node | null }>): Node[] {
+  let k = nodes.length - 1
+  if (k < 0 || !/Expression$|^(?:Identifier|Literal|TemplateLiteral|Super)$/.test(nodes[k]!.node.type)) return []
+  while (k > 0 && TIGHT.has(nodes[k - 1]!.node.type)) k--
+  const { parent } = nodes[k]!
+  if (parent?.type === 'BinaryExpression' || parent?.type === 'LogicalExpression') return []
+  return nodes.slice(0, k + 1).map(({ node }) => node)
 }
 
 function isNode(value: unknown): value is Node {

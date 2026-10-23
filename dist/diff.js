@@ -6,7 +6,8 @@ import { parseSync, visitorKeys } from 'oxc-parser';
  * inserted or replaced token is changed. Tokens deleted with nothing put in
  * their place leave an empty range between the tokens around them: an
  * expression around the deletion changed (`a && b && c` → `a && c`), one next
- * to it did not.
+ * to it did not, unless the deletion took an operand of its own (see
+ * Range.cut).
  *
  * Without `before` (an added file, or an old version git cannot show), every
  * token of the hunks is new.
@@ -30,16 +31,18 @@ export function changedRanges(before, after, hunks, file) {
     for (const hunk of hunks) {
         const region = lineRegion(lines, after.length, hunk.newStart, hunk.newCount);
         // Unknown old lines match nothing.
-        const removed = old ? overlapping(old.tokens, lineRegion(old.lines, old.length, hunk.oldStart, hunk.oldCount))
+        const removed = old ? old.tokens.slice(...overlapping(old.tokens, lineRegion(old.lines, old.length, hunk.oldStart, hunk.oldCount)))
             : hunk.oldCount > 0 ? [{ start: 0, end: 0, key: '' }] : [];
-        diffTokens(removed, overlapping(tokens, region), region.start, ranges);
+        const [from, to] = overlapping(tokens, region);
+        diffTokens(removed, tokens.slice(from, to), { at: region.start, previous: tokens[from - 1]?.end, next: tokens[to]?.start }, ranges);
     }
     return normalize(ranges);
 }
 /**
  * The changes in [start, end): ranges that overlap it, and places of a
  * deletion strictly inside it. A deletion just before or after an expression
- * did not change it.
+ * did not change it; where it cut the expression short (see Range.cut), the
+ * mutation planner looks for the expression itself.
  */
 export function changesIn(ranges, start, end) {
     // Disjoint and sorted, so the ends are sorted too.
@@ -76,25 +79,28 @@ function lineRegion(starts, length, line, count) {
         return { start: offset(line), end: offset(line) };
     return { start: offset(line - 1), end: offset(line - 1 + count) };
 }
-/** The tokens with a character in `region`; for an empty region, those that span it. */
+/** The indices [from, to) of the tokens with a character in `region`; for an empty region, of those that span it. */
 function overlapping(tokens, region) {
     const lo = firstEndingAfter(tokens, region.start);
     let end = lo;
     // For an empty region, at most a token around it, like a template literal the hunk adds a line to.
     while (end < tokens.length && tokens[end].start < region.end)
         end++;
-    return tokens.slice(lo, end);
+    return [lo, end];
 }
 /** Above this many edits in one hunk, every new token of it counts as changed. */
 export const MAX_EDITS = 1000;
 const EQUAL = 0;
 const DELETE = 1;
 const INSERT = 2;
+// Binary and logical operators. Deleted at the edge of a run, they took an operand with them (see Range.cut).
+const OPERATORS = new Set(['||', '&&', '??', '|', '^', '&', '==', '!=', '===', '!==', '<', '>', '<=', '>=', '<<', '>>', '>>>', '+', '-', '*', '/', '%', '**', 'in', 'instanceof']);
 /**
  * Adds to `out` the changes from `before` to `after`, two token runs of one
- * hunk. `at` stands for where tokens were deleted when `after` has none.
+ * hunk. `at` stands for where tokens were deleted when `after` has none;
+ * `previous` and `next` are where the tokens just outside the run end and start.
  */
-function diffTokens(before, after, at, out) {
+function diffTokens(before, after, around, out) {
     const ids = new Map();
     const id = (token) => {
         // A name that only TypeScript reads is not the one that runs: `x: T` → `declare x: T` drops the field `x`.
@@ -120,16 +126,28 @@ function diffTokens(before, after, at, out) {
         // Too different to be worth the search: all of it is new.
         ?? [...Array(endA - lo).fill(DELETE), ...Array(endB - lo).fill(INSERT)];
     const changed = new Uint8Array(after.length);
-    const deletedAt = (j) => {
-        const place = j < after.length ? after[j].start : after.length > 0 ? after.at(-1).end : at;
-        out.push({ start: place, end: place });
+    // `first` and `last`: the first and last of the deleted tokens that run.
+    const deletedAt = (j, first, last) => {
+        // `a > 0 || b` → `a > 0`: the operand went with the operator after `a > 0`; `a || b > 0` → `b > 0`: before `b > 0`.
+        const end = j > 0 ? after[j - 1].end : around.previous;
+        const start = j < after.length ? after[j].start : around.next;
+        if (OPERATORS.has(first.key) && end !== undefined) {
+            out.push({ start: end, end, cut: 'end' });
+        }
+        else if (OPERATORS.has(last.key) && start !== undefined) {
+            out.push({ start, end: start, cut: 'start' });
+        }
+        else {
+            const place = j < after.length ? after[j].start : after.length > 0 ? after.at(-1).end : around.at;
+            out.push({ start: place, end: place });
+        }
     };
     // Between two kept tokens, deleted tokens matter only if nothing was inserted:
     // any expression around the place also holds the inserted tokens. Tokens
     // that only TypeScript reads count as neither.
     let i = lo;
     let j = lo;
-    let deleted = false;
+    let deleted = [];
     let inserted = false;
     for (const op of ops) {
         if (op === INSERT) {
@@ -141,19 +159,20 @@ function diffTokens(before, after, at, out) {
         }
         else if (op === DELETE) {
             if (!before[i].type)
-                deleted = true;
+                deleted.push(before[i]);
             i++;
         }
         else {
-            if (deleted && !inserted)
-                deletedAt(j);
-            deleted = inserted = false;
+            if (deleted.length > 0 && !inserted)
+                deletedAt(j, deleted[0], deleted.at(-1));
+            deleted = [];
+            inserted = false;
             i++;
             j++;
         }
     }
-    if (deleted && !inserted)
-        deletedAt(j);
+    if (deleted.length > 0 && !inserted)
+        deletedAt(j, deleted[0], deleted.at(-1));
     for (let t = 0; t < after.length; t++) {
         if (!changed[t])
             continue;
@@ -226,8 +245,13 @@ function normalize(ranges) {
         }
         else if (last.start === last.end) {
             // A deletion right before a changed token: whatever holds the place holds the token too.
-            if (range.end > last.end)
+            if (range.end > last.end) {
                 last.end = range.end;
+                delete last.cut;
+            }
+            else {
+                last.cut ??= range.cut;
+            }
         }
         else if (range.end > last.end) {
             last.end = range.end;
