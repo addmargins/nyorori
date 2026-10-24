@@ -200,15 +200,17 @@ async function init(root, candidates, exclude, dir) {
     // Config files and setup files are in coverage.exclude too, but Vitest put them there, not the user.
     const reasonOf = (file) => {
         const relative = path.relative(config.root, file);
+        const name = path.basename(file);
+        // Another package's test and config files are known by their names alone: no more source code than ours.
         if (relative.startsWith('..') || path.isAbsolute(relative))
-            return 'outside-root';
+            return TEST_NAME.test(name) ? 'test' : CONFIG.test(name) ? 'config' : 'outside-root';
         if (setupFiles.has(file) || vitest.projects.some((project) => project.matchesTestGlob(file)))
             return 'test';
         if (otherTests.some(({ dir, matches }) => matches(path.relative(dir, file))))
             return 'test';
-        if (TEST_NAME.test(path.basename(file)))
+        if (TEST_NAME.test(name))
             return 'test';
-        if (CONFIG.test(path.basename(file)))
+        if (CONFIG.test(name))
             return 'config';
         if (userExclude(relative))
             return 'excluded';

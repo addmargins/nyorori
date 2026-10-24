@@ -696,13 +696,24 @@ registerHooks({ resolve: (specifier, context, next) => (specifier === 'typescrip
         'packages/core/src/a.ts': lib,
         'packages/core/test/a.test.ts': spec('a'),
         'packages/web/src/b.ts': lib,
-      }, { 'packages/core/src/a.ts': changed, 'packages/web/src/b.ts': changed })
+      }, {
+        'packages/core/src/a.ts': changed,
+        'packages/web/src/b.ts': changed,
+        // Another package's test and config files are not source files, wherever they are.
+        'packages/web/src/__tests__/b.test.tsx': spec('b'),
+        'packages/web/vitest.config.ts': 'export default {}\n',
+      })
       const { status, report, output } = nyorori(dir, '--root', 'packages/core')
       expect(status, output).toBe(1)
       expect(report!.judged).toEqual(['packages/core/src/a.ts'])
       expect(statuses(report!)).toEqual(['packages/core/src/a.ts:2 ComparisonBoundary `>=` → `>`: Survived'])
-      expect(report!.notJudged).toEqual([{ file: 'packages/web/src/b.ts', reason: 'outside-root' }])
-      expect(output).toContain('  WARNING    1 changed source file outside the Vitest root was not judged: packages/web/src/b.ts')
+      expect(report!.notJudged).toEqual([
+        { file: 'packages/web/src/__tests__/b.test.tsx', reason: 'test' },
+        { file: 'packages/web/src/b.ts', reason: 'outside-root' },
+        { file: 'packages/web/vitest.config.ts', reason: 'config' },
+      ])
+      expect(output).toContain(`  WARNING    1 changed source file outside the Vitest root was not judged: packages/web/src/b.ts
+  Not judged: 1 test file, 1 config file`)
     })
 
     test('warns about changed source files the coverage config leaves out', () => {

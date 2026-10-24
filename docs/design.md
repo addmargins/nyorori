@@ -191,7 +191,7 @@ TCE로 버린 mutant와, 실행 시간에 문자열 연결로 확인되어 건�
 - 파일 기준으로 다음은 제외하고, 이유와 함께 보고한다(`notJudged`). 파일마다 이 순서로 처음 맞는 이유 하나다. 앞의 셋은 CLI가, 나머지는 Vitest 설정을 아는 세션이 정한다.
   - 지운 파일(`deleted`): `git diff --diff-filter=D`. 판정할 코드가 없다.
   - `node_modules`, `.d.ts`(`declaration`)
-  - Vitest 루트 밖(`outside-root`). project의 glob은 루트 기준이라서, 루트 밖의 테스트 파일도 테스트 파일로 알아볼 수 없다. 그래서 이것을 먼저 본다.
+  - Vitest 루트 밖(`outside-root`). project의 glob은 루트 기준이라서, 루트 밖의 테스트 파일은 glob으로 알아볼 수 없다. 그래서 이것을 먼저 보고, 이름만 본다. 이름이 아래의 기본 테스트 이름이면 `test`, 설정 파일 이름이면 `config`이고, 나머지가 `outside-root`다. 전에는 다른 패키지의 테스트 파일도 "changed source file outside the Vitest root"로 경고했다(TanStack `packages/react-query/src/__tests__/useMutationState.test.tsx`, typescript-sdk `processCleanup.test.ts`).
   - 테스트 파일(`test`): Vitest의 `matchesTestGlob`, 그리고 project의 `setupFiles`와 `globalSetup`
   - 타입 테스트와 벤치마크(`test`): project마다 `typecheck.include`에서 `typecheck.exclude`를 뺀 것, `benchmark.include`에서 `benchmark.exclude`를 뺀 것. `matchesTestGlob`은 `include`만 보므로 따로 본다. 켜져 있지 않아도 뺀다. 테스트 파일이라서 그 안의 코드를 실행하는 테스트가 없고, 대상에 넣으면 NoCoverage로 거짓 실패한다.
   - 이름이 Vitest의 기본 테스트 이름(`*.test.*`, `*.spec.*`, `*.test-d.*`, `*.bench.*`)인 파일(`test`). 읽은 설정의 project가 실행하지 않아도 테스트 파일이다. 다른 설정이 실행하거나(벤치마크 workspace, 타입 테스트 설정) 일부러 뺀 것이다. 이것을 빼면 coverage 경고가 거짓으로 난다. es-toolkit의 `benchmarks/**/*.spec.ts`(루트 설정의 `exclude`)와 i18next의 `test/typescript/**/*.test.ts`(`vitest.workspace.typescript.mts`가 실행)가 upstream PR과 실험 PR에서 그랬다.

@@ -104,7 +104,7 @@ npx nyorori run --base origin/main
 | `deleted` | 지운 파일 | 개수만 표시 |
 | `node_modules` | `node_modules` 안의 파일 | 개수만 표시 |
 | `declaration` | 타입 선언(`.d.ts`) | 개수만 표시 |
-| `outside-root` | Vitest 루트(`--root`) 밖의 파일 | 경고 |
+| `outside-root` | Vitest 루트(`--root`) 밖의 파일. 루트 밖에서는 이름만 보므로, 이름이 아래의 테스트 파일(`*.test.*` 등)이나 설정 파일이면 `test`나 `config` | 경고 |
 | `test` | 테스트 파일. 타입 테스트(`typecheck.include`, 기본값 `*.test-d.ts` 등), 벤치마크(`benchmark.include`, 기본값 `*.bench.ts` 등), setup 파일(`setupFiles`, `globalSetup`)도 켜져 있든 아니든 해당. 이 설정이 실행하지 않아도 이름이 `*.test.*`, `*.spec.*`, `*.test-d.*`, `*.bench.*`이면 해당 | 개수만 표시 |
 | `config` | Vitest와 Vite 설정 파일(`vitest.config.ts`, `vite.config.mjs`, `vitest.unit.config.ts` 등) | 개수만 표시 |
 | `excluded` | `--exclude`에 걸리는 파일 | 개수만 표시 |
