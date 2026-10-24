@@ -531,8 +531,7 @@ describe('scope of a change', () => {
       '2:7 Condition `size <= 0` → `true`',
       '2:7 Condition `size <= 0` → `false`',
       '2:12 ComparisonBoundary `<=` → `<`',
-      // The arrow function's body is what lost it.
-      '5:14 CallUnwrap `arr.filter((x) => x > 0)` → `arr`',
+      // The arrow function's body is what lost it, and not the call around the arrow function.
       '5:28 FunctionBody `=> x > 0` → `=> undefined`',
       '5:30 ComparisonBoundary `>` → `>=`',
     ])
@@ -605,17 +604,48 @@ describe('scope of a change', () => {
     expect(changed(before, before.replace('a > 1', 'a > 2'))).toEqual(['6:14 ComparisonBoundary `>` → `>=`', '6:16 Revert `2` → `1`, as before this PR'])
   })
 
-  test('leaves the call around a callback whose block body changed to the callback', () => {
+  test('leaves the call around a callback whose body changed to the callback, a block body or an expression body', () => {
     const before = 'export function f(xs) {\n  xs.forEach((x) => {\n    a(x)\n  })\n  xs.forEach((x) => a(x))\n  return xs.some((x) => x.done)\n}\n'
     const after = before.replaceAll('a(x)', 'b(x)').replace('x.done', 'x.ok')
     expect(changed(before, after)).toEqual([
       '3:5 CallStatement `b(x)` removed',
-      // An expression body is part of the expression around it.
-      '5:6 CallStatement `xs.forEach((x) => b(x))` removed',
       '5:21 FunctionBody `=> b(x)` → `=> undefined`',
       '5:21 CallUnwrap `b(x)` → `x`',
       '6:25 FunctionBody `=> x.ok` → `=> undefined`',
     ])
+  })
+
+  test('leaves the calls around nested expression-bodied callbacks to the innermost one that changed', () => {
+    // react-email: a clause added to a filter callback, the dropped value of a render chain, a renamed value deep in setItems(…).
+    const list = (test: string) => `export async function list(entries) {\n  return Promise.all(entries.filter((e) => ${test}).map((e) => walk(e)))\n}\n`
+    expect(changed(list('e.isDirectory()'), list("e.isDirectory() && !e.name.startsWith('.')"))).toEqual([
+      "2:44 FunctionBody `=> e.isDirectory() && !e.name.startsWith('…` → `=> undefined`",
+      '2:60 Logical `&&` → `||`',
+      "2:63 Negation `!e.name.startsWith('.')` → `e.name.startsWith('.')`",
+    ])
+    const render = (value: string) => `export function render(el, resolve, reject) {\n  toStream(el)\n    .then((s) => s.text())\n    .then((t) => resolve(${value}))\n    .catch(reject)\n}\n`
+    expect(changed(render('t'), render('strip(t)'))).toEqual([
+      '4:18 FunctionBody `=> resolve(strip(t))` → `=> undefined`',
+      '4:18 CallUnwrap `resolve(strip(t))` → `strip(t)`',
+      '4:26 CallUnwrap `strip(t)` → `t`',
+    ])
+    const update = (id: string) => `export function done(setItems, index, r, id) {\n  setItems((prev) => prev.map((item, i) => (i === index ? { ...item, ${id} } : item)))\n}\n`
+    expect(changed(update('id: r.data!.id'), update('id'))).toEqual(['2:44 FunctionBody `=> (i === index ? { ...item, id } : item)` → `=> undefined`'])
+    // A curried function: only the inner one changed.
+    expect(changed('export function f(xs) {\n  return xs.map((x) => (y) => x + y)\n}\n', 'export function f(xs) {\n  return xs.map((x) => (y) => x - y)\n}\n')).toEqual([
+      '2:31 FunctionBody `=> x - y` → `=> undefined`',
+      '2:33 Arithmetic `-` → `+`',
+    ])
+  })
+
+  test('mutates the call around an expression-bodied callback when the call changed too', () => {
+    const before = 'export function f(xs) {\n  return xs.map((x) => x.id)\n}\n'
+    expect(changed(before, before.replace('map((x) => x.id)', 'filter((x) => x.ok)'))).toEqual([
+      '2:13 CallUnwrap `xs.filter((x) => x.ok)` → `xs`',
+      '2:27 FunctionBody `=> x.ok` → `=> undefined`',
+    ])
+    // An argument added after the callback.
+    expect(changed(before, before.replace('x.id)', 'x.id, xs)'))).toEqual(['2:13 CallUnwrap `xs.map((x) => x.id, xs)` → `xs`'])
   })
 })
 

@@ -12,7 +12,7 @@ import {
   type Span,
 } from 'oxc-parser'
 import { ScopeTracker, type ScopeTrackerNode } from 'oxc-walker'
-import { changesIn, lineStarts, type Changes } from '../diff.ts'
+import { changesIn, lineStarts, type Changes, type Range } from '../diff.ts'
 import { isOperator, type EquivalentMutant, type Mutant, type Operator, type Suppression, type SuppressionProblem } from '../types.ts'
 import { dropEquivalent } from './equivalent.ts'
 import { Strings, type Bindings } from './infer.ts'
@@ -224,8 +224,8 @@ function plan(
   const statements = new Map<number, ExpressionStatement>()
   const valueProbes = new Map<string, Probe>()
 
-  // The block bodies of functions, by start (filled by the first walk below).
-  const blocks: Span[] = []
+  // The bodies of functions, by start (filled by the first walk below), with where the function starts for an expression body.
+  const bodies: Array<Span & { arrow?: number }> = []
   // The nodes at each place where an operand was cut off, outermost first (filled by the first walk), and the
   // expressions that lost it, as `start:end` (see cutShort).
   const atCuts = new Map<string, Array<{ node: Node; parent: Node | null }>>()
@@ -236,31 +236,33 @@ function plan(
   for (const { start, end, before } of changes.ranges) if (before !== undefined) replaced.set(`${start}:${end}`, before)
 
   /**
-   * Whether `span` holds a change of its own. One in the block body of a
-   * function nested in it does not count: those statements belong to that
-   * function and its sites, or `xs.forEach((x) => { … })` would be removed for
-   * every edit in the callback. An expression body is part of the expression.
+   * Whether `span` holds a change of its own. One in the body of a function
+   * nested in it does not count: that code belongs to that function and its
+   * sites, or `xs.forEach((x) => { … })` would be removed for every edit in
+   * the callback, and `xs.map((x) => x.id)` unwrapped for every edit of `x.id`.
    * An expression that lost an operand at its edge changed too.
    */
   function changed(span: Span): boolean {
-    return cut.has(`${span.start}:${span.end}`) || changesIn(changes.ranges, span.start, span.end).some(({ start, end }) =>
-      !inNestedBlock(span, Math.max(start, span.start), Math.min(end, span.end)))
+    return cut.has(`${span.start}:${span.end}`) || changesIn(changes.ranges, span.start, span.end).some((range) => !inNestedBody(span, range))
   }
 
-  function inNestedBlock(span: Span, start: number, end: number): boolean {
+  function inNestedBody(span: Span, range: Range): boolean {
+    const start = Math.max(range.start, span.start)
+    const end = Math.min(range.end, span.end)
     let lo = 0
-    let hi = blocks.length
+    let hi = bodies.length
     while (lo < hi) {
       const mid = (lo + hi) >> 1
-      if (blocks[mid]!.start >= span.start) hi = mid
+      if (bodies[mid]!.start >= span.start) hi = mid
       else lo = mid + 1
     }
-    for (let i = lo; i < blocks.length && blocks[i]!.start <= start; i++) {
-      const block = blocks[i]!
-      // A header holds no body, only the `{` of its own.
-      if (block.end > span.end) continue
-      // A deletion right before the `{` or after the `}` is outside.
-      if (start === end ? block.start < start && start < block.end : end <= block.end) return true
+    for (let i = lo; i < bodies.length && bodies[i]!.start <= start; i++) {
+      const body = bodies[i]!
+      // A header holds no body, only the `{` of its own; an arrow function's own `=> undefined` holds its expression body.
+      if (body.end > span.end || (body.arrow !== undefined && body.arrow <= span.start)) continue
+      if (start !== end ? end <= body.end : body.start < start && start < body.end) return true
+      // A deletion right before the `{` or after the `}` is outside; an operand cut off at the edge of an expression body was the body's.
+      if (body.arrow !== undefined && start === (range.cut === 'start' ? body.start : range.cut === 'end' ? body.end : -1)) return true
     }
     return false
   }
@@ -709,15 +711,17 @@ function plan(
   // The tracker records a name when the walk reaches its declaration, so a first
   // pass collects them all and the second also sees names declared below their
   // use: hoisted `var` and functions, or a module-level logger defined further down.
-  // It also finds the block bodies that `changed` leaves to the functions they belong to.
+  // It also finds the bodies that `changed` leaves to the functions they belong to.
   walk(parsed.program, null, undefined, scopes, (node, parent) => {
-    if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') &&
-      node.body?.type === 'BlockStatement') blocks.push(node.body)
+    if ((node.type === 'FunctionDeclaration' || node.type === 'FunctionExpression' || node.type === 'ArrowFunctionExpression') && node.body) {
+      const { body } = node
+      bodies.push(body.type === 'BlockStatement' ? body : { start: body.start, end: body.end, arrow: node.start })
+    }
     atCuts.get(`end:${node.end}`)?.push({ node, parent })
     atCuts.get(`start:${node.start}`)?.push({ node, parent })
     return undefined
   })
-  blocks.sort((a, b) => a.start - b.start)
+  bodies.sort((a, b) => a.start - b.start)
   for (const nodes of atCuts.values()) for (const node of cutShort(nodes)) cut.add(`${node.start}:${node.end}`)
   scopes.freeze()
   walk<Context>(parsed.program, null, 'module', scopes, (node, parent, context) => {
