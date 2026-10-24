@@ -37,6 +37,16 @@ jobs:
 
 - 문제가 된 mutant는 PR diff의 해당 줄에 어노테이션으로 표시되고, 요약은 job summary에 실립니다. 토큰 권한은 필요 없습니다.
 - 프로젝트에 Vitest 4.1 이상이나 Vite+(`vite-plus`)가 설치되어 있어야 합니다. nyorori는 프로젝트의 Vitest와 설정을 그대로 사용합니다. Vite+ 프로젝트에서는 `vp test`처럼 vite-plus에 들어 있는 Vitest를 씁니다.
+- pnpm을 corepack으로 쓰는 프로젝트(`package.json`에 `packageManager`가 있음)에서는 `actions/setup-node@v5`가 패키지 매니저 캐시를 스스로 켜고, 그 단계에서 pnpm을 찾습니다. corepack을 켜기 전이라 `Unable to locate executable file: pnpm`으로 실패하므로, 캐시를 끄고 다음 단계에서 corepack을 켜세요.
+
+  ```yaml
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          package-manager-cache: false # 켜 두면 corepack이 pnpm을 주기 전에 pnpm을 찾다가 실패합니다
+      - run: corepack enable # package.json의 packageManager에 적힌 버전의 pnpm
+      - run: pnpm install --frozen-lockfile
+  ```
 
 | Vitest | 지원 |
 |---|---|
