@@ -58,7 +58,7 @@ npx nyorori run --base origin/main
 | `--timeout <ms>` | mutant 한 번 실행에 기준 실행 시간의 2배에 더해 허용할 시간. 기본값 10000 |
 | `--max-mutants <n>` | mutant가 n개를 넘으면 실행하지 않고 에러로 끝냄 |
 | `--json <file>` | 전체 결과를 JSON으로 저장 |
-| `--dry-run` | 테스트를 돌리지 않고 mutant 목록만 출력 |
+| `--dry-run` | 테스트를 돌리지 않고 mutant 목록만 출력. 종료 코드는 0 |
 | `--no-types` | TypeScript를 띄우지 않음. 문자열 `+`를 문법으로만 가리고, [타입으로 불필요한 방어 코드](#타입으로-불필요한-방어-코드)도 가리지 않음. [문자열 `+`](#문자열-) 참고 |
 | `--no-predict` | 기준 실행의 프로파일로 살아남는 것이 확실한 mutant도 실행하고, 예측이 틀린 mutant를 알림. [기준 실행의 프로파일](#기준-실행의-프로파일) 참고 |
 | `--log-guards` | 로그만 하는 `if`도 조건까지 변형함. 로그 호출 자체는 그래도 변형하지 않음. `--json`의 `logGuards`에 남음. [로그 호출](#로그-호출) 참고 |
@@ -78,8 +78,9 @@ npx nyorori run --base origin/main
 | Survived | 관련 테스트가 모두 통과, 또는 [기준 실행의 프로파일](#기준-실행의-프로파일)로 보아 통과할 것이 확실함 | 실패 |
 | NoCoverage | 바뀐 코드를 실행하는 테스트가 없음 | 실패 |
 | Ignored | 살아남았지만 억제 주석으로 제외 | 통과. 요약에 표시 |
+| NotRun | `--dry-run`이라 실행하지 않음. 판정이 아님 | 통과 |
 
-`--json`의 Survived와 NoCoverage 결과에는 모두 `reason`이 있습니다. [기준 실행의 프로파일](#기준-실행의-프로파일)이 이유를 알면 그 이유이고, 아니면 텍스트 출력과 같은 `every test still passes with this change`나 `no test runs this code`입니다. `--dry-run`은 판정하지 않으므로 `reason`이 없습니다.
+`--json`의 Survived와 NoCoverage 결과에는 모두 `reason`이 있습니다. [기준 실행의 프로파일](#기준-실행의-프로파일)이 이유를 알면 그 이유이고, 아니면 텍스트 출력과 같은 `every test still passes with this change`나 `no test runs this code`입니다. `--dry-run`은 아무것도 판정하지 않으므로 `--json`의 모든 결과가 `"status": "NotRun"`이고 `reason`이 없습니다.
 
 죽은 분기 안의 변경처럼 압축(`oxc-minify`)하면 원본과 같아지는 mutant는 실행하기 전에 버립니다(TCE).
 출력과 job summary에는 버린 개수만 표시하고, `--json`에는 `equivalent`로 남깁니다. CI 결과에는 영향이 없습니다.

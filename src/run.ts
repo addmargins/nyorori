@@ -184,7 +184,8 @@ export async function run(options: RunOptions): Promise<Report> {
 
     const suppressionOf = (mutant: Mutant) =>
       report.suppressions.find((s) => s.file === mutant.file && s.targetLine === mutant.line && s.operators.includes(mutant.operator))
-    let results: MutantResult[] = mutants.map((mutant) => ({ ...mutant, status: 'NoCoverage', suppression: suppressionOf(mutant), tests: [] }))
+    // Each run below gives its mutant a status; a dry run leaves them all NotRun.
+    let results: MutantResult[] = mutants.map((mutant) => ({ ...mutant, status: 'NotRun', suppression: suppressionOf(mutant), tests: [] }))
     report.results = results
     if (options.dryRun || results.length === 0) {
       reportUnusedSuppressions(report, reformatted)

@@ -28,6 +28,34 @@ test('equivalent mutants are counted, but neither annotated nor failing', () => 
   expect(exitCode(report)).toBe(0)
 })
 
+test('a dry run lists its mutants as NotRun, and neither counts nor annotates them as findings', () => {
+  const report: Report = {
+    gitRoot: '/repo',
+    base: 'abc',
+    judged: ['src/a.ts'],
+    files: ['src/a.ts'],
+    notJudged: [],
+    results: [
+      { id: 1, file: '/repo/src/a.ts', line: 2, column: 14, operator: 'ComparisonBoundary', description: '`>=` → `>`', status: 'NotRun', tests: [] },
+      { id: 2, file: '/repo/src/a.ts', line: 3, column: 10, operator: 'Condition', description: '`ok` → `true`', status: 'NotRun', tests: [] },
+    ],
+    equivalent: [],
+    skipped: [],
+    unnecessary: [],
+    suppressions: [],
+    problems: [],
+    types: { backend: 'typescript', files: 1, untyped: [] },
+    dryRun: true,
+    logGuards: false,
+  }
+  expect(formatText(report)).toBe(`nyorori: 2 mutants in 1 changed file (dry run)
+  src/a.ts:2:14  ComparisonBoundary  \`>=\` → \`>\`
+  src/a.ts:3:10  Condition  \`ok\` → \`true\``)
+  expect(formatSummary(report)).toBe('## nyorori\n\n2 mutants in 1 changed file, none run (dry run).\n')
+  expect(formatAnnotations(report)).toEqual([])
+  expect(exitCode(report)).toBe(0)
+})
+
 test('TypeScript files judged without types get one line of text, and nothing else', () => {
   const reason = 'TypeScript is unavailable: Unable to resolve @typescript/typescript-win32-x64'
   const report: Report = {

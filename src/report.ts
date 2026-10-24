@@ -283,6 +283,8 @@ export function formatSummary(report: Report): string {
   if (none !== undefined) {
     lines.push(`${none[0]!.toUpperCase()}${none.slice(1)}.`)
     if (stopped.length > 0 && !report.dryRun) lines.push('', unsupportedAdvice(stopped, true))
+  } else if (report.dryRun) {
+    lines.push(`${plural(report.results.length, 'mutant')} in ${plural(report.files.length, 'changed file')}, none run (dry run).`)
   } else if (failed.length === 0) {
     lines.push(`All ${report.results.length} mutants in the changed code are detected by tests (${counts(report)}).`)
   } else {

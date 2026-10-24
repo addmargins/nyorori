@@ -207,6 +207,8 @@ export function isEven(n: number): boolean {
       '20:16 Equality `===` → `!==`',
       '20:12 Arithmetic `%` → `*`',
     ])
+    // Nothing was run, so nothing was judged: no NoCoverage, and no reason.
+    expect(report!.results.every((r) => r.status === 'NotRun' && r.reason === undefined && r.tests.length === 0)).toBe(true)
     // `arr.length - 1` is no longer in scope, so its new suppression should go; the re-indented one stays.
     expect(report!.problems.map((p) => `${p.line} ${p.message}`)).toEqual(['6 Suppression matches no mutant of Arithmetic on line 7. Remove it.'])
     expect(report!.suppressions.map((s) => `${s.line} ${s.isNew}`)).toEqual(['6 true', '13 true'])
