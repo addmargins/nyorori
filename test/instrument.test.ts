@@ -358,13 +358,17 @@ async function main() {
 })
 
 describe('reverted literals', () => {
-  // No semicolons, and the regex opens a statement after a block.
+  // No semicolons, and the regex opens a statement after a block. Each literal is the only change in its statement.
   const before = `function limits(o, s) {
   const out = []
-  out.push(o.max || 1000, \`\${2n ** 3n}\`, s.split(/,/).length, \`n=\${o.n}!\`)
+  out.push(o.max || 1000)
+  out.push(\`\${2n ** 3n}\`)
+  out.push(s.split(/,/).length)
+  out.push(\`n=\${o.n}!\`)
   if (o.n) { out.push(o.n) }
   /^x/.test(s) && out.push('x')
-  out.push(o.n > 10 ? 'big' : 'small')
+  out.push(o.n > 10 ? 'small' : 'none')
+  out.push(o.n > 5 ? 'big' : 'small')
   return out
 }
 function main() {
@@ -380,13 +384,13 @@ function main() {
   test('puts back each literal that took the place of another', () => {
     expect(mutants.filter((m) => m.operator === 'Revert').map((m) => `${m.line}:${m.column} ${m.description}`)).toEqual([
       '3:21 `500` → `1000`, as before this PR',
-      '3:35 `4n` → `3n`, as before this PR',
-      '3:49 `/[,;]/` → `/,/`, as before this PR',
+      '4:21 `4n` → `3n`, as before this PR',
+      '5:20 `/[,;]/` → `/,/`, as before this PR',
       // A template's chunk: the site is the whole template.
-      '3:73 `?` → `!`, as before this PR',
-      '5:3 `/^y/` → `/^x/`, as before this PR',
-      '6:18 `20` → `10`, as before this PR',
-      "6:23 `'large'` → `'big'`, as before this PR",
+      '6:20 `?` → `!`, as before this PR',
+      '8:3 `/^y/` → `/^x/`, as before this PR',
+      '9:18 `20` → `10`, as before this PR',
+      "10:22 `'large'` → `'big'`, as before this PR",
     ])
     expect(plain.split('\n').find((line) => line.includes('/^y/.test(s)'))).toMatch(/^  \{ \(__nyorori_h\(/)
   })

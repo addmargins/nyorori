@@ -104,6 +104,9 @@ const SKIP_NODES = new Set<Node['type']>([
 
 const FUNCTIONS = new Set<Node['type']>(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'])
 
+/** The nodes whose children a Revert's statement does not reach past (see unitOf), besides functions. */
+const UNIT = /Statement$|Declaration$|^(?:Program|ClassBody|SwitchCase|(?:Object|Array)(?:Expression|Pattern)|JSX(?:OpeningElement|Element|Fragment))$/
+
 /**
  * Where a node sits. Module-level code runs once at import time, and the
  * arguments of a log call (a global `console` call, `logger.warn(…)`) or of a
@@ -234,6 +237,8 @@ function plan(
   // The literals this branch put in place of others, as `start:end`, with the text of the ones they replaced (see revert).
   const replaced = new Map<string, string>()
   for (const { start, end, before } of changes.ranges) if (before !== undefined) replaced.set(`${start}:${end}`, before)
+  // The parent of each node, for unitOf (filled by the first walk when a literal took the place of another).
+  const parents = new Map<Node, Node | null>()
 
   /**
    * Whether `span` holds a change of its own. One in the body of a function
@@ -242,8 +247,9 @@ function plan(
    * the callback, and `xs.map((x) => x.id)` unwrapped for every edit of `x.id`.
    * An expression that lost an operand at its edge changed too.
    */
-  function changed(span: Span): boolean {
-    return cut.has(`${span.start}:${span.end}`) || changesIn(changes.ranges, span.start, span.end).some((range) => !inNestedBody(span, range))
+  function changed(span: Span, besides?: Span): boolean {
+    return cut.has(`${span.start}:${span.end}`) || changesIn(changes.ranges, span.start, span.end).some((range) =>
+      !(range.start === besides?.start && range.end === besides.end) && !inNestedBody(span, range))
   }
 
   function inNestedBody(span: Span, range: Range): boolean {
@@ -573,13 +579,28 @@ function plan(
    * value: `maxReplaces || 500` gets `||` → `&&`, which tests kill whatever
    * the number is. If this one survives, no test does. [start, end) is the
    * literal's token in `site`: the literal itself, or a chunk of a template.
+   * Only when nothing else in its statement changed: put back among other
+   * changes, the old literal makes code that never existed, which the
+   * mutants of those changes test already (see unitOf).
    */
   function revert(site: Node, start: number, end: number): void {
     const before = replaced.get(`${start}:${end}`)
-    if (before === undefined) return
+    if (before === undefined || changed(unitOf(site), { start, end })) return
     // A template chunk shows its text: `a` for `` `a${ ``.
     const shown = (token: string) => snippet(site.type === 'TemplateLiteral' ? token.replace(/^[`}]|(?:`|\$\{)$/g, '') : token)
     add(site, 'expression', start, 'Revert', edit(site, start, end, before), `\`${shown(code.slice(start, end))}\` → \`${shown(before)}\`, as before this PR`)
+  }
+
+  /**
+   * The statement that `node` is in, for revert(), or the part of one that
+   * stands on its own: the test of an `if` or a loop, a function's parameter
+   * or expression body, a class member, an entry of an object or array
+   * literal, a JSX attribute or child. A PR that changes two defaults in one
+   * returned object changes two values, each with its own Revert.
+   */
+  function unitOf(node: Node): Node {
+    for (let parent = parents.get(node); parent && !UNIT.test(parent.type) && !FUNCTIONS.has(parent.type); parent = parents.get(parent)) node = parent
+    return node
   }
 
   /**
@@ -717,6 +738,7 @@ function plan(
       const { body } = node
       bodies.push(body.type === 'BlockStatement' ? body : { start: body.start, end: body.end, arrow: node.start })
     }
+    if (replaced.size > 0) parents.set(node, parent)
     atCuts.get(`end:${node.end}`)?.push({ node, parent })
     atCuts.get(`start:${node.start}`)?.push({ node, parent })
     return undefined

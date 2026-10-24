@@ -33,6 +33,8 @@ const SKIP_NODES = new Set([
     'TSEmptyBodyFunctionExpression',
 ]);
 const FUNCTIONS = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression']);
+/** The nodes whose children a Revert's statement does not reach past (see unitOf), besides functions. */
+const UNIT = /Statement$|Declaration$|^(?:Program|ClassBody|SwitchCase|(?:Object|Array)(?:Expression|Pattern)|JSX(?:OpeningElement|Element|Fragment))$/;
 const BINARY = {
     '<': ['ComparisonBoundary', '<='],
     '<=': ['ComparisonBoundary', '<'],
@@ -142,6 +144,8 @@ function plan(file, code, changes, types, options) {
     for (const { start, end, before } of changes.ranges)
         if (before !== undefined)
             replaced.set(`${start}:${end}`, before);
+    // The parent of each node, for unitOf (filled by the first walk when a literal took the place of another).
+    const parents = new Map();
     /**
      * Whether `span` holds a change of its own. One in the body of a function
      * nested in it does not count: that code belongs to that function and its
@@ -149,8 +153,8 @@ function plan(file, code, changes, types, options) {
      * the callback, and `xs.map((x) => x.id)` unwrapped for every edit of `x.id`.
      * An expression that lost an operand at its edge changed too.
      */
-    function changed(span) {
-        return cut.has(`${span.start}:${span.end}`) || changesIn(changes.ranges, span.start, span.end).some((range) => !inNestedBody(span, range));
+    function changed(span, besides) {
+        return cut.has(`${span.start}:${span.end}`) || changesIn(changes.ranges, span.start, span.end).some((range) => !(range.start === besides?.start && range.end === besides.end) && !inNestedBody(span, range));
     }
     function inNestedBody(span, range) {
         const start = Math.max(range.start, span.start);
@@ -509,14 +513,29 @@ function plan(file, code, changes, types, options) {
      * value: `maxReplaces || 500` gets `||` → `&&`, which tests kill whatever
      * the number is. If this one survives, no test does. [start, end) is the
      * literal's token in `site`: the literal itself, or a chunk of a template.
+     * Only when nothing else in its statement changed: put back among other
+     * changes, the old literal makes code that never existed, which the
+     * mutants of those changes test already (see unitOf).
      */
     function revert(site, start, end) {
         const before = replaced.get(`${start}:${end}`);
-        if (before === undefined)
+        if (before === undefined || changed(unitOf(site), { start, end }))
             return;
         // A template chunk shows its text: `a` for `` `a${ ``.
         const shown = (token) => snippet(site.type === 'TemplateLiteral' ? token.replace(/^[`}]|(?:`|\$\{)$/g, '') : token);
         add(site, 'expression', start, 'Revert', edit(site, start, end, before), `\`${shown(code.slice(start, end))}\` → \`${shown(before)}\`, as before this PR`);
+    }
+    /**
+     * The statement that `node` is in, for revert(), or the part of one that
+     * stands on its own: the test of an `if` or a loop, a function's parameter
+     * or expression body, a class member, an entry of an object or array
+     * literal, a JSX attribute or child. A PR that changes two defaults in one
+     * returned object changes two values, each with its own Revert.
+     */
+    function unitOf(node) {
+        for (let parent = parents.get(node); parent && !UNIT.test(parent.type) && !FUNCTIONS.has(parent.type); parent = parents.get(parent))
+            node = parent;
+        return node;
     }
     /**
      * Records the values that `node` converts (see converted). A test, the
@@ -665,6 +684,8 @@ function plan(file, code, changes, types, options) {
             const { body } = node;
             bodies.push(body.type === 'BlockStatement' ? body : { start: body.start, end: body.end, arrow: node.start });
         }
+        if (replaced.size > 0)
+            parents.set(node, parent);
         atCuts.get(`end:${node.end}`)?.push({ node, parent });
         atCuts.get(`start:${node.start}`)?.push({ node, parent });
         return undefined;

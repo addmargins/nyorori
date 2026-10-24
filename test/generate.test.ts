@@ -418,6 +418,35 @@ describe('Revert', () => {
     ])
   })
 
+  test('puts back a literal only when nothing else in its statement changed', () => {
+    const before = [
+      'export class T {',
+      '  close() {',
+      "    this._stdout.off('error', this._onstdouterror)",
+      "    this._stdout.off('drain', this._ondrain)",
+      "    if (this.n > 10) this.flush(this.n, 'x')",
+      "    this.items.forEach((i) => { i.close('soft') })",
+      "    return { retries: 3, delay: 1000, mode: f('a'), key: `${this.id}:old:${this.n}` }",
+      '  }',
+      '}',
+    ].join('\n')
+    const after = before.replace("this._stdout.off('error', this._onstdouterror)", "this._stdin.off('end', this._onstdinclose)")
+      .replace("'drain'", "'finish'").replace('this.n > 10', 'this.n > 20').replace("this.flush(this.n, 'x')", "this.drop(this.n, 'y')")
+      .replace("'soft'", "'hard'").replace('this.items.forEach', 'this.items.slice(1).forEach')
+      .replace('retries: 3, delay: 1000', 'retries: 5, delay: 500').replace("f('a')", "g('b')").replace(':old:', ':new:').replace('${this.n}`', '${this.m}`')
+    expect(changed(before, after).filter((m) => m.includes(' Revert '))).toEqual([
+      // Not `'end'` → `'error'`: `this._stdin.off('error', this._onstdinclose)` never existed (typescript-sdk 2494).
+      "4:22 Revert `'finish'` → `'drain'`, as before this PR",
+      // The test of an `if` is apart from its branch, where `'y'` came with `drop`.
+      '5:18 Revert `20` → `10`, as before this PR',
+      // A statement in a callback is apart from the call around it.
+      "6:50 Revert `'hard'` → `'soft'`, as before this PR",
+      // Each entry of an object literal is apart from the others, but not `'b'` from `g`, nor `:new:` from `this.m`.
+      '7:23 Revert `5` → `3`, as before this PR',
+      '7:33 Revert `500` → `1000`, as before this PR',
+    ])
+  })
+
   test('puts back nothing that is not a value: an import path, a directive, a tagged template, a property name, a JSX attribute', () => {
     const before = [
       "import { a } from './old'",
