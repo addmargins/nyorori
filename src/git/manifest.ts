@@ -158,7 +158,7 @@ interface BatchInfo {
   size: number;
 }
 
-async function batchCheck(repoDir: string, blobs: string[]): Promise<Map<string, BatchInfo>> {
+export async function batchCheck(repoDir: string, blobs: string[]): Promise<Map<string, BatchInfo>> {
   const map = new Map<string, BatchInfo>();
   if (blobs.length === 0) return map;
   const out = await git(repoDir, ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"], {

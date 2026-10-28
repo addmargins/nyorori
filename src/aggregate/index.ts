@@ -96,6 +96,7 @@ export interface AggregateInput {
 }
 
 const ACCEPTED_EVENTS = new Set(["pull_request", "merge_group"]);
+const PASSING: ReadonlySet<GateState> = new Set(["PASS", "NOT_APPLICABLE", "ACCEPTED_WITH_WAIVER"]);
 
 function provenanceProblem(s: SubmittedResult, input: AggregateInput): string | null {
   const p = s.provenance;
@@ -172,11 +173,15 @@ export function aggregateQualityGate(input: AggregateInput): QualityGateVerdict 
       continue;
     }
     if (ACTIONS_GATES.has(gate)) {
-      if (s.source !== "actions") {
-        reject("this gate must come from the required workflow");
-        continue;
-      }
-      const p = provenanceProblem(s, input);
+      // The service may evaluate these gates itself (static checks over git
+      // blobs) using an artifact from the required workflow. A pass built on
+      // test evidence must carry that workflow's provenance. Without an
+      // artifact the service can only block (FAIL/INCONCLUSIVE) or find nothing
+      // in scope (NOT_APPLICABLE, decided from the manifest), so it needs none.
+      const state = effectiveState(s.result);
+      const needsProvenance =
+        s.source === "actions" || s.provenance !== undefined || (state !== "NOT_APPLICABLE" && PASSING.has(state));
+      const p = needsProvenance ? provenanceProblem(s, input) : null;
       if (p) {
         reject(p);
         continue;

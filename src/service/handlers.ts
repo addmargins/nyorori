@@ -118,16 +118,24 @@ export async function evaluatePullRequest(deps: ServiceDeps, repo: RepoRef, prNu
 interface MergeGroupPayload {
   action: string;
   repository: { owner: { login: string }; name: string };
-  merge_group: { head_sha: string; base_sha: string };
+  merge_group: { head_sha: string; base_sha: string; head_ref?: string };
+}
+
+/** Merge-queue branches are named `gh-readonly-queue/<base>/pr-<N>-<sha>`. */
+export function mergeGroupPrNumber(headRef: string | undefined): number | undefined {
+  const m = /\/pr-(\d+)-[0-9a-f]+$/.exec(headRef ?? "");
+  return m ? Number(m[1]) : undefined;
 }
 
 /** Official verdict: C is the commit that will be merged, B the queue's base (spec 6.2). */
 export async function handleMergeGroupEvent(deps: ServiceDeps, payload: MergeGroupPayload): Promise<Evaluation | null> {
   if (payload.action !== "checks_requested") return null;
   const repo = { owner: payload.repository.owner.login, repo: payload.repository.name };
+  const prNumber = mergeGroupPrNumber(payload.merge_group.head_ref);
   return runAndPublish(deps, {
     repo,
     kind: "merge_group",
+    ...(prNumber !== undefined ? { prNumber } : {}),
     base: payload.merge_group.base_sha,
     candidate: payload.merge_group.head_sha,
     checkSha: payload.merge_group.head_sha,

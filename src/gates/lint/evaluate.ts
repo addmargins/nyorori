@@ -231,7 +231,9 @@ function routeUnitLevel(a: Attributed, file: string, triggers: TriggerHit[]): vo
       routing: true,
     });
   }
-  if (a.msg.category === "trigger:S10" && a.unitNew) {
+  // S10 targets helpers that mutate a shared context object; rebinding a
+  // parameter (`n += 1`) is local and says nothing about splitting.
+  if (a.msg.category === "trigger:S10" && a.unitNew && a.msg.messageId !== "assignmentToFunctionParam") {
     triggers.push({
       id: "S10",
       gate: GATE,

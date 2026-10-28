@@ -121,7 +121,16 @@ jobs:
             "run_attempt": ${{ github.run_attempt }},
             "workflow_ref": "${{ github.workflow_ref }}",
             "workflow_sha": "${{ github.workflow_sha }}",
-            "runner": "${{ steps.runner.outputs.kind }}"
+            "runner": "${{ steps.runner.outputs.kind }}",
+            "root_dir": "${{ github.workspace }}/candidate"
+          }
+          JSON
+          # G5 refuses coverage whose provider does not match the policy pin.
+          cat > "$RUNNER_TEMP/out/coverage-meta.json" <<JSON
+          {
+            "provider": "v8",
+            "provider_version": "$(cd candidate && node -p "require('@vitest/coverage-v8/package.json').version" 2>/dev/null || echo unknown)",
+            "vitest_version": "$(cd candidate && node -p "require('vitest/package.json').version" 2>/dev/null || echo unknown)"
           }
           JSON
 
