@@ -53,22 +53,11 @@ export function toCheckRun(result: GateResult): CheckRunOutput {
 }
 
 export function verdictToCheckRun(verdict: QualityGateVerdict, results: GateResult[]): CheckRunOutput {
-  const inconclusiveReasons = [
-    ...new Set([
-      ...verdict.inconclusive.map((i) => i.reason),
-      ...verdict.reasons.filter((r) => verdict.inconclusive.some((i) => i.reason === r)),
-    ]),
-  ];
-  const reasons =
-    verdict.state === "INCONCLUSIVE"
-      ? inconclusiveReasons.length
-        ? inconclusiveReasons
-        : verdict.reasons
-      : verdict.reasons;
+  // FAIL dominates INCONCLUSIVE, so an INCONCLUSIVE verdict's reasons are all measurement reasons.
   return {
     name: QUALITY_GATE_CHECK,
     conclusion: verdict.mergeAllowed ? "success" : "failure",
-    title: clip(titleFor(verdict.state, verdict.summary, reasons), MAX_TITLE),
+    title: clip(titleFor(verdict.state, verdict.summary, verdict.reasons), MAX_TITLE),
     summary: clip(renderSummaryMarkdown(results, verdict), MAX_BODY),
   };
 }
