@@ -1,10 +1,12 @@
 // Runs the gate's ESLint configuration over a tree materialized from git
 // blobs. The candidate's own lint setup is never loaded or executed.
 
-import { isAbsolute, relative, sep } from "node:path";
+import { readFileSync } from "node:fs";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { ESLint, type Linter } from "eslint";
 import type { Policy } from "../../policy/schema.js";
 import { buildLintConfig, categoryOf } from "./config.js";
+import { lfPositionMapper, type PositionMapper } from "./positions.js";
 import type { FileLintResult, LintMessage } from "./types.js";
 
 export interface LintRunOptions {
@@ -52,7 +54,7 @@ export async function lintFiles(
   const results = await eslint.lintFiles([...relFiles]);
   for (const r of results) {
     const rel = toPosix(isAbsolute(r.filePath) ? relative(treeRoot, r.filePath) : r.filePath);
-    out.set(rel, convert(rel, r.messages));
+    out.set(rel, convert(rel, r.messages, lfPositionMapper(readFileSync(join(treeRoot, rel), "utf8"))));
   }
   const missing = relFiles.filter((f) => !out.has(f));
   if (missing.length > 0) {
@@ -61,11 +63,19 @@ export async function lintFiles(
   return out;
 }
 
-export function convert(path: string, messages: readonly Linter.LintMessage[]): FileLintResult {
+/**
+ * Converts ESLint messages to gate messages. `toLf` maps ESLint positions to
+ * LF-based lines (see positions.ts); omit it only for LF-only sources.
+ */
+export function convert(
+  path: string,
+  messages: readonly Linter.LintMessage[],
+  toLf: PositionMapper = (line, column) => ({ line, column }),
+): FileLintResult {
   const result: FileLintResult = { path, messages: [] };
   for (const m of messages) {
     if (m.fatal) {
-      result.parseError = { message: m.message, line: m.line, column: m.column };
+      result.parseError = { message: m.message, ...toLf(m.line, m.column) };
       continue;
     }
     // ruleId null: notices such as "eslint-disable has no effect because of
@@ -77,17 +87,11 @@ export function convert(path: string, messages: readonly Linter.LintMessage[]): 
       }
       continue;
     }
-    const category = categoryOf(m.ruleId);
+    const category = categoryOf(m.ruleId, m.messageId);
     if (!category) continue;
-    const msg: LintMessage = {
-      ruleId: m.ruleId,
-      message: m.message,
-      line: m.line,
-      column: m.column,
-      category,
-    };
+    const msg: LintMessage = { ruleId: m.ruleId, message: m.message, ...toLf(m.line, m.column), category };
     if (m.messageId) msg.messageId = m.messageId;
-    if (m.endLine !== undefined) msg.endLine = m.endLine;
+    if (m.endLine !== undefined) msg.endLine = toLf(m.endLine, m.endColumn ?? 1).line;
     result.messages.push(msg);
   }
   if (result.parseError) result.messages = [];

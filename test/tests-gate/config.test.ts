@@ -55,4 +55,16 @@ describe("config weakening", () => {
     expect(why("vitest.config.ts", b, c)).toEqual(["test.exclude: exclude changed to a computed value"]);
     expect(why(".nycrc", "{", "{}")).toEqual(["*: config could not be parsed statically; review the change"]);
   });
+  it("marks test-loading redirections as review items, not weakenings (ruling D1)", () => {
+    const b = `{ "moduleNameMapper": { "^db$": "<rootDir>/db.ts" }, "globalSetup": "./g.ts", "setupFilesAfterEnv": ["./s.ts"] }`;
+    const c = `{ "moduleNameMapper": { "^db$": "<rootDir>/fake-db.ts" }, "globalSetup": "./g2.ts", "setupFilesAfterEnv": [] }`;
+    const r = analyzeConfigChange("jest.config.json", b, c);
+    expect(r.map((w) => [w.setting, w.kind])).toEqual([
+      ["globalSetup", "review"],
+      ["moduleNameMapper.^db$", "review"],
+      ["setupFilesAfterEnv", "review"],
+    ]);
+    const ts = analyzeConfigChange("tsconfig.json", `{"compilerOptions":{"paths":{"@/*":["src/*"]}}}`, `{"compilerOptions":{"paths":{"@/*":["mocks/*"]}}}`);
+    expect(ts.map((w) => [w.setting, w.kind])).toEqual([["compilerOptions.paths.@/*", "review"]]);
+  });
 });

@@ -60,6 +60,11 @@ export interface StaticTestCase {
   inlineSnapshots: string[];
   /** Runtime skip calls inside the body (`ctx.skip()`, destructured `skip()`). */
   runtimeSkips: number;
+  /**
+   * The callback printed without comments by the TypeScript printer: equal
+   * strings mean the same AST, whatever the formatting. Null without a callback.
+   */
+  bodyText: string | null;
 }
 
 export interface IgnoreComment {
@@ -146,6 +151,8 @@ const STRONG_MATCHERS = new Set([
 ]);
 const CHAIN_MODIFIERS = new Set(["not", "resolves", "rejects", "soft", "poll"]);
 const HELPER_ASSERTION = /^(expect|assert|verify|check|should)([A-Z_]|$)/;
+/** Testing Library queries that throw when nothing matches. */
+const THROWING_QUERY = /^(get|find)(All)?By[A-Z]/;
 
 interface CalleeChain {
   base: string;
@@ -287,6 +294,13 @@ function analyzeBody(sf: ts.SourceFile, fn: ts.FunctionLikeDeclaration | undefin
         } else if (chain.props.length === 0 && HELPER_ASSERTION.test(chain.base) && chain.base !== "expect") {
           stats.assertionCount++;
           stats.matchers.push({ name: chain.base, negated: false, strength: "other", line: lineOf(sf, node) });
+        } else if (chain.base !== "expect" && chain.props.at(-1) === "expect" && ts.isPropertyAccessExpression(node.expression)) {
+          // supertest: request(app).get("/").expect(200)
+          stats.assertionCount++;
+          stats.matchers.push({ name: "supertest.expect", negated: false, strength: "other", line: lineOf(sf, node) });
+        } else if (THROWING_QUERY.test(chain.props.at(-1) ?? chain.base)) {
+          stats.assertionCount++;
+          stats.matchers.push({ name: chain.props.at(-1) ?? chain.base, negated: false, strength: "other", line: lineOf(sf, node) });
         } else if (
           (chain.props.length === 1 && chain.props[0] === "skip" && ctxNames.has(chain.base)) ||
           (chain.props.length === 0 && skipNames.has(chain.base))
@@ -307,6 +321,8 @@ function scriptKind(path: string): ts.ScriptKind {
   if (/\.(js|mjs|cjs)$/.test(path)) return ts.ScriptKind.JSX; // JS test files commonly carry JSX
   return ts.ScriptKind.TS;
 }
+
+const PRINTER = ts.createPrinter({ removeComments: true, newLine: ts.NewLineKind.LineFeed });
 
 export function staticKey(file: string, ancestors: readonly string[], title: string): string {
   return JSON.stringify([file, ...ancestors, title]);
@@ -352,6 +368,7 @@ export function scanTestSource(file: string, source: string): StaticScan {
         const { title, literal } = titleOf(sf, node.arguments[0]);
         const cb = callbackOf(node);
         const body = isTest ? analyzeBody(sf, cb) : analyzeBody(sf, undefined);
+        const bodyText = cb?.body ? PRINTER.printNode(ts.EmitHint.Unspecified, cb.body, sf) : null;
         cases.push({
           kind: isTest ? "test" : "suite",
           file,
@@ -363,6 +380,7 @@ export function scanTestSource(file: string, source: string): StaticScan {
           markers: m.markers,
           parameterized: m.parameterized,
           ...body,
+          bodyText,
         });
         if (isSuite && cb?.body) {
           const next = [...ancestors, title];

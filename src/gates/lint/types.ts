@@ -3,10 +3,10 @@
 /**
  * How a rule hit is routed (spec 7.4):
  * - block: a new hit fails the gate
- * - trigger:S4/S9/S10: a new hit only routes the PR to simplification review
+ * - trigger:S4/S9/S10/S11: a new hit only routes the PR to simplification review
  * - observe: recorded for calibration, never routed
  */
-export type LintCategory = "block" | "trigger:S4" | "trigger:S9" | "trigger:S10" | "observe";
+export type LintCategory = "block" | "trigger:S4" | "trigger:S9" | "trigger:S10" | "trigger:S11" | "observe";
 
 export interface LintMessage {
   ruleId: string;

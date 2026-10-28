@@ -3,7 +3,6 @@ export { deriveState, type GateEvaluation } from "./evaluation.js";
 export {
   parseTestReport,
   parseJestJson,
-  parseJUnitXml,
   testId,
   type NormalizedReport,
   type NormalizedTest,

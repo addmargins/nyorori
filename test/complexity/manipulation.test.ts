@@ -36,15 +36,15 @@ describe("spec 7.2 variants through G1", () => {
     ["a", "PASS", ["S1", "S5"], []], // honest refactor routes too (spec admits S1 fires on (a))
     ["a′", "PASS", ["S1", "S5"], []],
     ["b", "PASS", ["S1", "S5", "S10"], ["S10"]],
-    ["c", "PASS", ["S5", "S9", "S10"], ["S10"]],
+    ["c", "PASS", ["S5", "S9"], []], // V 3: below the D17 S10 floor of 8; G2 owns absolute shapes
     ["d", "PASS", ["S5", "S9", "S10"], ["S10"]],
     ["d′", "PASS", ["S1", "S5", "S10"], ["S10"]], // density exactly 0.60 (spec measured 0.36)
-    ["e", "FAIL", ["S5"], []], // <module> residue 22 > 15
-    ["e′", "PASS", ["S5", "S9"], []], // residues 12 + 10: the file split defeats the residue rule
+    ["e", "FAIL", ["S5", "S12"], ["S12"]], // <module> residue 22 > 15
+    ["e′", "PASS", ["S5", "S9", "S12"], ["S12"]], // residues 12 + 10 pass G1; S12 (D18) routes the shift
     ["e″", "PASS", ["S5"], []], // residue 15 = limit (spec: 28, FAIL — different code)
     ["f", "PASS", ["S5", "S9"], []], // invisible to G1 as new code: G2's S9 selectors must catch it
     ["f′", "PASS", ["S5", "S9"], []],
-    ["f″", "PASS", ["S5", "S9", "S10"], ["S10"]],
+    ["f″", "PASS", ["S5", "S9"], []], // V 2 < 8: S10 silent as new code (G2 S9 selectors must catch it)
     ["g", "FAIL", ["S5"], []],
     ["h", "PASS", ["S1", "S5"], []],
     ["i", "PASS", ["S9", "S11"], []], // only G2 DYNAMIC_CODE stops new-code (i)

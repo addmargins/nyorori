@@ -12,7 +12,8 @@ export interface BidiHit {
 
 export function scanBidi(source: string): BidiHit[] {
   const hits: BidiHit[] = [];
-  const lines = source.split(/\r\n|\r|\n/);
+  // LF only, like git and cccc: U+2028/U+2029/CR are not line breaks here.
+  const lines = source.split("\n");
   lines.forEach((text, i) => {
     for (const m of text.matchAll(BIDI_RE)) {
       hits.push({

@@ -1,11 +1,11 @@
 // G4 `gate/tests` (spec 8.3): the test run passed, at least one test ran, and
 // neither the tests nor their configuration got weaker between B and C.
 //
-// Test renames: a changed `describe`/`it` title changes the test ID, so it is
-// indistinguishable from "deleted one test, added another". It is reported as
-// TEST_REMOVED with the same file's new tests listed as rename candidates; a
-// gate owner approves it (not a waiver). File renames found by git (R) are
-// followed, so moving a test file does not count as removal.
+// Test renames (ruling D3): a changed `describe`/`it` title changes the test
+// ID. It counts as a rename only when, in the same file (following git
+// renames), one removed and one added test pair up uniquely, the B test
+// passed, and their callbacks print identically without comments. Anything
+// else is TEST_REMOVED, approved by a gate owner (never a waiver).
 
 import posix from "node:path/posix";
 import type { Policy } from "../../policy/schema.js";
@@ -103,7 +103,23 @@ interface Collector {
   inconclusive: Inconclusive[];
 }
 
-function reportRun(c: Collector, report: NormalizedReport): void {
+const NON_WAIVABLE = { waivable: false, approvalKind: "gate-owners" } as const;
+
+function failedOnBase(reportB: NormalizedReport | null, renames: Map<string, string>) {
+  const ids = new Set((reportB?.tests ?? []).filter((t) => t.status === "failed").map((t) => relocate(t.id, renames)));
+  const files = new Set((reportB?.suiteFailures ?? []).map((f) => renames.get(f.file) ?? f.file));
+  return { ids, files };
+}
+
+function pushFailures(c: Collector, list: Violation[]): void {
+  c.violations.push(...list.slice(0, MAX_LISTED));
+  if (list.length > MAX_LISTED) {
+    const { unit: _unit, ...rest } = list[MAX_LISTED]!;
+    c.violations.push({ ...rest, message: `${list.length - MAX_LISTED} more failing tests not listed` });
+  }
+}
+
+function reportRun(c: Collector, report: NormalizedReport, reportB: NormalizedReport | null, renames: Map<string, string>): void {
   if (report.numExecuted === 0) {
     c.inconclusive.push({
       reason: "NO_TESTS_EXECUTED",
@@ -111,29 +127,42 @@ function reportRun(c: Collector, report: NormalizedReport): void {
       authorFixable: true,
     });
   }
-  const failed = report.tests.filter((t) => t.status === "failed");
-  for (const t of failed.slice(0, MAX_LISTED)) {
-    c.violations.push({
-      gate: GATE,
-      reason: "TESTS_FAILED",
-      file: t.file,
-      message: `test failed: ${[...t.ancestors, t.title].join(" › ")}`,
-      details: { test_id: t.id },
-    });
-  }
-  if (failed.length > MAX_LISTED) {
-    c.violations.push({
-      gate: GATE,
-      reason: "TESTS_FAILED",
-      file: failed[MAX_LISTED]!.file,
-      message: `${failed.length - MAX_LISTED} more failing tests not listed`,
-    });
+  // A test that already fails on the base is not this PR's breakage (ruling D14): waivable.
+  const base = failedOnBase(reportB, renames);
+  const own: Violation[] = [];
+  const inherited: Violation[] = [];
+  for (const t of report.tests.filter((x) => x.status === "failed")) {
+    const name = [...t.ancestors, t.title].join(" › ");
+    if (base.ids.has(t.id)) {
+      inherited.push({
+        gate: GATE,
+        reason: "TESTS_FAILED_ON_BASE",
+        file: t.file,
+        unit: name,
+        message: `test failed (also failing on the base): ${name}`,
+        details: { test_id: t.id, base_broken: true, waivable: true },
+      });
+    } else {
+      own.push({ gate: GATE, reason: "TESTS_FAILED", file: t.file, unit: name, message: `test failed: ${name}`, details: { test_id: t.id, waivable: false } });
+    }
   }
   for (const s of report.suiteFailures) {
-    c.violations.push({ gate: GATE, reason: "TESTS_FAILED", file: s.file, message: `test file failed to run: ${s.message}` });
+    if (base.files.has(s.file)) {
+      inherited.push({
+        gate: GATE,
+        reason: "TESTS_FAILED_ON_BASE",
+        file: s.file,
+        message: `test file failed to run (also on the base): ${s.message}`,
+        details: { base_broken: true, waivable: true },
+      });
+    } else {
+      own.push({ gate: GATE, reason: "TESTS_FAILED", file: s.file, message: `test file failed to run: ${s.message}`, details: { waivable: false } });
+    }
   }
-  if (failed.length === 0 && report.suiteFailures.length === 0 && !report.success) {
-    c.violations.push({ gate: GATE, reason: "TESTS_FAILED", file: "", message: "the test run reported failure" });
+  pushFailures(c, own);
+  pushFailures(c, inherited);
+  if (own.length === 0 && inherited.length === 0 && !report.success) {
+    c.violations.push({ gate: GATE, reason: "TESTS_FAILED", file: "", message: "the test run reported failure", details: { waivable: false } });
   }
   if (report.snapshotsUpdated) {
     c.violations.push({
@@ -144,6 +173,41 @@ function reportRun(c: Collector, report: NormalizedReport): void {
       details: { waivable: false },
     });
   }
+}
+
+interface Rename {
+  from: string;
+  to: string;
+}
+
+/** Ruling D3: unique 1:1 pairs of removed and added tests whose callbacks print identically. */
+function pairRenames(
+  removed: Array<{ key: string }>,
+  added: Map<string, StaticTestCase[]>,
+  bIndex: Map<string, StaticTestCase>,
+  reportB: NormalizedReport | null,
+  renames: Map<string, string>,
+): Rename[] {
+  if (!reportB) return []; // "the B test passed" cannot be shown without the base run
+  const passedInB = new Set(reportB.tests.filter((t) => t.status === "passed").map((t) => relocate(t.id, renames)));
+  const groups = new Map<string, { from: string[]; to: string[] }>();
+  const group = (file: string, body: string) => {
+    const k = JSON.stringify([file, body]);
+    let g = groups.get(k);
+    if (!g) groups.set(k, (g = { from: [], to: [] }));
+    return g;
+  };
+  for (const r of removed) {
+    const b = bIndex.get(r.key);
+    if (b?.bodyText == null || !passedInB.has(r.key)) continue;
+    group(describeKey(r.key).file, b.bodyText).from.push(r.key);
+  }
+  for (const [file, list] of added) {
+    for (const t of list) if (t.bodyText !== null) group(file, t.bodyText).to.push(t.key);
+  }
+  const out: Rename[] = [];
+  for (const g of groups.values()) if (g.from.length === 1 && g.to.length === 1) out.push({ from: g.from[0]!, to: g.to[0]! });
+  return out;
 }
 
 /** Removed test IDs, from the B/C reports when both exist, else from the static scan of literal titles. */
@@ -296,8 +360,8 @@ function pick(sources: Map<string, string>, paths: Set<string>): Map<string, str
   return new Map([...sources].filter(([p]) => paths.has(p)));
 }
 
-function isConfigPath(p: string, policy: Policy): boolean {
-  return posix.basename(p) === "package.json" || matchesAnyGlob(p, policy.tests.protected_paths);
+function isConfigPath(p: string | null, policy: Policy): p is string {
+  return p !== null && (posix.basename(p) === "package.json" || matchesAnyGlob(p, policy.tests.protected_paths));
 }
 
 export function evaluateTests(input: TestsGateInput): GateEvaluation {
@@ -312,9 +376,9 @@ export function evaluateTests(input: TestsGateInput): GateEvaluation {
     c.inconclusive.push(input.reportC.inconclusive);
   } else {
     reportC = input.reportC.report;
-    reportRun(c, reportC);
   }
   const reportB = input.reportB?.ok ? input.reportB.report : null;
+  if (reportC) reportRun(c, reportC, reportB, renames);
 
   // Only changed test files can differ; restricting the scan also keeps a
   // caller that passes every B test file from making unchanged files look new.
@@ -325,34 +389,53 @@ export function evaluateTests(input: TestsGateInput): GateEvaluation {
   const scansB = scanAll(pick(input.testSourcesB, pathsB));
   const scansC = scanAll(pick(input.testSourcesC, pathsC));
 
-  // Removed tests: gate-owners approval, never a waiver.
+  // Removed tests: gate-owners approval, never a waiver. Proven renames are observe for people.
   const added = addedTestsByFile(scansB, scansC, renames);
-  for (const r of removedTests(reportB, reportC, scansB, scansC, renames)) {
+  const bIndex = caseIndex(scansB, renames);
+  const removed = removedTests(reportB, reportC, scansB, scansC, renames);
+  const renamed = pairRenames(removed, added, bIndex, reportB, renames);
+  const renamedFrom = new Map(renamed.map((r) => [r.from, r.to]));
+  const renamedTo = new Set(renamed.map((r) => r.to));
+  for (const r of removed) {
     const { file, name } = describeKey(r.key);
-    const candidates = (added.get(renames.get(file) ?? file) ?? []).map((t) => describeKey(t.key).name);
+    const to = renamedFrom.get(r.key);
+    if (to && !input.isAiLoop) continue;
+    const candidates = (added.get(file) ?? []).map((t) => describeKey(t.key).name);
     c.violations.push({
       gate: GATE,
       reason: "TEST_REMOVED",
       file,
       unit: name,
-      message: `test removed: ${name}`,
-      details: { test_id: r.key, source: r.source, waivable: false, approval: "gate-owners", rename_candidates: candidates.slice(0, 10) },
+      message: to ? `AI fix loop renamed test ${name} → ${describeKey(to).name}` : `test removed: ${name}`,
+      details: { test_id: r.key, source: r.source, ...NON_WAIVABLE, rename: Boolean(to), rename_candidates: candidates.slice(0, 10) },
     });
   }
 
-  // Newly added focus/skip markers, statically and at runtime.
+  // Newly added markers (ruling D2): a new todo is observe for people and a new
+  // skipIf/runIf is S7; todo/skip on an existing test and every other marker FAIL.
+  const newTodos: string[] = [];
   for (const { c: t, marker } of newMarkers(scansB, scansC, renames)) {
+    const unit = describeKey(t.key).name;
+    const label = marker === "x" || marker === "f" ? `${marker}-prefixed` : `.${marker}`;
+    const existed = bIndex.has(t.key);
+    if (!input.isAiLoop && marker === "todo" && !existed) {
+      newTodos.push(unit);
+      continue;
+    }
+    if (!input.isAiLoop && (marker === "skipIf" || marker === "runIf")) {
+      c.triggers.push({ id: "S7", gate: GATE, file: t.file, unit, evidence: `new conditional skip ${label} on "${t.title}"`, routing: true });
+      continue;
+    }
     c.violations.push({
       gate: GATE,
       reason: "TEST_FOCUS_OR_SKIP",
       file: t.file,
       line: t.line,
-      unit: describeKey(t.key).name,
-      message: `new ${marker === "x" || marker === "f" ? `${marker}-prefixed` : `.${marker}`} on ${t.kind} "${t.title}"`,
+      unit,
+      message: `new ${label} on ${existed ? "existing " : ""}${t.kind} "${t.title}"`,
       details: { marker, waivable: false },
     });
   }
-  const bIndex = caseIndex(scansB, renames);
   for (const s of scansC.values()) {
     for (const t of s.cases) {
       const before = bIndex.get(t.key);
@@ -385,55 +468,63 @@ export function evaluateTests(input: TestsGateInput): GateEvaluation {
     }
   }
 
-  // New tests without assertions.
+  // New tests without assertions: S7 for people, FAIL for the AI loop (ruling D14).
   for (const list of added.values()) {
     for (const t of list) {
-      if (t.markers.includes("todo") || t.assertionCount > 0 || t.hasAssertionDeclaration) continue;
-      c.violations.push({
-        gate: GATE,
-        reason: "TEST_NO_ASSERTION",
-        file: t.file,
-        line: t.line,
-        unit: describeKey(t.key).name,
-        message: `new test "${t.title}" makes no assertion`,
-      });
+      if (renamedTo.has(t.key) || t.markers.includes("todo") || t.assertionCount > 0 || t.hasAssertionDeclaration) continue;
+      const unit = describeKey(t.key).name;
+      if (input.isAiLoop) {
+        c.violations.push({ gate: GATE, reason: "TEST_NO_ASSERTION", file: t.file, line: t.line, unit, message: `new test "${t.title}" makes no assertion` });
+      } else {
+        c.triggers.push({ id: "S7", gate: GATE, file: t.file, unit, evidence: `new test "${t.title}" makes no assertion`, routing: true });
+      }
     }
   }
 
-  // Configuration weakening (independent approval, not a waiver).
+  // Configuration (ruling D1): a concrete weakening FAILs (gate-owners approval, never a
+  // waiver); a setup/retry/alias change is S7 evidence; any other protected change is S11.
+  // A move out of the protected set counts as deleting the protected file, and vice versa.
   const cfgB = input.configSourcesB ?? new Map<string, string>();
   const cfgC = input.configSourcesC ?? new Map<string, string>();
+  const weakened = new Set<string>();
   for (const f of files) {
-    const p = f.pathC ?? f.pathB;
-    if (!p || !isConfigPath(p, input.policy)) continue;
-    const before = f.pathB ? (cfgB.get(f.pathB) ?? null) : null;
-    const after = f.pathC ? (cfgC.get(f.pathC) ?? null) : null;
-    if ((f.pathB && before === null) || (f.pathC && after === null)) {
+    const pb = f.status === "A" || f.status === "C" ? null : f.pathB;
+    const pc = f.status === "D" ? null : f.pathC;
+    const bCfg = isConfigPath(pb, input.policy);
+    const cCfg = isConfigPath(pc, input.policy);
+    if (!bCfg && !cCfg) continue;
+    const p = cCfg ? pc! : pb!;
+    const before = bCfg ? (cfgB.get(pb!) ?? null) : null;
+    const after = cCfg ? (cfgC.get(pc!) ?? null) : null;
+    if ((bCfg && before === null) || (cCfg && after === null)) {
       c.inconclusive.push({ reason: "REPORT_MISSING", file: p, detail: `config source not provided for ${p}`, authorFixable: false });
       continue;
     }
     for (const w of analyzeConfigChange(p, before, after)) {
+      const review = w.kind === "review";
+      if (review && !input.isAiLoop) {
+        c.triggers.push({ id: "S7", gate: GATE, file: w.path, evidence: `${w.setting}: ${w.why}`, routing: true });
+        continue;
+      }
+      if (!review) for (const q of [pb, pc]) if (q) weakened.add(q);
       c.violations.push({
         gate: GATE,
         reason: "TEST_CONFIG_WEAKENED",
         file: w.path,
         message: `${w.setting}: ${w.why}`,
-        details: { setting: w.setting, before: w.before, after: w.after, waivable: false, approval: "policy-change" },
+        details: { setting: w.setting, before: w.before, after: w.after, ...NON_WAIVABLE, ...(review ? { weakening: "config-review" } : {}) },
       });
     }
   }
 
-  // Protected paths: a mechanical FAIL only for the AI loop; for people it is CODEOWNERS (spec 2.4).
+  // Protected paths: FAIL for the AI loop (12.2); for people S11, cleared by an independent
+  // G6 approval at head SHA — the gate never assumes CODEOWNERS is configured.
   const protectedPaths = protectedChanges(files, input.policy, input.protectedPathsChanged ?? []);
-  if (input.isAiLoop) {
-    for (const p of protectedPaths) {
-      c.violations.push({
-        gate: GATE,
-        reason: "PROTECTED_PATH_MODIFIED",
-        file: p,
-        message: `AI fix loop modified protected path ${p}`,
-        details: { waivable: false },
-      });
+  for (const p of protectedPaths) {
+    if (input.isAiLoop) {
+      c.violations.push({ gate: GATE, reason: "PROTECTED_PATH_MODIFIED", file: p, message: `AI fix loop modified protected path ${p}`, details: { waivable: false } });
+    } else if (!weakened.has(p)) {
+      c.triggers.push({ id: "S11", gate: GATE, file: p, evidence: `protected config changed: ${p}`, routing: true });
     }
   }
 
@@ -461,6 +552,8 @@ export function evaluateTests(input: TestsGateInput): GateEvaluation {
     tests_failed: reportC?.numFailed ?? null,
     base_report: input.reportB === undefined || input.reportB === null ? "absent" : input.reportB.ok ? "present" : "invalid",
     protected_paths_changed: protectedPaths,
+    renamed_tests: renamed.map((r) => ({ from: describeKey(r.from).name, to: describeKey(r.to).name, file: describeKey(r.to).file })),
+    new_todos: newTodos,
     test_files_with_syntax_errors: parseProblems,
   };
   const state = deriveState(c.violations, c.inconclusive);

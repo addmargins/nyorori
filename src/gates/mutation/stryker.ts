@@ -32,6 +32,8 @@ const reportSchema = z
   })
   .passthrough();
 
+export const MAX_MUTATION_REPORT_BYTES = 128 * 1024 * 1024;
+
 export type MutantStatus = z.infer<typeof status>;
 
 export interface ChangedMutant {
@@ -75,6 +77,9 @@ export function summarizeMutation(
   opts: PathResolveOptions = {},
 ): MutationParse {
   if (!text) return { ok: false, inconclusive: { reason: "REPORT_MISSING", detail: "mutation.json is missing", authorFixable: false } };
+  if (text.length > MAX_MUTATION_REPORT_BYTES || Buffer.byteLength(text, "utf8") > MAX_MUTATION_REPORT_BYTES) {
+    return { ok: false, inconclusive: { reason: "SCHEMA", detail: `mutation report exceeds ${MAX_MUTATION_REPORT_BYTES} bytes`, authorFixable: false } };
+  }
   let parsed;
   try {
     parsed = reportSchema.safeParse(JSON.parse(text));

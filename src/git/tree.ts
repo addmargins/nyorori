@@ -5,8 +5,9 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { Manifest, Side } from "../types.js";
-import { listTree, MODE_EXECUTABLE, MODE_REGULAR, readBlobs } from "./manifest.js";
+import type { Inconclusive, Manifest, Side } from "../types.js";
+import { isInvalidPath } from "./exec.js";
+import { batchCheck, listTree, MODE_EXECUTABLE, MODE_REGULAR, readBlobsBatched } from "./manifest.js";
 
 export interface MaterializedFile {
   /** Repository path. */
@@ -50,24 +51,42 @@ async function writeUnder(root: string, rel: string, content: Buffer): Promise<v
   await writeFile(target, content, { flag: "wx" });
 }
 
-export async function materializeSide(
+export interface MaterializeResult {
+  files: MaterializedFile[];
+  /** Sides that could not be written (never thrown, so one bad path cannot abort the run). */
+  problems: Inconclusive[];
+}
+
+/** Writes the manifest's measured blobs for one side; failures become INCONCLUSIVE records. */
+export async function materializeSideChecked(
   repoDir: string,
   manifest: Manifest,
   side: Side,
   destDir: string,
-): Promise<MaterializedFile[]> {
+): Promise<MaterializeResult> {
   const sides = manifest.entries.flatMap((e) => {
     const s = side === "B" ? e.b : e.c;
     return s && e.measure[side] ? [s] : [];
   });
   await mkdir(destDir, { recursive: true });
-  const blobs = await readBlobs(repoDir, sides.map((s) => s.blob));
-  const out: MaterializedFile[] = [];
+  const blobs = await readBlobsBatched(repoDir, sides.map((s) => s.blob));
+  const files: MaterializedFile[] = [];
+  const problems: Inconclusive[] = [];
   for (const s of sides) {
     const content = blobs.get(s.blob);
     if (!content) throw new Error(`blob ${s.blob} for ${s.path} not returned by git`);
-    await writeUnder(destDir, s.measuredPath, content);
-    out.push({
+    try {
+      await writeUnder(destDir, s.measuredPath, content);
+    } catch (e) {
+      problems.push({
+        reason: (e as NodeJS.ErrnoException).code === "EEXIST" ? "CASE_COLLISION" : "TOOL_ERROR",
+        file: s.path,
+        detail: `${side}: cannot materialize ${JSON.stringify(s.measuredPath)}: ${(e as Error).message}`,
+        authorFixable: (e as NodeJS.ErrnoException).code === "EEXIST",
+      });
+      continue;
+    }
+    files.push({
       path: s.path,
       measuredPath: s.measuredPath,
       blob: s.blob,
@@ -76,13 +95,32 @@ export async function materializeSide(
       text: content.toString("utf8"),
     });
   }
-  return out;
+  return { files, problems };
+}
+
+/** As materializeSideChecked, but throws on the first side that cannot be written. */
+export async function materializeSide(
+  repoDir: string,
+  manifest: Manifest,
+  side: Side,
+  destDir: string,
+): Promise<MaterializedFile[]> {
+  const r = await materializeSideChecked(repoDir, manifest, side, destDir);
+  if (r.problems.length > 0) throw new Error(r.problems.map((p) => p.detail).join("; "));
+  return r.files;
 }
 
 export interface FullTreeFile {
   path: string;
   blob: string;
   bytes: number;
+}
+
+export interface FullTreeOptions {
+  /** Files above this size are skipped (default 2 MiB, the policy default). */
+  maxFileBytes?: number;
+  /** Called for every file that was filtered in but not written (oversize, invalid path). */
+  onSkip?: (path: string, reason: "FILE_TOO_LARGE" | "INVALID_ENCODING") => void;
 }
 
 /**
@@ -95,22 +133,31 @@ export async function materializeFullTree(
   sha: string,
   destDir: string,
   filter: (path: string) => boolean,
+  opts: FullTreeOptions = {},
 ): Promise<FullTreeFile[]> {
+  const maxBytes = opts.maxFileBytes ?? 2 * 1024 * 1024;
   const tree = await listTree(repoDir, sha);
-  const chosen = [...tree.entries()].filter(
+  const candidates = [...tree.entries()].filter(
     ([p, t]) => t.type === "blob" && (t.mode === MODE_REGULAR || t.mode === MODE_EXECUTABLE) && filter(p),
   );
+  const chosen: typeof candidates = [];
+  for (const c of candidates) {
+    if (isInvalidPath(c[0])) opts.onSkip?.(c[0], "INVALID_ENCODING");
+    else chosen.push(c);
+  }
+  const sizes = await batchCheck(repoDir, [...new Set(chosen.map(([, t]) => t.blob))]);
+  const fitting = chosen.filter(([p, t]) => {
+    const ok = (sizes.get(t.blob)?.size ?? 0) <= maxBytes;
+    if (!ok) opts.onSkip?.(p, "FILE_TOO_LARGE");
+    return ok;
+  });
   await mkdir(destDir, { recursive: true });
+  const blobs = await readBlobsBatched(repoDir, fitting.map(([, t]) => t.blob));
   const out: FullTreeFile[] = [];
-  const batch = 2000;
-  for (let i = 0; i < chosen.length; i += batch) {
-    const slice = chosen.slice(i, i + batch);
-    const blobs = await readBlobs(repoDir, slice.map(([, t]) => t.blob));
-    for (const [p, t] of slice) {
-      const content = blobs.get(t.blob)!;
-      await writeUnder(destDir, p, content);
-      out.push({ path: p, blob: t.blob, bytes: content.length });
-    }
+  for (const [p, t] of fitting) {
+    const content = blobs.get(t.blob)!;
+    await writeUnder(destDir, p, content);
+    out.push({ path: p, blob: t.blob, bytes: content.length });
   }
   return out;
 }

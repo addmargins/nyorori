@@ -1,6 +1,7 @@
 // Normalizes test-run reports from the untrusted Actions job (spec 8.3).
 // Supported: the Jest-compatible JSON that `vitest --reporter=json` (4.x) and
-// `jest --json` both emit, and JUnit XML as written by vitest/jest-junit.
+// `jest --json` both emit. JUnit is refused (ruling D4): it cannot tell todo
+// from skipped and its flattened names cannot be split back into ancestors.
 // Anything malformed is INCONCLUSIVE: a report we cannot read is never a PASS.
 
 import { z } from "zod";
@@ -23,7 +24,7 @@ export interface SuiteFailure {
 }
 
 export interface NormalizedReport {
-  format: "jest-json" | "junit";
+  format: "jest-json";
   tests: NormalizedTest[];
   numTotal: number;
   /** Tests that actually ran (passed + failed). */
@@ -119,7 +120,15 @@ function finish(
   };
 }
 
+/** The report comes from the untrusted job; bound the work it can make us do. */
+export const MAX_TEST_REPORT_BYTES = 64 * 1024 * 1024;
+
+function tooLarge(text: string, cap: number): boolean {
+  return text.length > cap || Buffer.byteLength(text, "utf8") > cap;
+}
+
 export function parseJestJson(text: string, opts: PathResolveOptions = {}): ReportParse {
+  if (tooLarge(text, MAX_TEST_REPORT_BYTES)) return fail("SCHEMA", `test report exceeds ${MAX_TEST_REPORT_BYTES} bytes`);
   let raw: unknown;
   try {
     raw = JSON.parse(text);
@@ -156,83 +165,11 @@ export function parseJestJson(text: string, opts: PathResolveOptions = {}): Repo
   return { ok: true, report: finish("jest-json", tests, suiteFailures, parsed.data.success, updated) };
 }
 
-// --- JUnit XML --------------------------------------------------------------
-// A deliberately small reader: the elements we need never nest arbitrarily,
-// and pulling in an XML dependency for the trust boundary is not worth it.
-
-function decodeEntities(s: string): string {
-  return s.replace(/&(#x[0-9a-f]+|#\d+|lt|gt|amp|quot|apos);/gi, (_, e: string) => {
-    const l = e.toLowerCase();
-    if (l === "lt") return "<";
-    if (l === "gt") return ">";
-    if (l === "amp") return "&";
-    if (l === "quot") return '"';
-    if (l === "apos") return "'";
-    const code = l.startsWith("#x") ? parseInt(l.slice(2), 16) : parseInt(l.slice(1), 10);
-    return Number.isFinite(code) ? String.fromCodePoint(code) : "";
-  });
-}
-
-function attrs(tag: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const m of tag.matchAll(/([\w:-]+)\s*=\s*("([^"]*)"|'([^']*)')/g)) {
-    out[m[1]!] = decodeEntities(m[3] ?? m[4] ?? "");
-  }
-  return out;
-}
-
-/** vitest writes `name="outer > inner > title"`; jest-junit's default separator is a space, which we cannot split. */
-export const JUNIT_ANCESTOR_SEPARATOR = " > ";
-
-export function parseJUnitXml(text: string, opts: PathResolveOptions = {}): ReportParse {
-  const body = text.replace(/<!--[\s\S]*?-->/g, "").replace(/<!\[CDATA\[[\s\S]*?\]\]>/g, "");
-  if (!/<testsuites?\b/.test(body)) return fail("SCHEMA", "not a JUnit report: no <testsuite(s)>");
-  const resolve = createPathResolver(opts);
-  const tests: NormalizedTest[] = [];
-  const suiteFailures: SuiteFailure[] = [];
-  const caseRe = /<testcase\b([^>]*?)(\/>|>([\s\S]*?)<\/testcase>)/g;
-  for (const m of body.matchAll(caseRe)) {
-    const a = attrs(m[1]!);
-    const inner = m[3] ?? "";
-    const fileAttr = a.file ?? a.classname;
-    if (!fileAttr || a.name === undefined) return fail("SCHEMA", "testcase without file/classname or name");
-    const r = resolve(fileAttr);
-    if (!r.ok) return fail("SCHEMA", `cannot map test file ${r.raw}: ${r.detail}`);
-    const parts = a.name.split(JUNIT_ANCESTOR_SEPARATOR);
-    const title = parts.pop()!;
-    let status: TestStatus = "passed";
-    if (/<(failure|error)\b/.test(inner)) status = "failed";
-    else if (/<skipped\b/.test(inner)) status = "skipped";
-    tests.push({
-      id: testId(r.path, parts, title),
-      file: r.path,
-      title: normalizeTitle(title),
-      ancestors: parts.map(normalizeTitle),
-      status,
-    });
-  }
-  // Errors attached to a suite rather than a case (import failures).
-  for (const m of body.matchAll(/<testsuite\b([^>]*)>([\s\S]*?)<\/testsuite>/g)) {
-    const a = attrs(m[1]!);
-    const inner = m[2]!.replace(caseRe, "");
-    if (/<(failure|error)\b/.test(inner)) {
-      const r = resolve(a.file ?? a.name ?? "");
-      suiteFailures.push({ file: r.ok ? r.path : (a.name ?? "?"), message: "suite-level error" });
-    }
-  }
-  const declared = /<testsuites?\b[^>]*\btests="(\d+)"/.exec(body);
-  if (declared && Number(declared[1]) !== tests.length) {
-    return fail("SCHEMA", `report lists ${tests.length} testcases but declares tests="${declared[1]}"`);
-  }
-  return { ok: true, report: finish("junit", tests, suiteFailures, true, false) };
-}
-
 export function parseTestReport(text: string | null | undefined, opts: PathResolveOptions = {}): ReportParse {
   if (text === null || text === undefined || text.trim() === "") {
     return fail("REPORT_MISSING", "test report artifact is missing or empty");
   }
-  const t = text.trimStart();
-  if (t.startsWith("{")) return parseJestJson(text, opts);
-  if (t.startsWith("<")) return parseJUnitXml(text, opts);
-  return fail("SCHEMA", "unrecognized test report format");
+  if (tooLarge(text, MAX_TEST_REPORT_BYTES)) return fail("SCHEMA", `test report exceeds ${MAX_TEST_REPORT_BYTES} bytes`);
+  if (text.trimStart().startsWith("{")) return parseJestJson(text, opts);
+  return fail("SCHEMA", "unsupported report format: only the Jest-compatible JSON report is accepted");
 }

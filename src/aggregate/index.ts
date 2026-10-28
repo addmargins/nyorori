@@ -5,6 +5,7 @@
 
 import type { Policy } from "../policy/schema.js";
 import {
+  ALWAYS_ROUTING_TRIGGERS,
   GATE_STATES,
   worstState,
   type GateId,
@@ -23,6 +24,8 @@ import {
   routingTriggers,
   type SimplificationReviewInput,
 } from "../review/simplification.js";
+import { isWaivable } from "../waivers/index.js";
+import { TEST_APPROVABLE_REASONS, TEST_APPROVAL_METRIC } from "../waivers/test-approval.js";
 import { QUALITY_GATE_CHECK, type GateVerdictRow, type QualityGateVerdict } from "./types.js";
 
 export { QUALITY_GATE_CHECK } from "./types.js";
@@ -59,8 +62,14 @@ export interface ArtifactProvenance {
   workflowSha: string;
   runId: number;
   runAttempt: number;
+  /** The run's head_sha from the API: the PR head for pull_request, the group head for merge_group. */
   headSha: string;
   event: string;
+  /**
+   * pull_request only: the test-merge commit the run checked out (refs/pull/N/merge).
+   * The API does not expose it, so it comes from the run's metadata.
+   */
+  testMergeSha?: string;
 }
 
 export interface TrustedWorkflows {
@@ -82,6 +91,8 @@ export interface ExpectedRun {
   cccc?: { version?: string; sha256?: string };
   /** Pinned tool versions (eslint, coverage provider...) keyed like `measurement_fingerprint.tools`. */
   tools?: Record<string, string>;
+  /** PR head for pull_request evaluations; pull_request runs report this as their head_sha. */
+  prHeadSha?: string;
 }
 
 export interface AggregateInput {
@@ -107,8 +118,63 @@ function provenanceProblem(s: SubmittedResult, input: AggregateInput): string | 
   if (!trusted) return `workflow ${p.repository}/${p.workflowPath} is not the required gate workflow`;
   if (!trusted.shas.includes(p.workflowSha)) return `workflow SHA ${p.workflowSha} is not pinned in policy`;
   if (!ACCEPTED_EVENTS.has(p.event)) return `workflow event ${p.event} is not accepted`;
-  if (p.headSha !== input.expected.candidate) return `artifact was built for ${p.headSha}, not the candidate`;
+  const { candidate, prHeadSha } = input.expected;
+  if (p.event === "merge_group") {
+    return p.headSha === candidate ? null : `artifact was built for ${p.headSha}, not the candidate`;
+  }
+  // pull_request: the run's head is the PR head; the commit it actually tested is the test merge.
+  if (prHeadSha !== undefined && p.headSha !== prHeadSha) return `run head ${p.headSha} is not the PR head ${prHeadSha}`;
+  if (p.testMergeSha === undefined && p.headSha !== candidate) return "artifact does not say which test merge it ran on";
+  if (p.testMergeSha !== undefined && p.testMergeSha !== candidate) {
+    return `artifact tested merge ${p.testMergeSha}, not the candidate ${candidate} (base moved?)`;
+  }
   return null;
+}
+
+/**
+ * Waivers are applied by the service. A `waivedBy` from anywhere else is
+ * dropped, and every `waivedBy` must name an applied waiver (or gate-owner test
+ * approval) whose reason may be covered at all.
+ */
+function sanitizeWaivers(s: SubmittedResult): GateResult {
+  const r = s.result;
+  const trusted = s.source === "service";
+  const applied = new Map((trusted ? r.waivers_applied : []).map((w) => [w.id, w]));
+  const violations = r.violations.map((v) => {
+    if (!v.waivedBy) return v;
+    const w = applied.get(v.waivedBy);
+    const ok = w !== undefined && (w.metric === TEST_APPROVAL_METRIC ? TEST_APPROVABLE_REASONS.has(v.reason) : isWaivable(v));
+    if (ok) return v;
+    const { waivedBy: _dropped, ...rest } = v;
+    return { ...rest, details: { ...rest.details, dropped_waiver: v.waivedBy } };
+  });
+  const used = new Set(violations.flatMap((v) => (v.waivedBy ? [v.waivedBy] : [])));
+  return { ...r, violations, waivers_applied: [...applied.values()].filter((w) => used.has(w.id)) };
+}
+
+/** S6 and S11 always route, whatever the producing gate's mode (ruling D16). */
+function normalizeRouting(t: TriggerHit): TriggerHit {
+  return ALWAYS_ROUTING_TRIGGERS.has(t.id) && !t.routing ? { ...t, routing: true } : t;
+}
+
+/** A degraded gate never blocks; what it would have blocked goes to the simplification review instead. */
+function degradedTriggers(gate: GateId, r: GateResult | undefined): TriggerHit[] {
+  if (!r) return [{ id: "S6", gate, evidence: `degraded gate ${gate}: did not report`, routing: true }];
+  const out: TriggerHit[] = r.triggers.filter((t) => t.routing || ALWAYS_ROUTING_TRIGGERS.has(t.id)).map((t) => ({ ...t, routing: true }));
+  for (const v of r.violations.filter((x) => !x.waivedBy)) {
+    out.push({
+      id: "S6",
+      gate,
+      ...(v.file ? { file: v.file } : {}),
+      ...(v.unit ? { unit: v.unit } : {}),
+      evidence: `degraded gate ${gate}: ${v.reason} ${v.message}`,
+      routing: true,
+    });
+  }
+  for (const i of r.inconclusive) {
+    out.push({ id: "S6", gate, ...(i.file ? { file: i.file } : {}), evidence: `degraded gate ${gate}: ${i.reason} ${i.detail}`, routing: true });
+  }
+  return out;
 }
 
 function fingerprintProblem(r: GateResult, s: SubmittedResult, e: ExpectedRun): string | null {
@@ -192,8 +258,11 @@ export function aggregateQualityGate(input: AggregateInput): QualityGateVerdict 
       aggInconclusive.push({ reason: "FINGERPRINT_MISMATCH", detail: `${gate}: ${fp}`, authorFixable: false });
       continue;
     }
-    byGate.set(gate, [...(byGate.get(gate) ?? []), s]);
+    byGate.set(gate, [...(byGate.get(gate) ?? []), { ...s, result: sanitizeWaivers(s) }]);
   }
+
+  // Triggers that reach G6 from gates that do not themselves count.
+  const extraTriggers: TriggerHit[] = [];
 
   for (const gate of GATE_ORDER) {
     const mode = policyMode(policy, gate);
@@ -202,6 +271,7 @@ export function aggregateQualityGate(input: AggregateInput): QualityGateVerdict 
       aggInconclusive.push({ reason: "TOOL_ERROR", detail: `${gate}: ${problem}`, authorFixable: false });
     }
     if (!chosen) {
+      if (mode === "degraded") extraTriggers.push(...degradedTriggers(gate, undefined));
       if (mode === "enforce") {
         missing.push(gate);
         if (!problem) {
@@ -214,11 +284,14 @@ export function aggregateQualityGate(input: AggregateInput): QualityGateVerdict 
     const r = { ...chosen.result, mode, state: effectiveState(chosen.result) };
     const isCounted = mode === "enforce";
     if (isCounted) counted.push(r);
+    else if (mode === "degraded") extraTriggers.push(...degradedTriggers(gate, r));
+    else extraTriggers.push(...r.triggers.filter((t) => ALWAYS_ROUTING_TRIGGERS.has(t.id)));
     rows.push({ gate, mode, state: r.state, counted: isCounted, summary: r.summary });
   }
 
-  // Observe-mode gates are excluded from aggregation entirely, triggers included (spec 13.4).
-  const triggers: TriggerHit[] = routingTriggers(counted.flatMap((r) => r.triggers));
+  // Observe-mode gates are excluded from aggregation except for S6/S11 (ruling D16).
+  const triggers: TriggerHit[] = routingTriggers([...counted.flatMap((r) => r.triggers), ...extraTriggers].map(normalizeRouting));
+  // A degraded G6 cannot route to itself, so it behaves like observe.
   const reviewMode = policyMode(policy, "simplification-review");
   const review = evaluateSimplificationReview({
     ...input.review,

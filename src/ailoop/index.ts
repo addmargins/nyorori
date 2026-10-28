@@ -3,7 +3,7 @@
 // reward-hacking agent from editing the gate's own inputs.
 
 import type { Policy } from "../policy/schema.js";
-import type { ChangeStatus, TriggerHit, Violation } from "../types.js";
+import { ALWAYS_ROUTING_TRIGGERS, NON_ROUTING_TRIGGERS, type ChangeStatus, type TriggerHit, type Violation } from "../types.js";
 import { matchAny, matchGlob } from "./glob.js";
 
 /** Spec 12.2 paths on top of policy.tests.protected_paths. */
@@ -140,9 +140,12 @@ export function violationKey(v: Violation): string {
 
 export function decideRetry(state: RetryState, policy: Policy): RetryDecision {
   if (state.forbidden.length > 0) return { action: "handoff", reason: "forbidden change (spec 12.2)" };
-  const hiding = state.newTriggers.filter((t) => t.id === "S1" || t.id === "S9");
-  if (hiding.length > 0) {
-    return { action: "handoff", reason: `fix redistributed or hid branches (${[...new Set(hiding.map((t) => t.id))].join(", ")})` };
+  // Any new routing trigger means the fix needs a human (S1/S9: redistributing or hiding branches).
+  const fresh = state.newTriggers.filter(
+    (t) => (t.routing || ALWAYS_ROUTING_TRIGGERS.has(t.id)) && !NON_ROUTING_TRIGGERS.has(t.id),
+  );
+  if (fresh.length > 0) {
+    return { action: "handoff", reason: `the fix fired new review triggers (${[...new Set(fresh.map((t) => t.id))].join(", ")})` };
   }
   if (state.currentViolations.length === 0) return { action: "done", reason: "no violations left" };
   if (state.attempt > 0 && state.previousViolations.length > 0) {
@@ -154,4 +157,38 @@ export function decideRetry(state: RetryState, policy: Policy): RetryDecision {
     return { action: "handoff", reason: `retry limit ${policy.ai_loop.max_retries} reached` };
   }
   return { action: "retry", reason: `fix attempt ${state.attempt + 1} of ${policy.ai_loop.max_retries}` };
+}
+
+/** Shape triggers that are also computed against the previous attempt C_{n-1} (ruling D17). */
+export const PREVIOUS_ATTEMPT_TRIGGERS: ReadonlySet<TriggerHit["id"]> = new Set<TriggerHit["id"]>(["S1", "S9", "S10"]);
+
+/**
+ * Ruling D17: on retry n the caller additionally runs G1 with B = C_{n-1} and
+ * C = C_n. Its S1/S9/S10 for files that had a G1 violation in C_{n-1} route to
+ * the simplification review (the B ratchet itself is unchanged), so a loop
+ * cannot launder a redistribution across attempts.
+ */
+export function previousAttemptTriggers(vsPrevious: readonly TriggerHit[], violatingFiles: Iterable<string>): TriggerHit[] {
+  const files = new Set(violatingFiles);
+  return vsPrevious
+    .filter((t) => PREVIOUS_ATTEMPT_TRIGGERS.has(t.id) && t.file !== undefined && files.has(t.file))
+    .map((t) => ({ ...t, routing: true, evidence: `${t.evidence} (vs previous attempt)` }));
+}
+
+/** Current triggers plus the previous-attempt ones, without duplicates. */
+export function mergePreviousAttemptTriggers(
+  current: readonly TriggerHit[],
+  vsPrevious: readonly TriggerHit[],
+  violatingFiles: Iterable<string>,
+): TriggerHit[] {
+  const out = [...current];
+  const seen = new Set(out.map((t) => `${t.id}|${t.file ?? ""}|${t.unit ?? ""}|${t.evidence}`));
+  for (const t of previousAttemptTriggers(vsPrevious, violatingFiles)) {
+    const k = `${t.id}|${t.file ?? ""}|${t.unit ?? ""}|${t.evidence}`;
+    if (!seen.has(k)) {
+      seen.add(k);
+      out.push(t);
+    }
+  }
+  return out;
 }

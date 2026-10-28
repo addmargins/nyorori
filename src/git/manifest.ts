@@ -14,7 +14,7 @@ import type {
   ManifestSide,
   UnmeasuredReason,
 } from "../types.js";
-import { git, resolveCommit, splitNul } from "./exec.js";
+import { decodePath, git, isInvalidPath, resolveCommit, splitNul } from "./exec.js";
 import { matchesAny } from "./glob.js";
 
 export const MODE_REGULAR = "100644";
@@ -25,6 +25,11 @@ export const MODE_GITLINK = "160000";
 const LFS_PREFIX = "version https://git-lfs.github.com/spec/v1";
 /** git-lfs pointers are at most 1024 bytes by specification. */
 const LFS_MAX_POINTER = 1024;
+/** Upper bound on bytes requested from one `cat-file --batch` call. */
+export const BLOB_BATCH_BYTES = 64 * 1024 * 1024;
+
+/** Measured-path suffixes for extensionless scripts (rulings D6); distinctive so `bin/cli` and `bin/cli.js` can coexist. */
+export const SHEBANG_SUFFIX = { js: ".shebang.js", ts: ".shebang.ts" } as const;
 
 export interface TreeEntry {
   mode: string;
@@ -43,21 +48,28 @@ export type PathClass =
   | { kind: "measure" }
   | { kind: "unmeasured"; reason: UnmeasuredReason }
   | { kind: "excluded"; reason: ExcludedReason }
-  | { kind: "unregistered"; ext: string };
+  /** No extension: the first line decides (classifyExtensionless). */
+  | { kind: "extensionless" };
+
+export type ShebangKind = "js" | "ts" | "foreign";
 
 /** `git ls-tree -r -z --full-tree <sha>` as a path → entry map. */
 export async function listTree(repoDir: string, sha: string): Promise<Map<string, TreeEntry>> {
   const out = await git(repoDir, ["ls-tree", "-r", "-z", "--full-tree", sha]);
   const map = new Map<string, TreeEntry>();
-  for (const rec of splitNul(out)) {
-    const tab = rec.indexOf("\t");
-    const [mode, type, blob] = rec.slice(0, tab).split(" ");
-    map.set(rec.slice(tab + 1), { mode: mode!, type: type!, blob: blob! });
+  let start = 0;
+  for (let i = 0; i < out.length; i++) {
+    if (out[i] !== 0) continue;
+    const rec = out.subarray(start, i);
+    start = i + 1;
+    const tab = rec.indexOf(0x09);
+    const [mode, type, blob] = rec.subarray(0, tab).toString("latin1").split(" ");
+    map.set(decodePath(rec.subarray(tab + 1)), { mode: mode!, type: type!, blob: blob! });
   }
   return map;
 }
 
-export function parseNameStatus(out: string): RawChange[] {
+export function parseNameStatus(out: Buffer | string): RawChange[] {
   const f = splitNul(out);
   const changes: RawChange[] = [];
   for (let i = 0; i < f.length; ) {
@@ -95,26 +107,63 @@ function hasSuffixIn(path: string, list: readonly string[]): boolean {
   return extensionCandidates(path).some((s) => lower.has(s.toLowerCase()));
 }
 
-/** Classification of a regular file path by policy alone (mode handled by the caller). */
+function isExtensionless(path: string): boolean {
+  const c = extensionCandidates(path);
+  return c.length === 1 && c[0] === "";
+}
+
+/**
+ * Classification of a regular file path by policy alone (mode handled by the
+ * caller). An extension listed nowhere is unmeasured UNSUPPORTED_FORMAT, routed
+ * to a human (rulings D5) rather than failing the whole run.
+ */
 export function classifyPath(path: string, policy: Policy): PathClass {
   const s = policy.scope;
   if (hasSuffixIn(path, s.declaration_suffixes)) return { kind: "excluded", reason: "DECLARATION_FILE" };
   if (matchesAny(path, s.exclude)) return { kind: "excluded", reason: "POLICY_EXCLUDE" };
   if (hasSuffixIn(path, s.unmeasured_code_extensions)) return { kind: "unmeasured", reason: "UNSUPPORTED_FORMAT" };
   if (hasSuffixIn(path, s.extensions)) return { kind: "measure" };
+  if (hasSuffixIn(path, s.foreign_code_extensions)) return { kind: "unmeasured", reason: "FOREIGN_LANGUAGE" };
+  if (isExtensionless(path)) return { kind: "extensionless" };
   if (hasSuffixIn(path, s.non_code_extensions)) return { kind: "excluded", reason: "NOT_CODE" };
-  const cands = extensionCandidates(path);
-  return { kind: "unregistered", ext: cands[cands.length - 1]! };
+  return { kind: "unmeasured", reason: "UNSUPPORTED_FORMAT" };
+}
+
+/** Interpreter named by a `#!` first line (rulings D6). Only the first 256 bytes are read. */
+export function shebangKind(content: Buffer): ShebangKind | null {
+  if (content[0] !== 0x23 || content[1] !== 0x21) return null;
+  const nl = content.indexOf(0x0a);
+  const line = content.subarray(0, Math.min(nl === -1 ? content.length : nl, 256)).toString("latin1");
+  // ts first: `ts-node` contains the word `node`.
+  if (/\b(tsx|ts-node)\b/.test(line)) return "ts";
+  if (/\b(node|bun|deno)\b/.test(line)) return "js";
+  return "foreign";
+}
+
+/** Final class of an extensionless file given its content (null when unread, e.g. oversize). */
+export function classifyExtensionless(path: string, content: Buffer | null, policy: Policy): PathClass {
+  if (content === null) return { kind: "unmeasured", reason: "UNSUPPORTED_FORMAT" };
+  const kind = shebangKind(content);
+  if (kind === "js" || kind === "ts") return { kind: "measure" };
+  if (kind === "foreign") return { kind: "unmeasured", reason: "FOREIGN_LANGUAGE" };
+  return hasSuffixIn(path, policy.scope.non_code_extensions)
+    ? { kind: "excluded", reason: "NOT_CODE" }
+    : { kind: "unmeasured", reason: "UNSUPPORTED_FORMAT" };
 }
 
 /** Would this path be code (measured or a known unmeasured format) if it were not excluded? */
 export function isCodePath(path: string, policy: Policy): boolean {
   const s = policy.scope;
   if (hasSuffixIn(path, s.declaration_suffixes)) return false;
-  return Boolean(hasSuffixIn(path, s.extensions) || hasSuffixIn(path, s.unmeasured_code_extensions));
+  return (
+    hasSuffixIn(path, s.extensions) ||
+    hasSuffixIn(path, s.unmeasured_code_extensions) ||
+    hasSuffixIn(path, s.foreign_code_extensions)
+  );
 }
 
-export function measuredPathFor(path: string, policy: Policy): string {
+export function measuredPathFor(path: string, policy: Policy, shebang?: ShebangKind | null): string {
+  if (shebang === "js" || shebang === "ts") return `${path}${SHEBANG_SUFFIX[shebang]}`;
   const isJs = /\.(js|mjs|cjs)$/i.test(path);
   return isJs && matchesAny(path, policy.scope.jsx_in_js) ? `${path}.jsx` : path;
 }
@@ -133,14 +182,9 @@ interface SideVerdict {
   measure: boolean;
   unmeasured?: UnmeasuredReason;
   excluded?: ExcludedReason;
-  unregistered?: string;
 }
 
-function judgeSide(path: string, mode: string, policy: Policy): SideVerdict {
-  const byMode = modeUnmeasured(mode);
-  if (byMode) return { measure: false, unmeasured: byMode };
-  if (!isRegular(mode)) return { measure: false, unmeasured: "TYPE_CHANGE" };
-  const cls = classifyPath(path, policy);
+function verdictOf(cls: PathClass): SideVerdict {
   switch (cls.kind) {
     case "measure":
       return { measure: true };
@@ -148,12 +192,12 @@ function judgeSide(path: string, mode: string, policy: Policy): SideVerdict {
       return { measure: false, unmeasured: cls.reason };
     case "excluded":
       return { measure: false, excluded: cls.reason };
-    case "unregistered":
-      return { measure: false, unregistered: cls.ext };
+    case "extensionless":
+      throw new Error("extensionless paths need their content");
   }
 }
 
-interface BatchInfo {
+export interface BatchInfo {
   type: string;
   size: number;
 }
@@ -192,6 +236,36 @@ export async function readBlobs(repoDir: string, blobs: string[]): Promise<Map<s
   return map;
 }
 
+/**
+ * Reads blobs in batches whose cumulative size stays under `budget`, so a big
+ * change never needs one giant child-process buffer.
+ */
+export async function readBlobsBatched(
+  repoDir: string,
+  blobs: string[],
+  budget = BLOB_BATCH_BYTES,
+): Promise<Map<string, Buffer>> {
+  const unique = [...new Set(blobs)];
+  const sizes = await batchCheck(repoDir, unique);
+  const map = new Map<string, Buffer>();
+  let batch: string[] = [];
+  let bytes = 0;
+  const flush = async () => {
+    if (batch.length === 0) return;
+    for (const [k, v] of await readBlobs(repoDir, batch)) map.set(k, v);
+    batch = [];
+    bytes = 0;
+  };
+  for (const b of unique) {
+    const size = sizes.get(b)?.size ?? 0;
+    if (batch.length > 0 && bytes + size > budget) await flush();
+    batch.push(b);
+    bytes += size;
+  }
+  await flush();
+  return map;
+}
+
 export function isLfsPointer(content: Buffer): boolean {
   return content.length <= LFS_MAX_POINTER && content.subarray(0, LFS_PREFIX.length).toString("latin1") === LFS_PREFIX;
 }
@@ -213,8 +287,28 @@ export async function buildManifest(
     listTree(repoDir, baseSha),
     listTree(repoDir, candidateSha),
   ]);
-  const changes = parseNameStatus(nameStatus.toString("utf8"));
+  const changes = parseNameStatus(nameStatus);
   return assembleManifest(repoDir, baseSha, candidateSha, changes, treeB, treeC, policy);
+}
+
+interface PendingSide {
+  path: string;
+  tree: TreeEntry;
+}
+
+/** First bytes of every extensionless regular side, for the shebang rule. Oversize blobs stay unread (null). */
+async function readExtensionless(
+  repoDir: string,
+  sides: PendingSide[],
+  policy: Policy,
+): Promise<Map<string, Buffer | null>> {
+  const blobs = [...new Set(sides.map((s) => s.tree.blob))];
+  const info = await batchCheck(repoDir, blobs);
+  const readable = blobs.filter((b) => (info.get(b)?.size ?? Infinity) <= policy.scope.max_file_bytes);
+  const contents = await readBlobsBatched(repoDir, readable);
+  const out = new Map<string, Buffer | null>();
+  for (const b of blobs) out.set(b, contents.get(b) ?? null);
+  return out;
 }
 
 async function assembleManifest(
@@ -230,6 +324,32 @@ async function assembleManifest(
   const entries: ManifestEntry[] = [];
   const sensitive = new Set<string>();
 
+  const extensionless: PendingSide[] = [];
+  for (const ch of changes) {
+    for (const [p, tree] of [[ch.pathB, treeB], [ch.pathC, treeC]] as const) {
+      const t = p ? tree.get(p) : undefined;
+      if (p && t && isRegular(t.mode) && !isInvalidPath(p) && classifyPath(p, policy).kind === "extensionless") {
+        extensionless.push({ path: p, tree: t });
+      }
+    }
+  }
+  const firstBytes = await readExtensionless(repoDir, extensionless, policy);
+
+  const judge = (path: string, t: TreeEntry): { v: SideVerdict; shebang: ShebangKind | null } => {
+    const byMode = modeUnmeasured(t.mode);
+    if (byMode) return { v: { measure: false, unmeasured: byMode }, shebang: null };
+    if (!isRegular(t.mode)) return { v: { measure: false, unmeasured: "TYPE_CHANGE" }, shebang: null };
+    if (isInvalidPath(path)) return { v: { measure: false, unmeasured: "UNSUPPORTED_FORMAT" }, shebang: null };
+    let cls = classifyPath(path, policy);
+    let shebang: ShebangKind | null = null;
+    if (cls.kind === "extensionless") {
+      const content = firstBytes.get(t.blob) ?? null;
+      shebang = content ? shebangKind(content) : null;
+      cls = classifyExtensionless(path, content, policy);
+    }
+    return { v: verdictOf(cls), shebang };
+  };
+
   for (const ch of changes) {
     for (const p of [ch.pathB, ch.pathC]) if (p && matchesAny(p, policy.scope.sensitive_paths)) sensitive.add(p);
 
@@ -237,16 +357,18 @@ async function assembleManifest(
     const tc = ch.pathC ? treeC.get(ch.pathC) : undefined;
     if ((ch.pathB && !tb) || (ch.pathC && !tc)) throw new Error(`path missing from tree listing: ${ch.pathB ?? ch.pathC}`);
 
-    const side = (path: string, t: TreeEntry): ManifestSide => ({
+    const jb = ch.pathB && tb && ch.status !== "A" && ch.status !== "C" ? judge(ch.pathB, tb) : undefined;
+    const jc = ch.pathC && tc && ch.status !== "D" ? judge(ch.pathC, tc) : undefined;
+    const side = (path: string, t: TreeEntry, shebang: ShebangKind | null): ManifestSide => ({
       path,
       blob: t.blob,
       mode: t.mode,
-      measuredPath: measuredPathFor(path, policy),
+      measuredPath: measuredPathFor(path, policy, shebang),
     });
-    const b = ch.pathB && tb && ch.status !== "A" && ch.status !== "C" ? side(ch.pathB, tb) : null;
-    const c = ch.pathC && tc && ch.status !== "D" ? side(ch.pathC, tc) : null;
-    const vb = b ? judgeSide(b.path, b.mode, policy) : undefined;
-    const vc = c ? judgeSide(c.path, c.mode, policy) : undefined;
+    const b = jb ? side(ch.pathB!, tb!, jb.shebang) : null;
+    const c = jc ? side(ch.pathC!, tc!, jc.shebang) : null;
+    const vb = jb?.v;
+    const vc = jc?.v;
 
     const entry: ManifestEntry = {
       status: ch.status,
@@ -274,19 +396,19 @@ async function assembleManifest(
     }
     if (matchesAny(primaryPath, policy.scope.test_globs)) entry.isTest = true;
 
-    // Only the candidate side matters: deleting an unregistered file cannot hide code.
-    if (vc?.unregistered !== undefined && c) {
+    if (c && isInvalidPath(c.path)) {
       problems.push({
-        reason: "UNREGISTERED_EXTENSION",
+        reason: "INVALID_ENCODING",
         path: c.path,
-        detail: `extension ${JSON.stringify(vc.unregistered)} is not registered in the policy scope`,
+        detail: `a candidate path is not valid UTF-8 (bytes ${c.path.slice(c.path.indexOf(":") + 1)}); rename it`,
       });
     }
     entries.push(entry);
   }
 
   await checkBlobs(repoDir, entries, policy, problems);
-  checkCollisions(entries, problems);
+  checkCollisions(entries, "B", treeB, problems);
+  checkCollisions(entries, "C", treeC, problems);
   entries.sort((x, y) => cmp((x.c ?? x.b)!.path, (y.c ?? y.b)!.path));
   return { baseSha, candidateSha, entries, problems, sensitivePathsChanged: [...sensitive].sort(cmp) };
 }
@@ -338,22 +460,42 @@ async function checkBlobs(
   }
 }
 
-/** Two measured paths on one side that collide on a case-insensitive file system, or after the .jsx suffix. */
-function checkCollisions(entries: ManifestEntry[], problems: Manifest["problems"]): void {
-  for (const key of ["B", "C"] as const) {
-    const seen = new Map<string, string>();
-    for (const e of entries) {
-      const s = key === "B" ? e.b : e.c;
-      if (!s || !e.measure[key]) continue;
-      const folded = s.measuredPath.toLowerCase();
-      const prev = seen.get(folded);
-      if (prev !== undefined) {
-        problems.push({
-          reason: "CASE_COLLISION",
-          path: s.path,
-          detail: `${key} side: ${JSON.stringify(s.path)} collides with ${JSON.stringify(prev)}`,
-        });
-      } else seen.set(folded, s.path);
+/**
+ * Measured paths that collide, case-insensitively, with any other path of the
+ * same side's full tree (unchanged files included) or with another measured
+ * path (a `.jsx`/shebang suffix). Colliding sides are not materialized: they
+ * would overwrite each other, and the run is INCONCLUSIVE anyway.
+ */
+function checkCollisions(
+  entries: ManifestEntry[],
+  key: "B" | "C",
+  tree: Map<string, TreeEntry>,
+  problems: Manifest["problems"],
+): void {
+  const owners = new Map<string, Set<string>>();
+  const claim = (name: string, owner: string) => {
+    const folded = name.toLowerCase();
+    let set = owners.get(folded);
+    if (!set) owners.set(folded, (set = new Set()));
+    set.add(owner);
+  };
+  for (const p of tree.keys()) claim(p, p);
+  const measured = entries.filter((e) => e.measure[key] && (key === "B" ? e.b : e.c));
+  for (const e of measured) {
+    const s = (key === "B" ? e.b : e.c)!;
+    claim(s.measuredPath, s.path);
+  }
+  for (const e of measured) {
+    const s = (key === "B" ? e.b : e.c)!;
+    const others = [...(owners.get(s.measuredPath.toLowerCase()) ?? [])].filter((o) => o !== s.path);
+    if (others.length === 0) continue;
+    e.measure[key] = false;
+    if (key === "C") {
+      problems.push({
+        reason: "CASE_COLLISION",
+        path: s.path,
+        detail: `${JSON.stringify(s.measuredPath)} collides with ${others.map((o) => JSON.stringify(o)).join(", ")}`,
+      });
     }
   }
 }

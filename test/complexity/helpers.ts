@@ -98,6 +98,10 @@ export interface Scenario {
   normalizedLines?: Map<string, { B?: number; C?: number }>;
   extraEntries?: ManifestEntry[];
   sensitivePathsChanged?: string[];
+  /** Withhold sources from the matcher (stage-4 bodies cannot be compared). */
+  noSourcesForMatch?: boolean;
+  normalizedIdentical?: string[];
+  isAiLoop?: boolean;
 }
 
 export interface ScenarioResult {
@@ -164,7 +168,16 @@ export function runScenario(s: Scenario): ScenarioResult {
     }
   }
   const baselineMissing = new Set(s.baselineMissing ?? []);
-  const match = matchUnits({ manifest, b, c, lineMaps, baselineMissing });
+  const match = matchUnits({
+    manifest,
+    b,
+    c,
+    lineMaps,
+    baselineMissing,
+    limit: policy.complexity.cognitive_limit,
+    ...(s.noSourcesForMatch ? {} : { sourcesB: new Map(Object.entries(s.b)), sourcesC: new Map(Object.entries(s.c)) }),
+    ...(s.normalizedIdentical ? { normalizedIdentical: new Set(s.normalizedIdentical) } : {}),
+  });
   const outcome = evaluateComplexity({
     manifest,
     b,
@@ -174,6 +187,7 @@ export function runScenario(s: Scenario): ScenarioResult {
     policy,
     sourcesC: new Map(Object.entries(s.c)),
     baselineMissing,
+    ...(s.isAiLoop !== undefined ? { isAiLoop: s.isAiLoop } : {}),
     ...(s.normalizedLines ? { normalizedLines: s.normalizedLines } : {}),
   });
   return { manifest, b, c, lineMaps, match, outcome, policy };

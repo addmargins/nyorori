@@ -11,8 +11,20 @@ import {
   type Unit,
 } from "../types.js";
 
+const ANONYMOUS = "<anonymous>";
+
+/**
+ * Escapes one name-chain element so a string-literal name such as `"g>f"`
+ * or `"a::b"` cannot reproduce another unit's key (audit F1). Ordinary
+ * identifiers stay readable; cccc's `<anonymous>` is the only raw `<`.
+ */
+export function escapeKeyPart(name: string): string {
+  if (name === ANONYMOUS) return name;
+  return name.replace(/[%<>#[\]:]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
+}
+
 export function unitKey(path: string, nameChain: string[], kind: string, ordinal: number): string {
-  return `${path}::${nameChain.join(">")}#${kind}[${ordinal}]`;
+  return `${path}::${nameChain.map(escapeKeyPart).join(">")}#${kind}[${ordinal}]`;
 }
 
 export function residueKey(path: string): string {
@@ -163,20 +175,32 @@ export function visibleBranches(m: FileMeasurement): number {
  * reuses property names for them.
  */
 export function isOverloadSignature(u: Unit, siblings: readonly Unit[]): boolean {
-  if (!u.signatureOnly || u.name === "<anonymous>") return false;
-  if (u.kind !== "function" && u.kind !== "method") return false;
+  if (!overloadCandidate(u)) return false;
   const idx = siblings.indexOf(u);
   return siblings.some((s, i) => i > idx && s.name === u.name && s.kind === u.kind);
 }
 
-/** Units that count for S1/S10 unit totals (overload signatures excluded). */
+function overloadCandidate(u: Unit): boolean {
+  return u.signatureOnly && u.name !== ANONYMOUS && (u.kind === "function" || u.kind === "method");
+}
+
+/** Units that count for S1/S10 unit totals (overload signatures excluded). Linear time. */
 export function countableUnits(m: FileMeasurement): Unit[] {
   const out: Unit[] = [];
   const walk = (us: readonly Unit[]) => {
-    for (const u of us) {
-      if (!isOverloadSignature(u, us)) out.push(u);
-      walk(u.children);
+    // Right to left: a row is an overload when its (name, kind) appears later.
+    const later = new Set<string>();
+    const overload = new Array<boolean>(us.length).fill(false);
+    for (let i = us.length - 1; i >= 0; i--) {
+      const u = us[i]!;
+      const k = `${u.name}\u0000${u.kind}`;
+      overload[i] = overloadCandidate(u) && later.has(k);
+      later.add(k);
     }
+    us.forEach((u, i) => {
+      if (!overload[i]) out.push(u);
+      walk(u.children);
+    });
   };
   walk(m.units);
   return out;

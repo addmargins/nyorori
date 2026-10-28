@@ -38,7 +38,7 @@ describe("waiver parsing", () => {
     const bad = [
       `/gate-waive gate=complexity unit="src/*::x#function[0]" metric=cogc ceiling=1 reason=r`,
       `/gate-waive gate=complexity unit="src/a.ts" metric=cogc ceiling=1 reason=r`,
-      `/gate-waive gate=tests unit="src/a.ts::x#function[0]" metric=cogc ceiling=1 reason=r`,
+      `/gate-waive gate=simplification-review unit="src/a.ts::x#function[0]" metric=cogc ceiling=1 reason=r`,
       `/gate-waive gate=complexity unit="src/a.ts::x#function[0]" metric=cogc ceiling=1 reason=r scope=pr`,
       `/gate-waive gate=complexity unit="src/a.ts::x#function[0]" metric=cogc ceiling=-1 reason=r`,
       `/gate-waive gate=complexity unit="unterminated metric=cogc ceiling=1 reason=r`,

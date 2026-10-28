@@ -19,6 +19,9 @@ function tokenize(rest: string): string[] {
   while (i < rest.length) {
     while (i < rest.length && /\s/.test(rest[i]!)) i++;
     if (i >= rest.length) break;
+    // An unquoted word starting with "#" begins a trailing comment, as in the
+    // gate's own copyable commands (`/gate-waive-approve W1 blob=… # unit`).
+    if (rest[i] === "#") break;
     let tok = "";
     while (i < rest.length && !/\s/.test(rest[i]!)) {
       const ch = rest[i]!;

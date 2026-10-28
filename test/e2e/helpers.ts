@@ -18,6 +18,8 @@ export function servicePolicy(over: Partial<PolicyInput> = {}): Policy {
     tests: { mode: "observe" },
     coverage: { mode: "observe" },
     ...over,
+    // The locally built binary is not the attested release asset (audit F10).
+    measurer: { allow_unpinned: true, ...over.measurer },
   });
 }
 

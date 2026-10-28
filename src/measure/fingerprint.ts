@@ -36,7 +36,26 @@ export async function identifyMeasurer(binary: string): Promise<MeasurerIdentity
   return { sha256, version };
 }
 
-/** Pure comparison against the policy pin. An empty pinned sha256 is only for fixtures. */
+/** Policy sections whose mode is not plain observation. */
+export function enforcingGates(policy: Policy): string[] {
+  const sections = {
+    complexity: policy.complexity.mode,
+    "lint-structure": policy.lint.mode,
+    deps: policy.deps.mode,
+    tests: policy.tests.mode,
+    coverage: policy.coverage.mode,
+    "simplification-review": policy.review.mode,
+    mutation: policy.mutation.mode,
+  };
+  return Object.entries(sections)
+    .filter(([, mode]) => mode !== "observe")
+    .map(([gate]) => gate);
+}
+
+/**
+ * Pure comparison against the policy pin. An empty pin is accepted only when
+ * every gate observes or the policy explicitly allows unpinned local runs.
+ */
 export function checkMeasurer(id: MeasurerIdentity, policy: Policy): Inconclusive[] {
   const out: Inconclusive[] = [];
   const m = policy.measurer;
@@ -44,6 +63,13 @@ export function checkMeasurer(id: MeasurerIdentity, policy: Policy): Inconclusiv
     out.push({
       reason: "MEASURER_MISMATCH",
       detail: `measurer reports ${JSON.stringify(id.version)}, policy pins ${JSON.stringify(m.cccc_version)}`,
+      authorFixable: false,
+    });
+  }
+  if (m.cccc_sha256 === "" && !m.allow_unpinned && enforcingGates(policy).length > 0) {
+    out.push({
+      reason: "MEASURER_MISMATCH",
+      detail: `policy pins no cccc sha256 while ${enforcingGates(policy).join(", ")} enforce; pin the attested binary (measurer.allow_unpinned is for local runs only)`,
       authorFixable: false,
     });
   }

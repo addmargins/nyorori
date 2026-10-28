@@ -75,12 +75,31 @@ export function normalizeReportedPath(p: string): string {
 }
 
 const ENCODING_HINT = /utf-?8|invalid (byte|data|character)|stream did not contain valid/i;
+const CANNOT_READ = /^cccc: cannot read (.+): (.+)$/;
+
+export interface ValidateOptions {
+  /** policy.parser_lag_allowlist: parse errors containing one of these are for a gate owner, not the author. */
+  parserLagAllowlist?: readonly string[];
+}
+
+/** Files the measurer skipped because they are not valid UTF-8, read from its stderr. */
+export function encodingSkips(stderr: string, expected: ReadonlySet<string>): { files: Set<string>; otherLines: string[] } {
+  const files = new Set<string>();
+  const otherLines: string[] = [];
+  for (const line of stderr.split("\n")) {
+    if (line.trim() === "") continue;
+    const m = CANNOT_READ.exec(line.trimEnd());
+    if (m && expected.has(normalizeReportedPath(m[1]!)) && ENCODING_HINT.test(m[2]!)) files.add(normalizeReportedPath(m[1]!));
+    else otherLines.push(line);
+  }
+  return { files, otherLines };
+}
 
 /**
  * All nine checks of the spec 6.3 table, as a pure function of one run. The
  * MEASURER_MISMATCH check needs the binary itself and lives in fingerprint.ts.
  */
-export function validateCcccRun(run: Omit<CcccRun, "args">, timeoutMs: number): ValidatedRun {
+export function validateCcccRun(run: Omit<CcccRun, "args">, timeoutMs: number, opts: ValidateOptions = {}): ValidatedRun {
   const inc: Inconclusive[] = [];
   const add = (reason: Inconclusive["reason"], detail: string, authorFixable = false, file?: string) =>
     inc.push({ reason, detail, authorFixable, ...(file !== undefined ? { file } : {}) });
@@ -95,12 +114,14 @@ export function validateCcccRun(run: Omit<CcccRun, "args">, timeoutMs: number): 
     add("MEASURER_EXIT", `${side}: cccc exited with ${run.rc ?? `signal ${run.signal}`}: ${stderr.trim().slice(0, 500)}`);
   }
 
-  const missingFromStderr = new Set<string>();
-  if (stderr.trim() !== "") {
-    const lines = stderr.trim().split("\n");
-    const encodingOnly = lines.every((l) => ENCODING_HINT.test(l));
-    for (const p of run.expectedPaths) if (stderr.includes(p)) missingFromStderr.add(p);
-    add("MEASURER_STDERR", `${side}: cccc wrote to stderr: ${stderr.trim().slice(0, 1000)}`, encodingOnly);
+  const expectedSet = new Set(run.expectedPaths);
+  const skipped = encodingSkips(stderr, expectedSet);
+  // An unreadable baseline is just a missing baseline (audit F15): its C units are new.
+  const baselineUnreadable = side === "B" ? skipped.files : new Set<string>();
+  const unexplained = side === "B" ? skipped.otherLines.join("\n") : stderr;
+  if (unexplained.trim() !== "") {
+    const encodingOnly = skipped.otherLines.length === 0;
+    add("MEASURER_STDERR", `${side}: cccc wrote to stderr: ${unexplained.trim().slice(0, 1000)}`, encodingOnly);
   }
 
   if (run.expectedPaths.length > 0 && run.stdout.length === 0) {
@@ -126,7 +147,7 @@ export function validateCcccRun(run: Omit<CcccRun, "args">, timeoutMs: number): 
   }
 
   const files = parsed.files.map((f) => ({ ...f, path: normalizeReportedPath(f.path) })) as CcccFile[];
-  const expected = new Set(run.expectedPaths);
+  const expected = expectedSet;
   const seen = new Set<string>();
   for (const f of files) {
     if (!expected.has(f.path)) add("MANIFEST_MISMATCH", `${side}: cccc reported a file outside the manifest: ${f.path}`, false, f.path);
@@ -134,8 +155,8 @@ export function validateCcccRun(run: Omit<CcccRun, "args">, timeoutMs: number): 
     seen.add(f.path);
   }
   for (const p of run.expectedPaths) {
-    if (!seen.has(p)) {
-      const enc = missingFromStderr.has(p) && ENCODING_HINT.test(stderr);
+    if (!seen.has(p) && !baselineUnreadable.has(p)) {
+      const enc = skipped.files.has(p);
       add(
         "MANIFEST_MISMATCH",
         enc
@@ -146,19 +167,25 @@ export function validateCcccRun(run: Omit<CcccRun, "args">, timeoutMs: number): 
       );
     }
   }
-  if (parsed.summary.file_count !== run.expectedPaths.length) {
-    add("MANIFEST_MISMATCH", `${side}: summary.file_count ${parsed.summary.file_count} ≠ manifest ${run.expectedPaths.length}`);
+  const expectedCount = run.expectedPaths.length - baselineUnreadable.size;
+  if (parsed.summary.file_count !== expectedCount) {
+    add("MANIFEST_MISMATCH", `${side}: summary.file_count ${parsed.summary.file_count} ≠ manifest ${expectedCount}`);
   }
 
-  const baselineParseErrors: string[] = [];
+  const baselineParseErrors: string[] = [...baselineUnreadable];
+  const lag = (opts.parserLagAllowlist ?? []).filter((e) => e.length > 0);
   for (const f of files) {
     const errs = f.parse_errors ?? [];
     if (errs.length > 0) {
       if (side === "C") {
+        // Syntax the parser does not support yet (policy list) is a gate-owner matter (audit F5).
+        const parserLag = errs.every((e) => lag.some((l) => e.includes(l)));
         add(
           "PARSE_ERROR_CANDIDATE",
-          `${f.path}: cccc could not parse the file (${errs.slice(0, 3).join("; ")}); fix the syntax error`,
-          true,
+          parserLag
+            ? `${f.path}: cccc does not support this syntax yet (${errs.slice(0, 3).join("; ")}); a gate owner may override`
+            : `${f.path}: cccc could not parse the file (${errs.slice(0, 3).join("; ")}); fix the syntax error`,
+          !parserLag,
           f.path,
         );
       } else baselineParseErrors.push(f.path);
@@ -241,7 +268,7 @@ export async function runCccc(opts: RunCcccOptions): Promise<CcccRun[]> {
 export function validateRuns(runs: CcccRun[], policy: Policy): ValidatedRun {
   const merged: ValidatedRun = { files: [], inconclusive: [], baselineParseErrors: [] };
   for (const r of runs) {
-    const v = validateCcccRun(r, policy.measurer.timeout_ms);
+    const v = validateCcccRun(r, policy.measurer.timeout_ms, { parserLagAllowlist: policy.parser_lag_allowlist });
     merged.files.push(...v.files);
     merged.inconclusive.push(...v.inconclusive);
     merged.baselineParseErrors.push(...v.baselineParseErrors);

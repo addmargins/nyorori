@@ -13,7 +13,16 @@ export interface ConfigWeakening {
   before: ConfigValue | null;
   after: ConfigValue | null;
   why: string;
+  /**
+   * `weakening` is a concrete loss of test strength (FAIL); `review` is a change
+   * that can hide one but may be legitimate (S7 evidence). Absent = weakening.
+   */
+  kind?: "weakening" | "review";
 }
+
+/** Settings that redirect what the tests load or how often they may fail (ruling D1). */
+const REVIEW_SETTING =
+  /(^|\.)(setupFiles|setupFilesAfterEach|setupFilesAfterEnv|globalSetup|globalTeardown|retry|moduleNameMapper|alias)(\.|$)/;
 
 const WEAK_IF_TRUE = new Set([
   "passWithNoTests",
@@ -154,6 +163,10 @@ function compareSettings(path: string, b: Settings, c: Settings, isTsconfig: boo
     const after = c.get(key);
     const seg = lastSegment(key);
     const push = (why: string) => out.push({ path, setting: key, before: before ?? null, after: after ?? null, why });
+    const review = REVIEW_SETTING.exec(key) ?? (isTsconfig && /^compilerOptions\.paths(\.|$)/.test(key) ? ["", "", "paths"] : null);
+    if (review && JSON.stringify(before) !== JSON.stringify(after)) {
+      out.push({ path, setting: key, before: before ?? null, after: after ?? null, why: `${review[2]} changed`, kind: "review" });
+    }
     if (isTsconfig) {
       if ((seg === "strict" || seg.startsWith("strict") || TS_STRICT.has(seg)) && before === true && after !== true) {
         push("type-check strictness turned off");
@@ -206,7 +219,7 @@ function comparePackageJson(path: string, before: string | null, after: string |
   const b = scripts(before);
   const c = scripts(after);
   if (b === "unparsed" || c === "unparsed") {
-    return [{ path, setting: "scripts", before: null, after: null, why: "package.json could not be parsed" }];
+    return [{ path, setting: "scripts", before: null, after: null, why: "package.json could not be parsed", kind: "review" }];
   }
   const out: ConfigWeakening[] = [];
   const testScript = /^(pre|post)?(test|coverage)(:|$)/;
@@ -237,7 +250,7 @@ export function analyzeConfigChange(path: string, before: string | null, after: 
   const b = parseSettings(path, before);
   const c = parseSettings(path, after);
   if (b === "unparsed" || c === "unparsed") {
-    return [{ path, setting: "*", before: null, after: null, why: "config could not be parsed statically; review the change" }];
+    return [{ path, setting: "*", before: null, after: null, why: "config could not be parsed statically; review the change", kind: "review" }];
   }
   return compareSettings(path, b, c, /^tsconfig.*\.json$/.test(base));
 }

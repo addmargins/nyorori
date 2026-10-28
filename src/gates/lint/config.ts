@@ -19,13 +19,31 @@ export const RULE_CATEGORY: Readonly<Record<string, LintCategory>> = {
   [`${PLUGIN_NAME}/suppression-directive`]: "block",
   "@typescript-eslint/max-params": "block",
   "max-nested-callbacks": "block",
+  // S4 fires on lines > 60 or statements > 30 (ruling D12): statement count
+  // does not depend on formatting.
   "max-lines-per-function": "trigger:S4",
+  "max-statements": "trigger:S4",
   [`${PLUGIN_NAME}/branch-hiding`]: "trigger:S9",
-  "no-param-reassign": "trigger:S10",
+  [`${PLUGIN_NAME}/param-mutation`]: "trigger:S10",
   "max-depth": "observe",
-  "max-statements": "observe",
   "max-lines": "observe",
 };
+
+/** Per-message refinements of RULE_CATEGORY (`ruleId:messageId`). */
+export const MESSAGE_CATEGORY: Readonly<Record<string, LintCategory>> = {
+  // Ruling D10: a lazy import from a fixed in-repo directory.
+  [`${PLUGIN_NAME}/dynamic-code:templateImportData`]: "observe",
+  [`${PLUGIN_NAME}/dynamic-code:templateImportCode`]: "trigger:S11",
+};
+
+/** Statement threshold of the S4 statements path (ruling D12). */
+export const S4_MAX_STATEMENTS = 30;
+
+/** Rules that are observe-only in test files (ruling D11). */
+export const OBSERVE_IN_TESTS: ReadonlySet<string> = new Set([
+  "@typescript-eslint/max-params",
+  "max-nested-callbacks",
+]);
 
 /** Rules whose B→C surplus produces DYNAMIC_CODE rather than LINT_NEW_VIOLATION. */
 export const DYNAMIC_CODE_RULES: ReadonlySet<string> = new Set([
@@ -37,12 +55,13 @@ export const DYNAMIC_CODE_RULES: ReadonlySet<string> = new Set([
 
 export const SUPPRESSION_RULE = `${PLUGIN_NAME}/suppression-directive`;
 
-export function categoryOf(ruleId: string): LintCategory | undefined {
-  return RULE_CATEGORY[ruleId];
+export function categoryOf(ruleId: string, messageId?: string): LintCategory | undefined {
+  return (messageId !== undefined ? MESSAGE_CATEGORY[`${ruleId}:${messageId}`] : undefined) ?? RULE_CATEGORY[ruleId];
 }
 
 export function buildLintConfig(policy: Policy): Linter.Config[] {
   const { lint, triggers, scope } = policy;
+  // Test files get the same rules; evaluate.ts downgrades the ones D11 makes observe.
   return [
     {
       name: "nyorori/gate",
@@ -85,7 +104,7 @@ export function buildLintConfig(policy: Policy): Linter.Config[] {
         "no-eval": ["error", { allowIndirect: false }],
         "no-new-func": "error",
         "no-implied-eval": "error",
-        [`${PLUGIN_NAME}/dynamic-code`]: "error",
+        [`${PLUGIN_NAME}/dynamic-code`]: ["error", { excludedDirs: scope.exclude }],
         [`${PLUGIN_NAME}/suppression-directive`]: "error",
         "@typescript-eslint/max-params": ["error", { max: lint.max_params, countVoidThis: false }],
         "max-nested-callbacks": ["error", { max: lint.max_nested_callbacks }],
@@ -94,17 +113,11 @@ export function buildLintConfig(policy: Policy): Linter.Config[] {
           { max: triggers.s4_max_function_lines, skipBlankLines: true, skipComments: true, IIFEs: true },
         ],
         [`${PLUGIN_NAME}/branch-hiding`]: "error",
-        "no-param-reassign": ["error", { props: true }],
+        [`${PLUGIN_NAME}/param-mutation`]: "error",
         "max-depth": ["error", { max: 4 }],
-        "max-statements": ["error", { max: 30 }],
+        "max-statements": ["error", { max: S4_MAX_STATEMENTS }],
         "max-lines": ["error", { max: 500, skipBlankLines: true, skipComments: true }],
       },
-    },
-    {
-      // Deeply nested callbacks are the norm in describe/it blocks.
-      name: "nyorori/tests",
-      files: scope.test_globs,
-      rules: { "max-nested-callbacks": "off" },
     },
   ];
 }

@@ -23,18 +23,18 @@ export interface IssueComment {
   createdAt: string;
 }
 
-export const WAIVABLE_GATES: ReadonlySet<GateId> = new Set(["complexity", "lint-structure", "deps", "coverage"]);
+/** `tests` is waivable only for TESTS_FAILED_ON_BASE (ruling D14); every other G4 reason is not. */
+export const WAIVABLE_GATES: ReadonlySet<GateId> = new Set(["complexity", "lint-structure", "deps", "coverage", "tests"]);
 
 /**
- * Never waivable: measurement failures go through overrides, G4 integrity
- * through a policy change. Dynamic code, bidi controls and suppression
- * comments are bypass vectors rather than judgment calls, so they are not
- * waivable either.
+ * Never waivable (ruling D14): G4 integrity goes through a policy change or a
+ * gate-owner test approval, dynamic code and bidi controls are bypass vectors,
+ * failing tests and the non-waivable suppressions have their own waivable
+ * reason codes (TESTS_FAILED_ON_BASE, SUPPRESSION_ADDED_WAIVABLE).
  */
 export const NON_WAIVABLE_REASONS: ReadonlySet<ReasonCode> = new Set<ReasonCode>([
   "TEST_REMOVED",
   "TEST_FOCUS_OR_SKIP",
-  "TEST_NO_ASSERTION",
   "TEST_CONFIG_WEAKENED",
   "TESTS_FAILED",
   "PROTECTED_PATH_MODIFIED",
@@ -45,6 +45,34 @@ export const NON_WAIVABLE_REASONS: ReadonlySet<ReasonCode> = new Set<ReasonCode>
   "REVIEW_REQUIRED",
   "REVIEW_CHANGES_REQUESTED",
 ]);
+
+/** Measurement reasons: INCONCLUSIVE is handled by overrides, never by waivers. */
+const INCONCLUSIVE_REASONS: ReadonlySet<string> = new Set([
+  "MEASURER_MISMATCH", "MEASURER_EXIT", "EMPTY_OUTPUT", "SCHEMA", "MANIFEST_MISMATCH", "MEASURER_STDERR",
+  "PARSE_ERROR_CANDIDATE", "INVARIANT_VIOLATION", "TIMEOUT", "UNITS_VANISHED", "NONDETERMINISM",
+  "CASE_COLLISION", "LFS_POINTER", "FILE_TOO_LARGE", "UNREGISTERED_EXTENSION", "JSX_IN_JS",
+  "INVALID_ENCODING", "FINGERPRINT_MISMATCH", "TOOL_ERROR", "NO_TESTS_EXECUTED", "REPORT_MISSING",
+  "UNTRUSTED_ARTIFACT",
+]);
+
+/**
+ * Whether a violation may be covered by a waiver. Producers may mark the
+ * waivable variants either with their own reason code or with a detail flag
+ * on the base reason (`base_broken` for failing tests, `waivable` for
+ * suppressions); both forms are accepted.
+ */
+export function isWaivable(v: Violation): boolean {
+  const reason = v.reason as string;
+  if (reason === "TESTS_FAILED_ON_BASE" || reason === "SUPPRESSION_ADDED_WAIVABLE") return true;
+  if (reason === "TESTS_FAILED") return v.details?.["base_broken"] === true;
+  if (reason === "SUPPRESSION_ADDED") return v.details?.["waivable"] === true;
+  return !NON_WAIVABLE_REASONS.has(v.reason) && !INCONCLUSIVE_REASONS.has(reason);
+}
+
+/** The metric a waiver names: the violation's metric, or its reason code when it has none. */
+export function violationMetric(v: Violation): string {
+  return normalizeMetric(v.metric ?? v.reason);
+}
 
 export interface WaiverRequest {
   id: string;
@@ -66,7 +94,10 @@ export interface ValidWaiver extends WaiverRequest {
   approver: string;
   approvedAt: string;
   expiresAt: string;
+  /** Blob the approver saw. */
   blob: string;
+  /** Set when the waiver carried over to a newer blob whose diff does not touch the unit (ruling D15). */
+  currentBlob?: string;
 }
 
 export interface WaiverRejection {
@@ -82,6 +113,13 @@ export interface WaiverContext {
   now: Date;
   /** Blob SHA of a path in the current candidate C, or null when absent. */
   candidateBlob: (path: string) => string | null;
+  /**
+   * Ruling D15 carry-over. Computed by the caller: true when
+   * diff(approvedBlob → currentBlob) has a hunk inside the unit's range in
+   * currentBlob, or when that cannot be decided (unit missing, unreadable
+   * blob). Absent means no carry-over: any change voids the waiver.
+   */
+  unitTouchedSince?: (q: { file: string; unit: string; approvedBlob: string; currentBlob: string }) => boolean;
 }
 
 const METRIC_ALIASES: Record<string, string> = {
@@ -227,10 +265,19 @@ export function evaluateWaivers(
       reject(indep);
       continue;
     }
-    const current = ctx.candidateBlob(req.file);
-    if (current === null || current.toLowerCase() !== ap.blob) {
-      reject("the unit's file changed since approval");
+    const current = ctx.candidateBlob(req.file)?.toLowerCase() ?? null;
+    let carried: string | undefined;
+    if (current === null) {
+      reject("the unit's file no longer exists");
       continue;
+    }
+    if (current !== ap.blob) {
+      const touched = ctx.unitTouchedSince?.({ file: req.file, unit: req.unit, approvedBlob: ap.blob, currentBlob: current }) ?? true;
+      if (touched) {
+        reject("the unit changed since approval");
+        continue;
+      }
+      carried = current;
     }
     const cap = new Date(Date.parse(ap.approvedAt) + ctx.policy.waivers.max_days * DAY_MS);
     const requested = req.expires ? new Date(`${req.expires}T23:59:59Z`) : cap;
@@ -246,6 +293,7 @@ export function evaluateWaivers(
         approvedAt: ap.approvedAt,
         expiresAt: expiresAt.toISOString(),
         blob: ap.blob,
+        ...(carried ? { currentBlob: carried } : {}),
       });
     }
   }
@@ -267,22 +315,18 @@ export function applyWaivers(violations: readonly Violation[], waivers: readonly
   const ordered = [...waivers].sort((a, b) => a.approvedAt.localeCompare(b.approvedAt) || a.id.localeCompare(b.id));
   for (const w of ordered) {
     const targets = out.filter(
-      (v) =>
-        !v.waivedBy &&
-        v.gate === w.gate &&
-        v.unit === w.unit &&
-        v.metric !== undefined &&
-        normalizeMetric(v.metric) === w.metric,
+      (v) => !v.waivedBy && v.gate === w.gate && v.unit === w.unit && violationMetric(v) === w.metric,
     );
     if (targets.length === 0) {
       unused.push({ id: w.id, problem: "no matching violation" });
       continue;
     }
-    if (targets.some((v) => NON_WAIVABLE_REASONS.has(v.reason))) {
+    if (targets.some((v) => !isWaivable(v))) {
       unused.push({ id: w.id, problem: "violation reason is not waivable" });
       continue;
     }
-    if (targets.some((v) => typeof v.after !== "number" || v.after > w.ceiling)) {
+    // A violation without a numeric value (failing test, suppression) is waived with ceiling=0.
+    if (targets.some((v) => (typeof v.after === "number" ? v.after > w.ceiling : w.ceiling !== 0))) {
       unused.push({ id: w.id, problem: "value exceeds the waiver ceiling" });
       continue;
     }

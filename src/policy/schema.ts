@@ -16,8 +16,10 @@ export const policySchema = z
     measurer: z
       .object({
         cccc_version: z.string().default("cccc 1.8.5"),
-        /** sha256 of the attested release binary. Empty disables the check (fixtures only). */
+        /** sha256 of the attested release binary. Empty is MEASURER_MISMATCH unless allow_unpinned (audit F10). */
         cccc_sha256: z.string().regex(/^([0-9a-f]{64})?$/).default(""),
+        /** Accept an empty cccc_sha256 even with enforcing gates. Local and fixture runs only. */
+        allow_unpinned: z.boolean().default(false),
         timeout_ms: z.number().int().positive().default(120_000),
         chunk_size: z.number().int().positive().default(1000),
         jobs: z.number().int().positive().default(4),
@@ -40,17 +42,39 @@ export const policySchema = z
           .array(z.string())
           .default([".vue", ".svelte", ".astro", ".mdx"]),
         /**
-         * Extensions that are clearly not code (docs, images, data). Any other
-         * extension not listed anywhere makes the gate INCONCLUSIVE.
+         * Extensions that are clearly not code (docs, data, assets, fonts, media,
+         * archives, locale and schema files). `""` covers extensionless files
+         * without a JS/TS shebang (rulings D6). An extension listed nowhere is
+         * unmeasured UNSUPPORTED_FORMAT and routed to S11 (rulings D5).
          */
         non_code_extensions: z
           .array(z.string())
           .default([
-            ".md", ".txt", ".json", ".jsonc", ".yml", ".yaml", ".toml", ".lock",
-            ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp",
-            ".css", ".scss", ".sass", ".less", ".html", ".csv", ".snap", ".map",
-            ".gitignore", ".gitattributes", ".gitmodules", ".npmrc", ".nvmrc",
-            ".editorconfig", ".prettierrc", ".env.example", "",
+            // docs and text
+            ".md", ".markdown", ".txt", ".rst", ".adoc", ".html", ".htm", ".csv", ".tsv",
+            // data and config
+            ".json", ".jsonc", ".json5", ".yml", ".yaml", ".toml", ".xml", ".ini", ".cfg",
+            ".conf", ".properties", ".env.example", ".env.sample", ".tsbuildinfo",
+            // lockfiles, patches, generated maps and snapshots
+            ".lock", ".lockb", ".patch", ".diff", ".snap", ".map",
+            // schema and query languages (not executed as JS)
+            ".graphql", ".gql", ".prisma", ".sql", ".proto",
+            // styles
+            ".css", ".scss", ".sass", ".less",
+            // images
+            ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif", ".bmp",
+            // fonts
+            ".woff", ".woff2", ".ttf", ".otf", ".eot",
+            // media and documents
+            ".mp4", ".webm", ".mov", ".mp3", ".wav", ".ogg", ".pdf",
+            // archives
+            ".zip", ".gz", ".tgz", ".tar", ".bz2", ".xz", ".7z",
+            // locale
+            ".po", ".pot", ".ftl", ".xliff", ".xlf",
+            // repository metadata
+            ".gitignore", ".gitattributes", ".gitmodules", ".npmrc", ".nvmrc", ".node-version",
+            ".editorconfig", ".prettierrc", ".prettierignore", ".eslintignore", ".dockerignore",
+            "",
           ]),
         /** Code in other languages: unmeasured FOREIGN_LANGUAGE, routed to S11 when it may hide JS/TS logic. */
         foreign_code_extensions: z

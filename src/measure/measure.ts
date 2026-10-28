@@ -4,7 +4,7 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { problemIsAuthorFixable } from "../git/manifest.js";
-import { materializeSide, type MaterializedFile } from "../git/tree.js";
+import { materializeSideChecked, type MaterializedFile } from "../git/tree.js";
 import type { Policy } from "../policy/schema.js";
 import type {
   CcccFile,
@@ -117,8 +117,16 @@ export async function measureSides(opts: MeasureSidesOptions): Promise<SideMeasu
   }
 
   try {
-    const matB = await materializeSide(repoDir, manifest, "B", roots.B);
-    const matC = await materializeSide(repoDir, manifest, "C", roots.C);
+    const sideB = await materializeSideChecked(repoDir, manifest, "B", roots.B);
+    const sideC = await materializeSideChecked(repoDir, manifest, "C", roots.C);
+    // A B side that cannot be written only loses its baseline; a C side cannot be judged.
+    inconclusive.push(...sideC.problems);
+    const matB = sideB.files;
+    const matC = sideC.files;
+    for (const p of sideB.problems) {
+      const e = manifest.entries.find((x) => x.b?.path === p.file);
+      if (e?.c) result.baselineMissing.add(e.c.path);
+    }
     for (const f of matB) result.sourcesB.set(f.path, f.text);
     for (const f of matC) result.sourcesC.set(f.path, f.text);
 
@@ -144,13 +152,13 @@ export async function measureSides(opts: MeasureSidesOptions): Promise<SideMeasu
     for (const e of manifest.entries) if (e.b && e.c) pairOfB.set(e.b.path, e.c.path);
     const brokenB = new Set(vB.baselineParseErrors);
     for (const f of matB) {
-      const report = reuse.has(f.path) ? cByRepoPath.get(pairOfB.get(f.path)!) : bFiles.get(f.measuredPath);
-      if (!report) continue;
       if (brokenB.has(f.measuredPath)) {
         const cPath = pairOfB.get(f.path);
         if (cPath !== undefined) result.baselineMissing.add(cPath);
         continue;
       }
+      const report = reuse.has(f.path) ? cByRepoPath.get(pairOfB.get(f.path)!) : bFiles.get(f.measuredPath);
+      if (!report) continue;
       result.b.set(f.path, buildFileMeasurement("B", f.path, f.blob, report, f.lineCount));
     }
 

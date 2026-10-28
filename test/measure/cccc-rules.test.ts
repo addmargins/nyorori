@@ -20,9 +20,9 @@ interface Expectation {
   parseErrors?: boolean;
 }
 
-async function measureAll(dir: string, files: string[], jobs?: number) {
+async function measureAll(dir: string, files: string[], jobs?: number, side: "B" | "C" = "B") {
   const policy = defaultPolicy();
-  const runs = await runCccc({ binary: requireCccc(), treeRoot: dir, files, policy, side: "B", ...(jobs ? { jobs } : {}) });
+  const runs = await runCccc({ binary: requireCccc(), treeRoot: dir, files, policy, side, ...(jobs ? { jobs } : {}) });
   return { runs, validated: validateRuns(runs, policy) };
 }
 
@@ -71,13 +71,17 @@ describe("cccc 1.8.5 I/O behaviour (spec 3.1 C4/C5, 6.3)", () => {
     try {
       await copyFile(join(FIXTURES, "if.ts"), join(dir, "ok.ts"));
       await writeFile(join(dir, "enc.ts"), Buffer.from([0x63, 0x6f, 0x6e, 0x73, 0x74, 0x20, 0x78, 0x3d, 0x22, 0xff, 0xfe, 0x22, 0x0a]));
-      const { runs, validated } = await measureAll(dir, ["ok.ts", "enc.ts"]);
+      const { runs, validated } = await measureAll(dir, ["ok.ts", "enc.ts"], undefined, "C");
       expect(runs[0]!.rc).toBe(0);
       expect(runs[0]!.stderr.toString()).toContain("cannot read enc.ts");
       expect(validated.files.map((f) => f.path)).toEqual(["ok.ts"]);
       const reasons = validated.inconclusive.map((i) => [i.reason, i.file ?? null, i.authorFixable]);
       expect(reasons).toContainEqual(["MANIFEST_MISMATCH", "enc.ts", true]);
       expect(reasons).toContainEqual(["MEASURER_STDERR", null, true]);
+      // On the B side the same file is only a missing baseline (audit F15).
+      const onB = await measureAll(dir, ["ok.ts", "enc.ts"], undefined, "B");
+      expect(onB.validated.inconclusive).toEqual([]);
+      expect(onB.validated.baselineParseErrors).toEqual(["enc.ts"]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

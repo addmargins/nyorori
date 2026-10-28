@@ -7,7 +7,8 @@ const S1: TriggerHit = { id: "S1", gate: "complexity", file: "src/plan.ts", evid
 const S4: TriggerHit = { id: "S4", gate: "lint-structure", file: "src/long.ts", evidence: "72 lines", routing: true };
 const S8: TriggerHit = { id: "S8", gate: "complexity", file: "src/a.ts", evidence: "CogC 13", routing: false };
 
-const APPROVE = "/simplification-review NO_SIMPLIFICATION_NEEDED\nq1: pass\nq2: pass\nq3: pass\nq4: pass\nq5: pass";
+const RUBRIC_OK = "q1: pass\nq2: pass\nq3: pass\nq4: pass\nq5: pass";
+const APPROVE = `/simplification-review NO_SIMPLIFICATION_NEEDED\n${RUBRIC_OK}\nS1: helpers are named pricing rules\nS4: exhaustive state table\nS3: modules are separate bounded contexts\nS6: accepted in review`;
 const REQUIRE = "/simplification-review REQUIRED\nq1: pass\nq2: fail src/plan.ts:40 processPart2 is a single-use helper\nq3: pass\nq4: pass\nq5: fail src/plan.ts:10 five hops";
 
 function rc(id: number, login: string, body: string, headSha = HEAD): ReviewComment {
@@ -114,7 +115,7 @@ describe("G6 simplification review", () => {
   });
 
   it("an S6 from a waiver is cleared when the waiver approver is a simplification reviewer", () => {
-    const s6: TriggerHit = { id: "S6", gate: "complexity", unit: "src/a.ts::f#function[0]", file: "src/a.ts", evidence: "waiver", routing: true };
+    const s6: TriggerHit = { id: "S6", gate: "complexity", unit: "src/a.ts::f#function[0]", file: "src/a.ts", evidence: "waiver W1: cognitive ≤ 22, approved by x", routing: true };
     expect(evaluateSimplificationReview(input({ triggers: [s6], waiverApprovers: [{ unit: s6.unit!, approver: "rev-alice" }] })).state).toBe("NOT_APPLICABLE");
     expect(evaluateSimplificationReview(input({ triggers: [s6], waiverApprovers: [{ unit: s6.unit!, approver: "appr-carol" }] })).state).toBe("FAIL");
   });
@@ -123,5 +124,31 @@ describe("G6 simplification review", () => {
     const r = evaluateSimplificationReview(input({ comments: [rc(1, "rev-alice", APPROVE)], llm: { verdict: "REQUIRED", model: "m" } }));
     expect(r.state).toBe("PASS");
     expect(r.observe.llm).toMatchObject({ verdict: "REQUIRED" });
+  });
+
+  it("D13: an approval must dispose of every fired trigger; REQUIRED needs none", () => {
+    const partial = `/simplification-review NO_SIMPLIFICATION_NEEDED\n${RUBRIC_OK}\nS1: fine`;
+    const r = evaluateSimplificationReview(input({ comments: [rc(1, "rev-alice", partial)] }));
+    expect(r.state).toBe("FAIL");
+    expect(JSON.stringify(r.observe.rejected_reviews)).toContain("no disposition for S4");
+    expect(evaluateSimplificationReview(input({ comments: [rc(1, "rev-bob", REQUIRE)] })).reasons).toEqual(["REVIEW_CHANGES_REQUESTED"]);
+  });
+
+  it("D13: empty or duplicate dispositions are rejected", () => {
+    expect(parseReview(`/simplification-review NO_SIMPLIFICATION_NEEDED\n${RUBRIC_OK}\nS1:   `)).toHaveProperty("problem");
+    expect(parseReview(`/simplification-review NO_SIMPLIFICATION_NEEDED\n${RUBRIC_OK}\nS1: a\nS1: b`)).toHaveProperty("problem");
+  });
+
+  it("D13: an approval on an old head does not cover a trigger that fired later", () => {
+    const old = "0".repeat(40);
+    const onlyS1 = `/simplification-review NO_SIMPLIFICATION_NEEDED\n${RUBRIC_OK}\nS1: fine`;
+    const carry = { [old]: { patchIdEqual: true, filesChangedSince: [] } };
+    expect(evaluateSimplificationReview(input({ triggers: [S1], comments: [rc(1, "rev-alice", onlyS1, old)], carryOver: carry })).state).toBe("PASS");
+    expect(evaluateSimplificationReview(input({ triggers: [S1, S4], comments: [rc(1, "rev-alice", onlyS1, old)], carryOver: carry })).state).toBe("FAIL");
+  });
+
+  it("an override S6 is never cleared by a waiver approver", () => {
+    const s6: TriggerHit = { id: "S6", gate: "complexity", unit: "src/a.ts::f#function[0]", file: "src/a.ts", evidence: "measurement override of SCHEMA by o", routing: true };
+    expect(evaluateSimplificationReview(input({ triggers: [s6], waiverApprovers: [{ unit: s6.unit!, approver: "rev-alice" }] })).state).toBe("FAIL");
   });
 });

@@ -100,8 +100,10 @@ describe("spec 14 policy rows", () => {
   it("observe-only test files fire no triggers (a new spec file is all tiny callbacks)", () => {
     const T = "src/plan.test.js";
     const spec = `describe("plan", () => {\n${Array.from({ length: 6 }, (_, i) => `  it("case ${i}", () => { expect(${i}).toBe(${i}); });`).join("\n")}\n});\n`;
+    const heavy = `describe("plan", () => {\n${Array.from({ length: 9 }, (_, i) => `  it("case ${i}", () => { if (globalThis.k === ${i}) throw 1; });`).join("\n")}\n});\n`;
     expect(triggerIds(runScenario({ b: {}, c: { [T]: spec }, tests: [T] }))).toEqual([]);
-    expect(triggerIds(runScenario({ b: {}, c: { [T]: spec } }))).toEqual(["S10"]);
+    expect(triggerIds(runScenario({ b: {}, c: { [T]: heavy }, tests: [T] }))).toEqual([]);
+    expect(triggerIds(runScenario({ b: {}, c: { [T]: heavy } }))).toEqual(["S10"]);
   });
 
   it("the limit comes from the policy", () => {
@@ -160,15 +162,23 @@ describe("triggers", () => {
     expect(normalized.outcome.triggers.find((t) => t.id === "S9")!.evidence).not.toMatch(/비정규화/);
   });
 
-  it("S9 does not fire for small branch drops", () => {
-    const r = runScenario({ b: { [F]: ifChain("f", 4) }, c: { [F]: ifChain("f", 2) } });
-    expect(triggerIds(r)).not.toContain("S9");
+  it("S9 (D20): a drop of 1 never fires; 2 fires on the line path only when lines are kept", () => {
+    expect(triggerIds(runScenario({ b: { [F]: ifChain("f", 3) }, c: { [F]: ifChain("f", 2) } }))).not.toContain("S9");
+    // Audit F2 repro: V 3 → 1 with the line count unchanged.
+    const b = `export function f(o) {\n  let t = 0;\n  if (o.a) t += 1;\n  if (o.b) t += 2;\n  if (o.c) t += 3;\n  return t;\n}\n`;
+    const c = `export function f(o) {\n  let t = 0;\n  if (o.a) t += 1;\n  t += Math.min(1, o.b) * 2;\n  t += Math.min(1, o.c) * 3;\n  return t;\n}\n`;
+    expect(triggerIds(runScenario({ b: { [F]: b }, c: { [F]: c } }))).toContain("S9");
+    // The same drop of 2 while the file shrinks is an ordinary deletion.
+    const shrunk = runScenario({ b: { [F]: ifChain("f", 4) }, c: { [F]: ifChain("f", 2) }, normalizedLines: new Map([[F, { B: 20, C: 6 }]]) });
+    expect(triggerIds(shrunk)).not.toContain("S9");
   });
 
-  it("S10: many new tiny units relative to total CogC", () => {
-    const c = Array.from({ length: 6 }, (_, i) => `export function step${i}(ctx) {\n  ctx.v += ${i};\n}\n`).join("");
+  it("S10: many new tiny units relative to total CogC, in a file with V ≥ 8 (D17)", () => {
+    const c = Array.from({ length: 8 }, (_, i) => `export function step${i}(ctx) {\n  if (ctx.k === ${i}) ctx.v += ${i};\n}\n`).join("");
     const r = runScenario({ b: {}, c: { [F]: c } });
-    expect(r.outcome.triggers.find((t) => t.id === "S10")!.evidence).toBe("단위 6 / (ΣCogC 0 + 1) = 6.00 ≥ 0.6, 새 단위 6");
+    expect(r.outcome.triggers.find((t) => t.id === "S10")!.evidence).toBe("단위 8 / (ΣCogC 8 + 1) = 0.89 ≥ 0.6, 새 단위 8, V 8");
+    const glue = Array.from({ length: 6 }, (_, i) => `export function step${i}(ctx) {\n  ctx.v += ${i};\n}\n`).join("");
+    expect(triggerIds(runScenario({ b: {}, c: { [F]: glue } }))).not.toContain("S10");
   });
 
   it("S11: unmeasured entries, new files in excluded paths, sensitive paths", () => {
@@ -184,7 +194,7 @@ describe("triggers", () => {
     ]);
   });
 
-  it("S11 unit vanish and UNITS_VANISHED", () => {
+  it("S11 unit vanish; UNITS_VANISHED is left to measure.ts (bug #11)", () => {
     const fns = Array.from({ length: 5 }, (_, i) => ifChain(`f${i}`, 2)).join("");
     const strings = Array.from({ length: 5 }, (_, i) =>
       `export const f${i} = new Function("x", ${JSON.stringify(ifChain("g", 2).split("\n").slice(1, -2).join("\n"))});`,
@@ -192,6 +202,6 @@ describe("triggers", () => {
     const pad = "\n".repeat(Math.max(0, fns.split("\n").length - strings.split("\n").length));
     const r = runScenario({ b: { [F]: fns }, c: { [F]: strings + pad } });
     expect(r.outcome.triggers.filter((t) => t.id === "S11")).toHaveLength(5);
-    expect(r.outcome.inconclusive.map((i) => i.reason)).toEqual(["UNITS_VANISHED"]);
+    expect(r.outcome.inconclusive).toEqual([]);
   });
 });

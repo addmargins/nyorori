@@ -110,32 +110,27 @@ describe("matchUnits", () => {
     expect(violationReasons(r)).toEqual(["src/b.js::legacy#function[0]:OVER_LIMIT_NEW"]);
   });
 
-  it("same-name methods of different classes rewritten in one hunk are not guessed", () => {
+  it("D21b: a k-to-k group of same-name methods in one hunk pairs by CogC and is identity-changed", () => {
     // One class per line, so editing both lines yields one hunk holding two `run` methods.
     const cls = (name: string, n: number) =>
       `class ${name} { run(x) { let y = 0; ${Array.from({ length: n }, (_, i) => `if (x === ${i}) y++;`).join(" ")} return y; } }`;
     const b = `${cls("A", 20)}\n${cls("B", 18)}\n`;
-    // Both methods even improved (20→19, 18→17), yet neither identity is certain.
-    const c = `${cls("A2", 19)}\n${cls("B2", 17)}\n`;
-    const r = runScenario({ b: { [F]: b }, c: { [F]: c } });
-    expect(r.match.matches.filter((m) => !m.cKey.endsWith("<module>"))).toEqual([]);
-    expect(violationReasons(r).sort()).toEqual([
+    const improved = runScenario({ b: { [F]: b }, c: { [F]: `${cls("A2", 19)}\n${cls("B2", 17)}\n` } });
+    expect(improved.match.matches.filter((m) => !m.cKey.endsWith("<module>")).map((m) => [m.stage, m.identityChanged])).toEqual([
+      [3, true],
+      [3, true],
+    ]);
+    expect(improved.outcome.violations).toEqual([]);
+    expect(improved.outcome.triggers.filter((t) => t.id === "S5")).toHaveLength(2);
+
+    // One C unit above every paired allowance: nothing is guessed.
+    const worse = runScenario({ b: { [F]: b }, c: { [F]: `${cls("A2", 21)}\n${cls("B2", 17)}\n` } });
+    expect(worse.match.matches.filter((m) => !m.cKey.endsWith("<module>"))).toEqual([]);
+    expect(violationReasons(worse).sort()).toEqual([
       `${F}::run#method[0]:UNMATCHED_OVER_BUDGET`,
       `${F}::run#method[1]:UNMATCHED_OVER_BUDGET`,
     ]);
-    const cands = r.outcome.violations[0]!.details!.b_candidates as unknown[];
-    expect(cands).toHaveLength(2);
-  });
-
-  it("unchanged scores in the same ambiguous hunk are matched as verbatim moves (stage 4)", () => {
-    const cls = (name: string, n: number) =>
-      `class ${name} { run(x) { let y = 0; ${Array.from({ length: n }, (_, i) => `if (x === ${i}) y++;`).join(" ")} return y; } }`;
-    const r = runScenario({
-      b: { [F]: `${cls("A", 20)}\n${cls("B", 18)}\n` },
-      c: { [F]: `${cls("A2", 20)}\n${cls("B2", 18)}\n` },
-    });
-    expect(r.match.matches.filter((m) => m.stage === 4)).toHaveLength(2);
-    expect(r.outcome.violations).toEqual([]);
+    expect(worse.outcome.violations[0]!.details!.b_candidates as unknown[]).toHaveLength(2);
   });
 
   it("same-name methods in separate hunks are matched 1:1 per hunk (stage 2)", () => {
@@ -148,15 +143,17 @@ describe("matchUnits", () => {
     expect(r.outcome.violations).toEqual([]);
   });
 
-  it("same-line anonymous functions: matched by line ordinal when the line is untouched", () => {
+  it("same-line anonymous functions: line ordinal when untouched, k-to-k when the line is edited", () => {
     const body = ifChain("x", 17).split("\n").slice(2, -3).join("\n");
     const b = `export const pair = [(x) => x, (x) => {\n  let y = 0;\n${body}\n  return y;\n}];\n`;
-    const shifted = "// moved down\n" + b;
-    const r = runScenario({ b: { [F]: b }, c: { [F]: shifted } });
+    const r = runScenario({ b: { [F]: b }, c: { [F]: "// moved down\n" + b } });
     expect(r.outcome.violations).toEqual([]);
-    const edited = b.replace("(x) => x,", "(x) => x + 0,");
-    const r2 = runScenario({ b: { [F]: b }, c: { [F]: edited } });
-    expect(violationReasons(r2)).toEqual([`${F}::<anonymous>#arrow[1]:UNMATCHED_OVER_BUDGET`]);
+    expect(r.outcome.triggers.filter((t) => t.id === "S5")).toEqual([]);
+    const edited = runScenario({ b: { [F]: b }, c: { [F]: b.replace("(x) => x,", "(x) => x + 0,") } });
+    expect(edited.outcome.violations).toEqual([]);
+    expect(edited.outcome.triggers.some((t) => t.id === "S5" && /identity-changed/.test(t.evidence))).toBe(true);
+    const grown = runScenario({ b: { [F]: b }, c: { [F]: b.replace("(x) => x,", "(x) => x + 0,").replace("y += 0;", "y += 0; if (x) y++;") } });
+    expect(violationReasons(grown)).toEqual([`${F}::<anonymous>#arrow[1]:UNMATCHED_OVER_BUDGET`]);
   });
 
   it("overload signatures shift without stealing the implementation's allowance", () => {

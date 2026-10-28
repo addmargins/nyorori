@@ -8,6 +8,7 @@ const fn = (name: string, body = "return 1;") => `export function ${name}(a: boo
 let repo: TestRepo;
 afterEach(() => repo?.dispose());
 
+const e0 = (m: Manifest, p: string) => m.entries.find((x) => (x.c ?? x.b)!.path === p)!;
 const byPath = (m: Manifest) => new Map<string, ManifestEntry>(m.entries.map((e) => [(e.c ?? e.b)!.path, e]));
 
 describe("pure helpers", () => {
@@ -34,8 +35,11 @@ describe("pure helpers", () => {
     expect(classifyPath("generated/a.ts", p)).toEqual({ kind: "excluded", reason: "POLICY_EXCLUDE" });
     expect(classifyPath("src/a.vue", p)).toEqual({ kind: "unmeasured", reason: "UNSUPPORTED_FORMAT" });
     expect(classifyPath("README.md", p)).toEqual({ kind: "excluded", reason: "NOT_CODE" });
-    expect(classifyPath("LICENSE", p)).toEqual({ kind: "excluded", reason: "NOT_CODE" });
-    expect(classifyPath("tool.py", p)).toEqual({ kind: "unregistered", ext: ".py" });
+    expect(classifyPath("LICENSE", p)).toEqual({ kind: "extensionless" });
+    expect(classifyPath("tool.py", p)).toEqual({ kind: "unmeasured", reason: "FOREIGN_LANGUAGE" });
+    expect(classifyPath("font.woff2", p)).toEqual({ kind: "excluded", reason: "NOT_CODE" });
+    expect(classifyPath("schema.graphql", p)).toEqual({ kind: "excluded", reason: "NOT_CODE" });
+    expect(classifyPath("thing.xyz", p)).toEqual({ kind: "unmeasured", reason: "UNSUPPORTED_FORMAT" });
   });
   it("isLfsPointer", () => {
     expect(isLfsPointer(Buffer.from("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 3\n"))).toBe(true);
@@ -83,7 +87,7 @@ describe("buildManifest on real repositories", () => {
     expect(e.get("src/flip.ts")).toMatchObject({ status: "T", unmeasured: "TYPE_CHANGE", measure: { B: true, C: false } });
   });
 
-  it("routes unsupported formats, excluded paths, declarations and unregistered extensions", async () => {
+  it("routes unsupported formats, excluded paths, declarations, foreign and unknown extensions", async () => {
     repo = new TestRepo();
     const b = repo.commit({ "x.txt": "x\n" });
     const c = repo.commit({
@@ -91,6 +95,7 @@ describe("buildManifest on real repositories", () => {
       "generated/api.ts": fn("gen"),
       "src/types.d.ts": "export declare const x: number;\n",
       "scripts/run.py": "print(1)\n",
+      "data/blob.xyz": "?\n",
       ".gitattributes": "*.ts text\n",
     });
     const m = await buildManifest(repo.dir, b, c, defaultPolicy({ scope: { exclude: ["generated/**"] } }));
@@ -98,7 +103,9 @@ describe("buildManifest on real repositories", () => {
     expect(e.get("src/App.vue")).toMatchObject({ unmeasured: "UNSUPPORTED_FORMAT" });
     expect(e.get("generated/api.ts")).toMatchObject({ excluded: "POLICY_EXCLUDE", newInExcludedPath: true });
     expect(e.get("src/types.d.ts")).toMatchObject({ excluded: "DECLARATION_FILE" });
-    expect(m.problems).toEqual([expect.objectContaining({ reason: "UNREGISTERED_EXTENSION", path: "scripts/run.py" })]);
+    expect(e.get("scripts/run.py")).toMatchObject({ unmeasured: "FOREIGN_LANGUAGE", measure: { B: false, C: false } });
+    expect(e.get("data/blob.xyz")).toMatchObject({ unmeasured: "UNSUPPORTED_FORMAT" });
+    expect(m.problems).toEqual([]);
     expect(m.sensitivePathsChanged).toEqual([".gitattributes"]);
   });
 
@@ -115,7 +122,8 @@ describe("buildManifest on real repositories", () => {
     const reasons = m.problems.map((p) => [p.reason, p.path]);
     expect(reasons).toContainEqual(["LFS_POINTER", "src/lfs.ts"]);
     expect(reasons).toContainEqual(["FILE_TOO_LARGE", "src/huge.ts"]);
-    expect(reasons.filter((r) => r[0] === "CASE_COLLISION")).toHaveLength(1);
+    expect(reasons.filter((r) => r[0] === "CASE_COLLISION").map((r) => r[1]).sort()).toEqual(["src/Util.ts", "src/util.ts"]);
+    expect(e0(m, "src/util.ts").measure.C).toBe(false);
     const e = byPath(m);
     expect(e.get("src/lfs.ts")!.measure.C).toBe(false);
     expect(e.get("src/huge.ts")!.measure.C).toBe(false);

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { parseTestReport, testId } from "../../src/gates/tests/report.js";
+import { MAX_TEST_REPORT_BYTES, parseTestReport, testId } from "../../src/gates/tests/report.js";
 
 const fx = (n: string) => readFileSync(new URL(`./fixtures/${n}`, import.meta.url), "utf8");
 const opts = { knownFiles: ["src/price.test.ts", "src/broken.test.ts", "src/none.test.ts"] };
@@ -45,23 +45,21 @@ describe("vitest 4.1 JSON report", () => {
   });
 });
 
-describe("JUnit XML report", () => {
-  it("normalizes a real vitest JUnit report to the same IDs as JSON", () => {
-    const x = parseTestReport(fx("vitest-4.1-junit.xml"), opts);
-    const j = parseTestReport(fx("vitest-4.1-report.json"), opts);
-    expect(x.ok && j.ok).toBe(true);
-    if (!x.ok || !j.ok) return;
-    expect(x.report.format).toBe("junit");
-    expect(x.report.tests.map((t) => t.id)).toEqual(j.report.tests.map((t) => t.id));
-    expect(x.report.numFailed).toBe(1);
-    // JUnit cannot tell todo from skipped.
-    expect(x.report.tests[3]!.status).toBe("skipped");
+describe("unsupported or oversized reports (ruling D4, bug #7)", () => {
+  it("refuses JUnit XML instead of parsing it", () => {
+    expect(parseTestReport(fx("vitest-4.1-junit.xml"), opts)).toMatchObject({
+      ok: false,
+      inconclusive: { reason: "SCHEMA", detail: expect.stringContaining("unsupported report format") },
+    });
   });
-  it("decodes entities and rejects count mismatches", () => {
-    const xml = `<testsuites tests="1"><testsuite name="a"><testcase classname="a.test.ts" name="x &amp; y &#62; z"/></testsuite></testsuites>`;
-    const r = parseTestReport(xml);
-    expect(r.ok && r.report.tests[0]).toMatchObject({ ancestors: ["x & y"], title: "z" });
-    expect(parseTestReport(xml.replace('tests="1"', 'tests="2"'))).toMatchObject({ ok: false });
-    expect(parseTestReport("<html/>")).toMatchObject({ ok: false });
+  it("returns quickly on the former JUnit ReDoS input", () => {
+    const xml = `<testsuites><testsuite name="x">` + `<testcase classname="a.test.ts" name="t">\n`.repeat(40000) + `</testsuite></testsuites>`;
+    const t = performance.now();
+    expect(parseTestReport(xml)).toMatchObject({ ok: false, inconclusive: { reason: "SCHEMA" } });
+    expect(performance.now() - t).toBeLessThan(200);
+  });
+  it("caps the report size", () => {
+    const big = "{" + " ".repeat(MAX_TEST_REPORT_BYTES) + "}";
+    expect(parseTestReport(big)).toMatchObject({ ok: false, inconclusive: { reason: "SCHEMA", detail: expect.stringContaining("exceeds") } });
   });
 });

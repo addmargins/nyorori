@@ -23,6 +23,7 @@ import {
   type FilePair,
 } from "../../units/match.js";
 import { checkName, normalizeName } from "../../units/names.js";
+import { matchesAny } from "../../util/glob.js";
 
 const ANONYMOUS = "<anonymous>";
 
@@ -41,6 +42,26 @@ export interface ComplexityInput {
   sourcesC?: ReadonlyMap<string, string>;
   /** C paths whose B side failed to parse. */
   baselineMissing?: ReadonlySet<string>;
+  /** The PR was authored by the AI fix loop (ruling D5: foreign-language files always route). */
+  isAiLoop?: boolean;
+}
+
+/**
+ * Thresholds from rulings D17, D18 and D20 that the policy schema does not
+ * carry yet. `policy.triggers.s9.min_branch_drop` remains the density-path
+ * minimum; a policy may override the rest once the schema has the fields.
+ */
+const RULING_DEFAULTS = {
+  s9_min_branch_drop_lines: 2,
+  s10_min_visible_branches: 8,
+  s12_min_residue: 8,
+  s12_min_rise: 5,
+  s12_pr_total_rise: 15,
+};
+
+function rulingThreshold(policy: Policy, group: "s9" | "s10" | "s12", field: string, key: keyof typeof RULING_DEFAULTS): number {
+  const fromPolicy = (policy.triggers as Record<string, Record<string, unknown> | undefined>)[group]?.[field];
+  return typeof fromPolicy === "number" ? fromPolicy : RULING_DEFAULTS[key];
 }
 
 export interface UnitObservation {
@@ -73,6 +94,7 @@ interface Ctx {
   input: ComplexityInput;
   T: number;
   bUnits: Map<string, Unit>;
+  cUnits: Map<string, Unit>;
   byC: Map<string, UnitMatch>;
   byB: Map<string, UnitMatch>;
   pairs: FilePair[];
@@ -85,14 +107,6 @@ interface Ctx {
   triggerPairs: FilePair[];
 }
 
-/**
- * Overload signatures appear as CC 1 / CogC 0 rows followed by a same-name
- * sibling (the implementation). model.ts's `signatureOnly` flag cannot tell
- * them from trivial one-line helpers, which are exactly what mechanical
- * splitting produces, so S1/S10 count every unit except a function/method
- * row that has a later same-name, same-kind sibling. Arrows (property
- * arrows share names like `test`) cannot be overloads.
- */
 export { countableUnits, isOverloadSignature };
 
 function allUnits(m: FileMeasurement): Unit[] {
@@ -110,6 +124,8 @@ function displayName(u: Unit): string {
 function buildCtx(input: ComplexityInput): Ctx {
   const bUnits = new Map<string, Unit>();
   for (const m of input.b.values()) for (const u of allUnits(m)) bUnits.set(u.key, u);
+  const cUnits = new Map<string, Unit>();
+  for (const m of input.c.values()) for (const u of allUnits(m)) cUnits.set(u.key, u);
   const byC = new Map<string, UnitMatch>();
   const byB = new Map<string, UnitMatch>();
   for (const m of input.matches) {
@@ -133,6 +149,7 @@ function buildCtx(input: ComplexityInput): Ctx {
     input,
     T: input.policy.complexity.cognitive_limit,
     bUnits,
+    cUnits,
     byC,
     byB,
     pairs,
@@ -312,13 +329,14 @@ function s2Triggers(ctx: Ctx, cFiles: Array<{ entry: ManifestEntry; file: FileMe
     const hunks = ctx.pairByC.get(file.path)?.hunks;
     for (const cu of flattenUnits(file.units)) {
       if (!changedOrNew(ctx, cu, hunks)) continue;
-      if (cu.name === ANONYMOUS && cu.parentKey !== null && cu.cognitive >= cfg.anonymous_child_trigger) {
+      // Top-level callbacks (`app.get("/", (req, res) => {…})`) count too (audit F11).
+      if (cu.name === ANONYMOUS && cu.cognitive >= cfg.anonymous_child_trigger) {
         hits.push({
           id: "S2",
           gate: "complexity",
           file: file.path,
           unit: cu.key,
-          evidence: `익명 자식 ${cu.key} (행 ${cu.line}) CogC ${cu.cognitive} ≥ ${cfg.anonymous_child_trigger}`,
+          evidence: `익명 ${cu.parentKey === null ? "최상위 콜백" : "자식"} ${cu.key} (행 ${cu.line}) CogC ${cu.cognitive} ≥ ${cfg.anonymous_child_trigger}`,
           routing: true,
         });
       } else if (cu.cognitive <= ctx.T && cu.inclusiveCognitive > cfg.inclusive_cognitive_trigger) {
@@ -350,7 +368,7 @@ function s5Triggers(ctx: Ctx): TriggerHit[] {
       const m = ctx.byB.get(bu.key);
       if (!m || bu.cognitive <= ctx.T) continue;
       if (bRangeTouched(p.hunks, bu.line, bu.endLine)) {
-        const cu = flattenUnits(p.c.units).find((u) => u.key === m.cKey);
+        const cu = ctx.cUnits.get(m.cKey);
         push(bu, p.c.path, `부채 단위 ${bu.name} (B CogC ${bu.cognitive} → C ${cu?.cognitive ?? "?"}) 범위 ${bu.line}-${bu.endLine} 수정`);
       }
     }
@@ -370,7 +388,7 @@ function s5Triggers(ctx: Ctx): TriggerHit[] {
     if (!m.identityChanged) continue;
     const bu = ctx.bUnits.get(m.bKey);
     if (!bu || bu.cognitive <= ctx.T || ctx.observedOnly.has(bu.path)) continue;
-    const file = m.cKey.slice(0, m.cKey.indexOf("::"));
+    const file = ctx.cUnits.get(m.cKey)?.path ?? m.cKey.slice(0, m.cKey.indexOf("::"));
     if (seen.has(bu.key)) {
       const hit = hits.find((h) => h.unit === bu.key);
       if (hit) hit.evidence += `; identity-changed (stage ${m.stage})`;
@@ -394,15 +412,18 @@ function s9Triggers(ctx: Ctx): TriggerHit[] {
     const vb = visibleBranches(p.b);
     const vc = visibleBranches(p.c);
     const drop = vb - vc;
-    if (vb <= 0 || drop < cfg.min_branch_drop) continue;
+    const minLines = rulingThreshold(ctx.input.policy, "s9", "min_branch_drop_lines", "s9_min_branch_drop_lines");
+    if (vb <= 0 || drop < Math.min(cfg.min_branch_drop, minLines)) continue;
     const l = lines(ctx, p);
     const lineDrop = l.b > 0 ? (l.b - l.c) / l.b : 0;
     const branchDrop = drop / vb;
     const densityB = vb / Math.max(1, l.b);
     const densityC = vc / Math.max(1, l.c);
     const densityDrop = (densityB - densityC) / densityB;
-    const byLines = branchDrop > cfg.branch_drop_ratio && lineDrop < cfg.max_line_drop_ratio;
-    const byDensity = densityDrop >= cfg.density_drop_ratio;
+    // Ruling D20: the line path already demands that lines did not shrink
+    // (the V10 shape), so it needs a smaller absolute drop than the density path.
+    const byLines = drop >= minLines && branchDrop > cfg.branch_drop_ratio && lineDrop < cfg.max_line_drop_ratio;
+    const byDensity = drop >= cfg.min_branch_drop && densityDrop >= cfg.density_drop_ratio;
     if (!byLines && !byDensity) continue;
     const pct = (x: number) => `${x >= 0 ? "−" : "+"}${Math.abs(Math.round(x * 100))}%`;
     hits.push({
@@ -426,12 +447,15 @@ function s10Triggers(ctx: Ctx, cFiles: Array<{ entry: ManifestEntry; file: FileM
     const sumCog = units.reduce((s, u) => s + u.cognitive, 0);
     const density = units.length / (sumCog + 1);
     const fresh = units.filter((u) => !ctx.byC.has(u.key)).length;
-    if (density >= cfg.min_density && fresh >= cfg.min_new_units) {
+    // Ruling D17: a file with few visible branches is ordinary glue code.
+    const v = visibleBranches(file);
+    const minV = rulingThreshold(ctx.input.policy, "s10", "min_visible_branches", "s10_min_visible_branches");
+    if (density >= cfg.min_density && fresh >= cfg.min_new_units && v >= minV) {
       hits.push({
         id: "S10",
         gate: "complexity",
         file: file.path,
-        evidence: `단위 ${units.length} / (ΣCogC ${sumCog} + 1) = ${density.toFixed(2)} ≥ ${cfg.min_density}, 새 단위 ${fresh}`,
+        evidence: `단위 ${units.length} / (ΣCogC ${sumCog} + 1) = ${density.toFixed(2)} ≥ ${cfg.min_density}, 새 단위 ${fresh}, V ${v}`,
         routing: true,
       });
     }
@@ -439,8 +463,73 @@ function s10Triggers(ctx: Ctx, cFiles: Array<{ entry: ManifestEntry; file: FileM
   return hits;
 }
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Every identifier-like word of the source, NFKC-normalized (one pass instead of a regex per name). */
+function identifierSet(source: string): Set<string> {
+  return new Set(source.normalize("NFKC").match(/[\p{L}\p{N}_$]+/gu) ?? []);
+}
+
+const TEST_FILE_NAME = /\.(test|spec)\.[^/]+$/;
+
+/**
+ * Audit F3: a file that lands under a test glob without being named as a
+ * test is production-shaped code hiding from enforcement. New files and
+ * copies count, and so does a rename whose B path was outside the test globs.
+ */
+function isNewUnderTestGlob(ctx: Ctx, e: ManifestEntry): boolean {
+  if (e.status === "A" || e.status === "C") return true;
+  if (e.status === "R" && e.b) return !matchesAny(e.b.path, ctx.input.policy.scope.test_globs);
+  return false;
+}
+
+/** Σ C − Σ B of file CogC over the PR's measured files. */
+function netCognitiveChange(ctx: Ctx): number {
+  let delta = 0;
+  for (const e of ctx.input.manifest.entries) {
+    if (e.b && e.measure.B) delta -= ctx.input.b.get(e.b.path)?.totalCognitive ?? 0;
+    if (e.c && e.measure.C) delta += ctx.input.c.get(e.c.path)?.totalCognitive ?? 0;
+  }
+  return delta;
+}
+
+/**
+ * Ruling D18 S12 residue shift. Per C file: residue ≥ 8, residue above the
+ * file's function CogC, and the file is new or its residue rose by ≥ 5.
+ * PR-wide: the summed residue rise over changed files exceeds 15.
+ */
+function s12Triggers(ctx: Ctx, cFiles: Array<{ entry: ManifestEntry; file: FileMeasurement }>): TriggerHit[] {
+  const policy = ctx.input.policy;
+  const minResidue = rulingThreshold(policy, "s12", "min_residue", "s12_min_residue");
+  const minRise = rulingThreshold(policy, "s12", "min_rise", "s12_min_rise");
+  const prTotal = rulingThreshold(policy, "s12", "pr_total_rise", "s12_pr_total_rise");
+  const hits: TriggerHit[] = [];
+  let totalRise = 0;
+  const parts: string[] = [];
+  for (const { entry, file } of cFiles) {
+    const pair = ctx.pairByC.get(file.path);
+    const before = pair ? pair.b.residue.cognitive : undefined;
+    const isNew = entry.status === "A" || entry.status === "C" || (!pair && !(entry.b && entry.measure.B));
+    const rC = file.residue.cognitive;
+    const rise = rC - (before ?? 0);
+    if (rise > 0) {
+      totalRise += rise;
+      parts.push(`${file.path} +${rise}`);
+    }
+    const fnCog = flattenUnits(file.units).reduce((s, u) => s + u.cognitive, 0);
+    if (rC >= minResidue && rC > fnCog && (isNew || (before !== undefined && rise >= minRise))) {
+      hits.push({
+        id: "S12",
+        gate: "complexity",
+        file: file.path,
+        unit: file.residue.key,
+        evidence: `<module> residue ${before ?? "신규"}→${rC} (함수 CogC 합 ${fnCog})`,
+        routing: true,
+      });
+    }
+  }
+  if (hits.length === 0 && totalRise > prTotal) {
+    hits.push({ id: "S12", gate: "complexity", evidence: `PR 전체 residue 증가 ${totalRise} > ${prTotal}: ${parts.join(", ")}`, routing: true });
+  }
+  return hits;
 }
 
 /**
@@ -452,10 +541,18 @@ function escapeRegExp(s: string): string {
 function s11Triggers(ctx: Ctx): TriggerHit[] {
   const hits: TriggerHit[] = [];
   const m = ctx.input.manifest;
+  const foreignRoutes = ctx.input.isAiLoop === true || netCognitiveChange(ctx) < 0;
   for (const e of m.entries) {
     const path = e.c?.path ?? e.b?.path ?? "?";
-    if (e.unmeasured) {
+    if (e.unmeasured === "FOREIGN_LANGUAGE") {
+      // Ruling D5: foreign code is ordinary unless logic may have moved out of measurement.
+      const why = ctx.input.isAiLoop ? "AI 수정 루프" : foreignRoutes ? "측정된 JS/TS의 순 CogC 감소" : "관측";
+      hits.push({ id: "S11", gate: "complexity", file: path, evidence: `미측정: FOREIGN_LANGUAGE (${e.status}, ${why})`, routing: foreignRoutes });
+    } else if (e.unmeasured) {
       hits.push({ id: "S11", gate: "complexity", file: path, evidence: `미측정: ${e.unmeasured} (${e.status})`, routing: true });
+    }
+    if (e.c && e.isTest && !TEST_FILE_NAME.test(e.c.path) && isNewUnderTestGlob(ctx, e)) {
+      hits.push({ id: "S11", gate: "complexity", file: e.c.path, evidence: `테스트 경로의 비테스트 코드 (${e.status})`, routing: true });
     }
     if (e.newInExcludedPath) {
       hits.push({ id: "S11", gate: "complexity", file: path, evidence: `제외 경로의 신규 파일`, routing: true });
@@ -468,11 +565,13 @@ function s11Triggers(ctx: Ctx): TriggerHit[] {
     const source = ctx.input.sourcesC?.get(p.c.path);
     if (source === undefined) continue;
     const cNames = new Set(flattenUnits(p.c.units).map((u) => normalizeName(u.name)));
+    let identifiers: Set<string> | undefined;
     for (const bu of flattenUnits(p.b.units)) {
       if (bu.name === ANONYMOUS || ctx.byB.has(bu.key)) continue;
       const name = normalizeName(bu.name);
       if (cNames.has(name)) continue;
-      if (new RegExp(`(?<![\\p{L}\\p{N}_$])${escapeRegExp(name)}(?![\\p{L}\\p{N}_$])`, "u").test(source)) {
+      identifiers ??= identifierSet(source);
+      if (identifiers.has(name)) {
         hits.push({
           id: "S11",
           gate: "complexity",
@@ -485,25 +584,6 @@ function s11Triggers(ctx: Ctx): TriggerHit[] {
     }
   }
   return hits;
-}
-
-/** Spec 6.4 cross-check: a well-populated file losing every unit without shrinking. */
-function vanishedUnits(ctx: Ctx): Inconclusive[] {
-  const out: Inconclusive[] = [];
-  const min = ctx.input.policy.complexity.vanish_min_units;
-  for (const p of ctx.pairs) {
-    const before = countableUnits(p.b).length;
-    const after = flattenUnits(p.c.units).length;
-    if (before >= min && after === 0 && p.c.lineCount * 2 > p.b.lineCount) {
-      out.push({
-        reason: "UNITS_VANISHED",
-        file: p.c.path,
-        detail: `단위 ${before}→0, 행 ${p.b.lineCount}→${p.c.lineCount}`,
-        authorFixable: false,
-      });
-    }
-  }
-  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -565,8 +645,10 @@ export function evaluateComplexity(input: ComplexityInput): ComplexityOutcome {
     ...s9Triggers(ctx),
     ...s10Triggers(ctx, triggerFiles),
     ...s11Triggers(ctx),
+    ...s12Triggers(ctx, triggerFiles),
   );
 
-  return { violations, triggers, observe: obs, inconclusive: vanishedUnits(ctx) };
+  // UNITS_VANISHED is measure.ts's cross-check (bug #11); G1 keeps the field for compatibility.
+  return { violations, triggers, observe: obs, inconclusive: [] };
 }
 

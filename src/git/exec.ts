@@ -86,10 +86,43 @@ export async function resolveCommit(repoDir: string, rev: string): Promise<strin
   return out.trim();
 }
 
-/** Split NUL-terminated output, dropping the trailing empty field. */
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+/** Prefix of the stand-in for a path that is not valid UTF-8. NUL never occurs in a real git path. */
+export const INVALID_PATH_PREFIX = "\0invalid-utf8:";
+
+/**
+ * Decodes a raw path. Invalid UTF-8 must not be decoded lossily: two distinct
+ * byte paths would collapse to the same U+FFFD string and swap blobs. Such
+ * paths get a unique stand-in that every consumer treats as unmeasurable.
+ */
+export function decodePath(raw: Buffer): string {
+  try {
+    return strictUtf8.decode(raw);
+  } catch {
+    return INVALID_PATH_PREFIX + raw.toString("hex");
+  }
+}
+
+export function isInvalidPath(path: string): boolean {
+  return path.startsWith(INVALID_PATH_PREFIX);
+}
+
+/** Split NUL-terminated output, dropping the trailing empty field. Buffers are decoded per field. */
 export function splitNul(buf: Buffer | string): string[] {
-  const s = typeof buf === "string" ? buf : buf.toString("utf8");
-  const parts = s.split("\0");
-  if (parts.length > 0 && parts[parts.length - 1] === "") parts.pop();
-  return parts;
+  if (typeof buf === "string") {
+    const parts = buf.split("\0");
+    if (parts.length > 0 && parts[parts.length - 1] === "") parts.pop();
+    return parts;
+  }
+  const out: string[] = [];
+  let start = 0;
+  for (let i = 0; i < buf.length; i++) {
+    if (buf[i] === 0) {
+      out.push(decodePath(buf.subarray(start, i)));
+      start = i + 1;
+    }
+  }
+  if (start < buf.length) out.push(decodePath(buf.subarray(start)));
+  return out;
 }

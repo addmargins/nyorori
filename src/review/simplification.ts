@@ -23,6 +23,8 @@ export interface RubricAnswer {
 export interface ParsedReview {
   verdict: ReviewVerdict;
   answers: RubricAnswer[];
+  /** One-line disposition per trigger ID ("S1: helpers are named pricing rules"), ruling D13. */
+  dispositions: Record<string, string>;
 }
 
 /** A review comment plus the PR head SHA it was posted against (recorded by the service). */
@@ -50,6 +52,11 @@ const EVIDENCE = /^[^\s:]+:\d+$/;
  *   q3: pass
  *   q4: pass
  *   q5: pass
+ *   S1: split follows the pricing rules, each helper is a named rule
+ *   S4: long because of the exhaustive state table
+ *
+ * Every rubric item needs an explicit pass/fail and every routing trigger
+ * that fired needs a one-line disposition (ruling D13); nothing defaults.
  */
 export function parseReview(body: string): ParsedReview | { problem: string } | null {
   let cmds;
@@ -67,7 +74,16 @@ export function parseReview(body: string): ParsedReview | { problem: string } | 
       throw new CommandError("verdict must be NO_SIMPLIFICATION_NEEDED, SUGGESTED or REQUIRED");
     }
     const answers = new Map<number, RubricAnswer>();
+    const dispositions: Record<string, string> = {};
     for (const raw of cmd.bodyLines) {
+      const d = /^\s*(S\d{1,2})\s*[:=]\s*(.*)$/.exec(raw);
+      if (d) {
+        const id = d[1]!;
+        if (id in dispositions) throw new CommandError(`${id} disposition given twice`);
+        if (!d[2]!.trim()) throw new CommandError(`${id} disposition is empty`);
+        dispositions[id] = d[2]!.trim();
+        continue;
+      }
       const m = /^\s*q([1-5])\s*[:=]\s*(pass|fail)\b(.*)$/i.exec(raw);
       if (!m) continue;
       const q = Number(m[1]) as RubricAnswer["question"];
@@ -89,7 +105,7 @@ export function parseReview(body: string): ParsedReview | { problem: string } | 
     if (verdict === "NO_SIMPLIFICATION_NEEDED" && coreFails.length > 0) {
       throw new CommandError("NO_SIMPLIFICATION_NEEDED contradicts a failed item among q1-q4");
     }
-    return { verdict, answers: list };
+    return { verdict, answers: list, dispositions };
   } catch (e) {
     return { problem: (e as Error).message };
   }
@@ -132,6 +148,7 @@ interface AcceptedReview {
   verdict: ReviewVerdict;
   sha: string;
   commentId: string;
+  dispositions: Record<string, string>;
 }
 
 export function routingTriggers(triggers: readonly TriggerHit[]): TriggerHit[] {
@@ -158,7 +175,8 @@ export function evaluateSimplificationReview(input: SimplificationReviewInput): 
       .filter((w) => inRoster(w.approver, policy.review.simplification_reviewers, input.teams))
       .map((w) => w.unit),
   );
-  routing = routing.filter((t) => !(t.id === "S6" && t.unit && clearedS6.has(t.unit)));
+  // Only waiver-sourced S6 (see waiverTriggers); override and degraded-gate S6 need a review.
+  routing = routing.filter((t) => !(t.id === "S6" && t.unit && clearedS6.has(t.unit) && t.evidence.startsWith("waiver ")));
 
   const problems: Array<{ commentId: string; problem: string }> = [];
   const latestByReviewer = new Map<string, AcceptedReview>();
@@ -186,6 +204,7 @@ export function evaluateSimplificationReview(input: SimplificationReviewInput): 
       verdict: parsed.verdict,
       sha: c.headSha,
       commentId,
+      dispositions: parsed.dispositions,
     });
   }
 
@@ -193,9 +212,19 @@ export function evaluateSimplificationReview(input: SimplificationReviewInput): 
   const stale = [...latestByReviewer.values()].filter((r) => !current.includes(r));
 
   const violations: Violation[] = [];
+  const firedIds = [...new Set(routing.map((t) => t.id))];
+  const ids = firedIds.join(", ");
   const requiredBy = current.filter((r) => r.verdict === "REQUIRED");
-  const approvedBy = current.filter((r) => r.verdict !== "REQUIRED");
-  const ids = [...new Set(routing.map((t) => t.id))].join(", ");
+  const approvedBy: AcceptedReview[] = [];
+  for (const r of current) {
+    if (r.verdict === "REQUIRED") continue;
+    const undisposed = firedIds.filter((id) => !r.dispositions[id]);
+    if (undisposed.length > 0) {
+      problems.push({ commentId: r.commentId, problem: `approval gives no disposition for ${undisposed.join(", ")}` });
+      continue;
+    }
+    approvedBy.push(r);
+  }
   if (routing.length > 0) {
     if (requiredBy.length > 0) {
       violations.push({
@@ -211,7 +240,7 @@ export function evaluateSimplificationReview(input: SimplificationReviewInput): 
         reason: "REVIEW_REQUIRED",
         file: "",
         message: `simplification review required: ${ids}`,
-        details: { stale_reviews: stale.map((r) => ({ reviewer: r.reviewer, sha: r.sha })) },
+        details: { stale_reviews: stale.map((r) => ({ reviewer: r.reviewer, sha: r.sha })), rejected_reviews: problems },
       });
     }
   }

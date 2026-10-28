@@ -103,7 +103,7 @@ describe("line maps on real repositories", () => {
 });
 
 describe("measureSides end to end", () => {
-  const policy = defaultPolicy({ measurer: { determinism_sample_rate: 1 } });
+  const policy = defaultPolicy({ measurer: { determinism_sample_rate: 1, allow_unpinned: true } });
 
   it("measures B and C, keyed by repository path, with a determinism re-run", async () => {
     repo = new TestRepo();
@@ -211,7 +211,7 @@ describe("measureSides end to end", () => {
     repo = new TestRepo();
     const b = repo.commit({ "x.txt": "x\n" });
     const c = repo.commit({ "src/foo.js": "export const A = (p) => <div>{p.a && <b />}</div>;\n", "src/foo.jsx": "export const B = (p) => (p.x ? <i /> : null);\n" });
-    const p = defaultPolicy({ scope: { jsx_in_js: ["src/**"] } });
+    const p = defaultPolicy({ scope: { jsx_in_js: ["src/**"] }, measurer: { allow_unpinned: true } });
     const m = await buildManifest(repo.dir, b, c, p);
     const r = await measureSides({ repoDir: repo.dir, manifest: m, policy: p, binary: requireCccc(), workDir: newWork() });
     expect(r.inconclusive).toEqual([]);
