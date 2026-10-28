@@ -2,7 +2,7 @@
 // (Trojan Source) and classification of suppression-directive comments.
 
 /** U+202A–U+202E (embeddings/overrides) and U+2066–U+2069 (isolates). */
-const BIDI_RE = /[‪-‮⁦-⁩]/g;
+const BIDI_RE = /[\u202A-\u202E\u2066-\u2069]/g;
 
 export interface BidiHit {
   line: number;

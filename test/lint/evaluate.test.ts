@@ -188,7 +188,7 @@ describe("suppressions and bidi", () => {
 
   it("FAILs on an added bidi control character", async () => {
     const b = { path: "src/t.ts", code: `export const ok = true;\n`, fns: [] };
-    const c = { path: "src/t.ts", code: `export const ok = true;\nexport const s = "admin‮ ⁦// user⁩";\n`, fns: [] };
+    const c = { path: "src/t.ts", code: `export const ok = true;\nexport const s = "admin\u202E \u2066// user\u2069";\n`, fns: [] };
     const { result } = await runCase({ b, c });
     expect(result.violations.map((v) => [v.reason, v.line, v.details?.codePoint])).toEqual([
       ["BIDI_CONTROL", 2, "U+202E"],
@@ -198,7 +198,7 @@ describe("suppressions and bidi", () => {
   });
 
   it("does not fail bidi characters already on the base branch", async () => {
-    const code = `export const s = "‮";\n`;
+    const code = `export const s = "\u202E";\n`;
     const { result } = await runCase({ b: { path: "src/t.ts", code, fns: [] }, c: { path: "src/t.ts", code: `${code}export const y = 1;\n`, fns: [] } });
     expect(result.violations).toEqual([]);
   });

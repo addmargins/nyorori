@@ -39,8 +39,10 @@
 ```
 
 - `unit`은 게이트 결과의 단위 키를 그대로 복사한다. 와일드카드, 파일 단위, PR 단위 waiver는 없다.
-- waiver 가능한 게이트: `complexity`, `lint-structure`, `deps`, `coverage`.
-- waiver 불가: 모든 INCONCLUSIVE(측정 override 대상), G4 무결성(`TEST_REMOVED`, `TEST_FOCUS_OR_SKIP`, `TEST_NO_ASSERTION`, `TEST_CONFIG_WEAKENED`, `TESTS_FAILED`), 보호 경로(`PROTECTED_PATH_MODIFIED`, `POLICY_PATH_MODIFIED`), 우회 벡터(`DYNAMIC_CODE`, `BIDI_CONTROL`, `SUPPRESSION_ADDED`), 리뷰 결과.
+- waiver 가능한 게이트: `complexity`, `lint-structure`, `deps`, `coverage`, `tests`(`TESTS_FAILED_ON_BASE`만).
+- waiver 불가 (판정 D14): 모든 INCONCLUSIVE(측정 override 대상), G4 무결성(`TEST_REMOVED`, `TEST_FOCUS_OR_SKIP`, `TEST_CONFIG_WEAKENED` — 3.4절 테스트 승인 대상), `TESTS_FAILED`, 보호 경로(`PROTECTED_PATH_MODIFIED`, `POLICY_PATH_MODIFIED`), 우회 벡터(`DYNAMIC_CODE`, `BIDI_CONTROL`, `SUPPRESSION_ADDED`), 리뷰 결과.
+- waiver 가능한 변형: B에서도 실패하던 테스트(`TESTS_FAILED_ON_BASE` 또는 `details.base_broken`), `@ts-ignore` 같은 waiver 가능한 억제(`SUPPRESSION_ADDED_WAIVABLE` 또는 `details.waivable`), `TEST_NO_ASSERTION`.
+- 수치가 없는 위반(실패한 테스트, 억제 주석)은 `metric=<사유 코드> ceiling=0`으로 신청한다. 예: `metric=TESTS_FAILED_ON_BASE ceiling=0`.
 
 승인:
 
@@ -48,12 +50,22 @@
 /gate-waive-approve W1a2b3c4d5e blob=<그 파일의 C blob SHA>
 ```
 
-- `blob`은 승인자가 본 코드의 blob이다. 게이트 요약이 현재 blob을 넣은 명령을 보여 준다. 파일이 바뀌면 waiver는 무효가 된다.
+- `blob`은 승인자가 본 코드의 blob이다. 게이트 요약이 현재 blob을 넣은 명령을 보여 준다(줄 끝 `# 단위` 주석은 복사해도 무시된다). 파일이 바뀌어도 바뀐 hunk가 그 단위의 범위 밖이면 waiver는 이어진다(판정 D15). 단위 범위 안이 바뀌었거나 판단할 수 없으면 무효다.
 - 유효 조건: 승인자가 `waiver_approvers`이고 독립적이며 신청자 본인이 아님, blob 일치, 만료 전(승인 후 `waivers.max_days`일 또는 `expires` 중 이른 날), 단위 값 ≤ `ceiling`, PR당 예산(`waivers.per_pr_budget`) 안.
 - 적용된 waiver는 S6 트리거를 낸다. 승인자가 `simplification_reviewers`에도 속하면 같은 승인으로 그 S6이 해제된다.
 - 병합 후 `waivers.jsonl` 원장에 한 줄을 추가하고 90일 기한의 `complexity-debt` 이슈를 연다(`ledgerLine`, `debtIssue`). 병합된 값은 다음 PR의 기준 점수가 되므로, 원장 크기와 연령을 매주 본다.
 
 ### 3.2 측정 override (INCONCLUSIVE에 대한 조치)
+
+실행 단위 override (파일 없는 `NONDETERMINISM`만):
+
+```
+/gate-override gate=complexity reason=NONDETERMINISM base=<B> candidate=<C> note="runner 교체 중 -j1 재측정 불일치"
+```
+
+이번 (B, C) 실행에만 묶인다. 그 INCONCLUSIVE를 걷어내되 "재측정 필요" 메모를 남기고 S6으로 단순화 리뷰를 필수로 만든다. `MEASURER_MISMATCH`는 파일 없이 override할 수 없다.
+
+파일 단위 override:
 
 ```
 /gate-override gate=complexity reason=PARSE_ERROR_CANDIDATE file="src/a.ts" blob=<C blob SHA> note="oxc가 아직 `accessor`를 지원하지 않음"
@@ -61,7 +73,7 @@
 
 - `gate_owners`만, 작성자가 아닌 사람만 걸 수 있다.
 - 대상 사유: `MEASURER_MISMATCH`, `SCHEMA`, `INVARIANT_VIOLATION`, `NONDETERMINISM`, 그리고 `parser_lag_allowlist`에 있는 문법의 `PARSE_ERROR_CANDIDATE`.
-- 작성자가 고칠 원인(구문 오류, 1000단계 초과 중첩, 비 UTF-8, 설정 없는 JSX-in-`.js`)은 override 대상이 아니다. 허용하면 일부러 심어 파일을 영구히 측정 밖으로 빼는 경로가 된다.
+- 작성자가 고칠 원인(구문 오류, 1000단계 초과 중첩, 비 UTF-8, 설정 없는 JSX-in-`.js`)은 override 대상이 아니다. 허용하면 일부러 심어 파일을 영구히 측정 밖으로 빼는 경로가 된다. 예외는 `parser_lag_allowlist`에 있는 문법의 파싱 오류뿐이다(측정기는 지연과 실제 구문 오류를 구별하지 못하므로 목록이 결정한다).
 - 파일 경로가 없는 전역 측정 실패(예: 바이너리 해시 불일치)는 override하지 않는다. 측정기를 고친다.
 - 효과: 그 파일을 `MEASUREMENT_OVERRIDE`로 unmeasured 처리하고, 관측용 대체 측정 대상으로 넘기고, S6으로 단순화 리뷰를 필수로 만든다. **FAIL을 PASS로 바꾸지 않는다.**
 
@@ -77,6 +89,7 @@ q5: pass
 ```
 
 - 판정: `NO_SIMPLIFICATION_NEEDED`, `SUGGESTED`(차단 안 함), `REQUIRED`(차단).
+- 승인(`NO_SIMPLIFICATION_NEEDED`, `SUGGESTED`)에는 발화한 라우팅 트리거마다 한 줄 처분이 있어야 한다(판정 D13). 예: `S1: helper마다 이름 있는 가격 규칙이다`. 빠진 트리거가 있으면 승인으로 세지 않는다. 승인 뒤 새로 발화한 트리거는 그 승인으로 덮이지 않는다.
 - 각 문항은 `pass`/`fail`로 답한다. 질문의 긍정·부정 표현에 따라 의미가 뒤집히지 않게 하기 위해서다. `fail`에는 `file:line` 근거가 반드시 있어야 한다.
   1. 같은 동작을 훨씬 적은 개념이나 행으로 쓸 수 없다.
   2. 새 helper·모듈·매개변수·옵션 객체·제네릭은 두 곳 이상에서 쓰이거나 이름 붙일 수 있는 도메인 개념이다.
@@ -87,6 +100,16 @@ q5: pass
 - 같은 리뷰어의 나중 댓글이 이전 것을 대체한다. 유효한 `REQUIRED`가 하나라도 있으면 다른 승인이 있어도 차단한다.
 - 승인은 댓글을 단 시점의 head SHA에 묶인다. 새 push 뒤에는 (a) patch-id가 같은 rebase이거나 (b) 새 commit이 트리거된 파일을 하나도 건드리지 않았을 때만 이어진다. 파일이 없는 트리거(예: 모듈 구조 S3)는 rebase에서만 이어진다.
 - LLM 리뷰어의 판정은 v1에서 기록만 한다.
+
+### 3.4 테스트 승인 (G4 무결성)
+
+```
+/gate-approve-tests key="TEST_REMOVED:test/a.test.ts::adds numbers" note="b.test.ts로 옮김"
+```
+
+- `TEST_REMOVED`, `TEST_CONFIG_WEAKENED`만 대상이다. `key`는 게이트 결과가 위반마다 보여 주는 값이다.
+- `gate_owners`이고 독립적인 사람만, 댓글을 단 시점의 head SHA에서만 유효하다. 새 push 뒤에는 다시 승인한다.
+- waiver가 아니라 승인으로 기록되며(`waivers_applied`의 `metric: "test-approval"`), waiver 예산을 쓰지 않는다.
 
 ## 4. 판정 상태와 체크 표현
 
@@ -106,7 +129,11 @@ q5: pass
 - enforce 모드 게이트가 보고하지 않으면 `INCONCLUSIVE(REPORT_MISSING)`. 실행되지 않은 게이트는 통과가 아니다. 문서만 바뀐 PR도 모든 게이트가 N/A를 보고해야 한다.
 - 이번 실행의 B·C·P·runner와 다른 결과는 `FINGERPRINT_MISMATCH`.
 - 결과가 주장하는 상태는 그 내용에서 다시 계산한 상태보다 관대할 수 없다(위반이 있는데 PASS라고 주장하면 FAIL).
-- 관측 모드 게이트는 그 트리거까지 포함해 집계에서 빠진다.
+- 관측 모드 게이트는 집계에서 빠진다. 트리거도 빠지지만 S6, S11은 예외로 항상 라우팅된다(판정 D16: 측정 탈출은 shadow에서도 사람에게 가야 한다).
+- `degraded` 모드 게이트는 차단하지 않는다. 대신 그 게이트의 열린 FAIL, INCONCLUSIVE, 라우팅 트리거가 단순화 리뷰를 필수로 만든다(증거 `degraded gate <id>: <사유>`). 보고하지 않아도 리뷰가 필수다.
+- `waivedBy`는 서비스가 적용한 waiver(또는 테스트 승인)만 믿는다. Actions 산출물의 `waivedBy`, `waivers_applied`에 없는 id, waiver 불가 사유에 붙은 `waivedBy`는 버린다.
+- pull_request 증거: run의 head는 PR head여야 하고, run이 실제로 검사한 test merge(메타데이터의 `candidate_sha`)가 C여야 한다. merge_group은 run head가 C여야 한다.
+- 체크 실행은 `external_id = <B>:<C>:<P revision>`로 구분한다. 같은 head에 대한 동시 평가가 서로의 체크를 덮어쓰지 않으며, 평가가 끝났을 때 B/C가 더 이상 현재가 아니면 자기 체크를 `SUPERSEDED`(failure)로 닫는다.
 
 ## 5. 장애 대응 (기획서 13.4)
 
@@ -114,8 +141,8 @@ q5: pass
 
 **완화**
 
-1. `gate-owners` 2인이 P에서 해당 하위 게이트의 `mode`를 `enforce` → `observe`로 바꾸는 commit을 병합한다. 저장소 설정과 필수 체크는 건드리지 않는다.
-2. 집계기는 다음 실행부터 그 게이트를 집계에서 뺀다(트리거 포함). 이미 실패한 PR은 `/simplification-review` 등 아무 명령 댓글이나 새 push로 재평가된다.
+1. `gate-owners` 2인이 P에서 해당 하위 게이트의 `mode`를 `enforce` → `degraded`로 바꾸는 commit을 병합한다. 저장소 설정과 필수 체크는 건드리지 않는다. (`observe`로 내리면 FAIL과 트리거가 사라지므로 장애 대응에는 `degraded`를 쓴다.)
+2. 집계기는 다음 실행부터 그 게이트로 차단하지 않고, 그 게이트가 막았을 것을 단순화 리뷰로 보낸다. 이미 실패한 PR은 게이트 명령 댓글이나 새 push로 재평가된다.
 3. 집계기 자체 장애면 조직 ruleset의 관리자 우회만 쓴다. GitHub 감사 로그에 남고 매주 사용 내역을 보고한다. 필수 체크를 해제하지 않으며, 긴급 병합을 정상 PASS로 위조하지 않는다.
 
 **복구**

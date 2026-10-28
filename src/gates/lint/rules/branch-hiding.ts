@@ -27,7 +27,8 @@ const COMBINATOR_NAMES = new Set(["when", "unless", "ifElse", "cond", "match", "
 function isBooleanish(node: AstNode): boolean {
   const n = unwrap(node);
   if (n.type === "BinaryExpression") return COMPARISON_OPS.has(n.operator);
-  if (n.type === "LogicalExpression") return true;
+  // `a ?? 0` and `x || 0` are numbers; only a combination of booleans is boolean.
+  if (n.type === "LogicalExpression") return n.operator !== "??" && isBooleanish(n.left) && isBooleanish(n.right);
   if (n.type === "UnaryExpression") return n.operator === "!";
   if (n.type === "Literal") return typeof n.value === "boolean";
   if (n.type === "CallExpression") {
