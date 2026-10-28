@@ -199,3 +199,30 @@ Still open (documented gaps, not blocking v1):
 - **V12:** per-author/agent INCONCLUSIVE-rate tracking is a P1 operations metric, not yet built.
 - **V2:** architectural only; the key lives only in the service.
 - **Flow syntax fixture:** not added.
+
+## Round 4 (two-branch comparative review) closures
+
+| Spec / ruling | Was | Now | Evidence |
+|---|---|---|---|
+| 5.4 allowance is a privilege; 2.3 scope | test→product move with identical bytes inherited the test unit's allowance (false PASS) | ✅ scope-aware matching refuses cross-scope pairs → UNMATCHED_OVER_BUDGET + S11 | `test/complexity/round4.test.ts`, `test/e2e/round4.test.ts` scope-move row |
+| 5.4 step 3 (anonymous excluded) | round-2 D21b let anonymous units into k-to-k (false PASS, differential m16b) | ✅ reversed | `test/complexity/round4.test.ts` m16/m16b ports |
+| 10.2 V17 | `.constructor` value escaping (`const F = g.constructor; F(…)`, `.call/.apply`, `Reflect.apply`, array index) not blocked | ✅ DYNAMIC_CODE when the value escapes; `.name`/comparison reads stay clean; 0 FP on 1,722 files | `test/lint/round2.test.ts` escape cases; e2e round4 |
+| 6.4 unit vanish | named B unit vanished while the name stayed bound via another class → no S11 | ✅ | `test/complexity/round4.test.ts` m15b |
+| 7.5 S5 residue | residue edits between units with unchanged score fired no S5 | ✅ closing-brace gaps | `test/complexity/round4.test.ts` residue rows |
+| 9.1 / 14 zero-function `.d.ts` | not measured → N/A | ✅ measured PASS; implementation inside → author-fixable PARSE_ERROR_CANDIDATE | `test/git/manifest.test.ts`, `test/measure/round4.test.ts`, e2e round4 |
+| 6.1 measurer pin (TOCTOU) | hashed path re-spawned later | ✅ private 0o500 copy of the hashed bytes is what runs | `test/measure/round4.test.ts` swap-after-hash |
+| 6.4 determinism | 5% sample, one chunk | ✅ official runs re-run every C chunk with `-j1` (`determinism_sample_rate_official` 1.0) | `test/measure/round4.test.ts` |
+| 6.1 installer | silent source-build fallback | ✅ fail-closed: pinned archive+binary sha256 (verified against the real v1.8.5 asset), `.sha256` cross-check, attestation + verify-asset, single member | `scripts/fetch-cccc.sh`, dry-run with stub `gh` |
+| 6.1 upgrade check (200 PR 재생), 13.3 friction, 13.4 recovery | only `fixtures` | ✅ `nyorori replay` (pairs dataset, policy/binary comparison, deltas, friction totals, exit 0/1/2) | `test/replay/*.test.ts` |
+| 10.1 App key isolation | analysis in the key-holding process | ✅ detached worker (env scrub, 1 GiB heap, 300 s wall, pgroup kill, 64 MiB output cap); crash → TOOL_ERROR, never a missing check; zips inflated in the worker | `test/pipeline/isolated.test.ts`, `test/e2e/worker.test.ts` |
+| 10.1 / 2.3 policy outside the candidate | README read the policy from the checkout | ✅ realpath refusal of policy/cccc/out/artifacts inside `--repo` (exit 64; `--allow-repo-paths` for fixtures); `authority: local | github-app` | `test/pipeline/paths` rows, e2e cli |
+| 7.6 / 11.1 agent-invoker independence | `agentInvokers: []` hard-coded | ✅ assignees, @mentions, linked-issue authors; AI-loop PR with unknown invokers needs two approvers | `test/service/round4.test.ts`, `test/platform/*` |
+| 10.1 evidence provenance | run matched via `referenced_workflows` only; artifact not bound to the attempt | ✅ `run.path` must equal the trusted path; artifact `created_at ≥ run_started_at` and head bound; scoped installation tokens | `test/service/round4.test.ts` |
+| 13.1 모든 가상 판정 기록 | no shadow verdict | ✅ `would_block` + `shadow` in verdict, check title, summary, feedback | `test/platform/aggregate*.test.ts` |
+| 12.3 same B; INCONCLUSIVE hand-off | `decideRetry` ignored INCONCLUSIVE and B/P/M drift | ✅ | `test/platform/ailoop.test.ts` |
+| 11.1 waiver flow usable end to end | pending requests left no trace | ✅ `pending_waivers` with copyable approve command | e2e supplement row |
+| D14 waivable on-base failure | G4 unit keys had no path → unwaivable in production | ✅ `${file}::${name}` | `/tmp/freshreview/r1` port in `test/tests-gate` |
+| 8.3 moved test file | rename out of test globs → un-overridable INCONCLUSIVE | ✅ TEST_REMOVED | `test/tests-gate` r3 port |
+| 11.2 transient retry | missing test merge published as failure at once | ✅ 5× backoff polling while in_progress | `test/service/round4.test.ts` |
+| 7.5 moving baseline cost | O(files × history), 61.5 s on 5k×300 | ✅ one `git log` pass, 215 ms; `max_files` 200 skip when observe-only | `test/pipeline/history.test.ts` |
+| 13.4 durability | in-memory queue/dedupe | ✅ job journal replayed on restart; persisted delivery dedupe; `/healthz` | `test/service/round4.test.ts` |
