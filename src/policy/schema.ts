@@ -88,6 +88,10 @@ export const policySchema = z
         test_globs: z
           .array(glob)
           .default(["**/*.test.*", "**/*.spec.*", "**/__tests__/**", "test/**", "tests/**"]),
+        /** Non-test support files under test dirs that do not need S11 review (round-2 ruling on F3). */
+        test_support_globs: z
+          .array(glob)
+          .default(["**/fixtures/**", "**/__fixtures__/**", "**/helpers/**", "**/__mocks__/**", "**/testutils/**"]),
         /** Globs of `.js` files that contain JSX and are measured with a `.jsx` suffix. */
         jsx_in_js: z.array(glob).default([]),
         max_file_bytes: z.number().int().positive().default(2 * 1024 * 1024),

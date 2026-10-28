@@ -41,3 +41,19 @@ New contract items (owner: orchestrator):
 - `UnmeasuredReason` gains `FOREIGN_LANGUAGE`.
 - `GateMode` gains `degraded`.
 - New policy fields: `scope.foreign_code_extensions`, `lint.dynamic_code_allowlist`.
+
+# Round 2 rulings (builder disputes on round-2 fixes)
+
+| Raised by | Dispute | Ruling |
+|---|---|---|
+| C | D21c: credit baseline hits only from B units that vanished (not a raw count cap), so fixing one `eval` cannot pay for a new one elsewhere | **Accepted.** Spec 5.2 forbids offsetting. |
+| C | S10 param-mutation fires on 2–6% of files (bar: 0.25%) | **Accepted:** fire only when a file has ≥ 2 such helpers (fixture 7.2(b) has 6–11). |
+| C | `Math.min(1, o.b) * 2` used as a branch is not detected | Accepted as a documented gap. |
+| B | F3 makes every new helper or fixture under a test dir require review | **Accepted:** new policy `scope.test_support_globs` (fixtures, helpers, `__mocks__`, testutils) is exempt. |
+| B | k-to-k matching includes anonymous units (bounded by the max B in the group) | Accepted; this is the intent of D21b. |
+| D | S7 and S11 both fire for a setup/alias change | Accepted (evidence vs file); costs one disposition line. |
+| D | The rename rule makes a B-side test run mandatory | Accepted; the untrusted workflow template always runs B. A P0 check goes in docs/operations.md. |
+| E | A `pull_request` evidence artifact must carry the test-merge SHA, always (not only "when available") | **Accepted.** |
+| E | The 13.4 runbook uses `degraded`, not `observe` | **Accepted** (principle 1). |
+| E | Test approvals reuse `waivers_applied` with a marker metric | Accepted for v1; a `Violation.approvedBy` / `approvals_applied` contract is a v1.1 cleanup. |
+| A | An extensionless file with no shebang stays non-code (contrary to the audit repro) | Accepted per D6; a C import of such a target routes S11 via G3 (C, item 10). |

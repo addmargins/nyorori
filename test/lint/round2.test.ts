@@ -61,9 +61,32 @@ describe("audit F7: dynamic-code gaps", () => {
     ["process.binding", `export function j() { return process.binding("contextify"); }`, "nativeBinding"],
     ["process.dlopen", `export function j(m: object) { return process.dlopen(m, "x.node"); }`, "nativeBinding"],
     ["computed destructure", `export function k() { const { ["constr" + "uctor"]: C } = (() => 0) as any; return C; }`, "destructure"],
+    ["setTimeout(string param)", `export function l(code: string) { return setTimeout(code); }`, "impliedEval"],
+    ["setTimeout(const string)", `const code = "go()";\nexport const t = () => setTimeout(code, 1);`, "impliedEval"],
     ["descriptor of Function.prototype", `export function m(code: string) { return Object.getOwnPropertyDescriptor(Function.prototype, "constructor")!.value("o", code); }`, "constructor"],
   ])("%s", async (_name, code, messageId) => {
     expect(await idsOf(code)).toContain(`${DYN}:${messageId}`);
+  });
+
+  it("every function of the audit repro is blocked", async () => {
+    const repro = [
+      `export function a(code: string) { const vm = require("v" + "m"); return vm.runInThisContext(code); }`,
+      `export function b(code: string) { const g: any = globalThis; return g["ev" + "al"](code); }`,
+      `export function c(code: string) { const F = Object.getPrototypeOf(function () {}).constructor; return F; }`,
+      `export function d(code: string) { const k = "constructor"; return (() => 0)[k]("o", code); }`,
+      `export function e(code: string) { return Reflect.get(() => 0, "construct" + "or")("o", code); }`,
+      `export function f(code: string) { const m = "node:vm"; return import(m); }`,
+      `export function g(code: string) { return require("module").prototype._compile; }`,
+      `export function h(code: string) { return (0, eval)(code); }`,
+      `export function i(code: string) { return new (require("node:" + "worker_threads").Worker)(code, { eval: true }); }`,
+      `export function j(code: string) { return process.binding("contextify"); }`,
+      `export function k(code: string) { const { constructor: C } = (() => 0) as any; return C; }`,
+      `export function l(code: string) { return setTimeout(code); }`,
+      `export function m(code: string) { const p = Object.getOwnPropertyDescriptor(Function.prototype, "constructor")!; return p.value("o", code); }`,
+    ];
+    const r = await lintSnippet(repro.join("\n"));
+    const blockedLines = new Set(r.messages.filter((m) => m.category === "block").map((m) => m.line));
+    expect([...blockedLines].sort((x, y) => x - y)).toEqual(repro.map((_, i) => i + 1));
   });
 
   it("indirect eval stays core no-eval", async () => {
@@ -78,6 +101,7 @@ describe("audit F7: dynamic-code gaps", () => {
     ["legacy prototype wiring", `function Base() {}\nfunction Child() {}\nChild.prototype = Object.create(Base.prototype);\nChild.prototype.constructor = Child;`],
     ["window property read", `export const href = () => window.location.href;`],
     ["process.env", `export const env = () => process.env.NODE_ENV;`],
+    ["setTimeout(callback)", `export const later = (cb: () => void) => setTimeout(cb, 10);`],
   ])("no false positive: %s", async (_name, code) => {
     expect((await idsOf(code)).filter((h) => h.startsWith(DYN))).toEqual([]);
   });

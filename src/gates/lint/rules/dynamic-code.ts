@@ -34,6 +34,19 @@ const REMOTE_IMPORT_RE = /^(data|blob|https?):/i;
 const MODULE_INTERNALS = new Set(["_compile", "_extensions"]);
 const NATIVE_BINDINGS = new Set(["binding", "_linkedBinding", "dlopen"]);
 const DESCRIPTOR_READERS = new Set(["get", "getOwnPropertyDescriptor"]);
+/** Timers that evaluate a string first argument (core no-implied-eval sees literals only). */
+const STRING_TIMERS = new Set(["setTimeout", "setInterval", "setImmediate", "execScript"]);
+
+/** A parameter declared `: string`, i.e. `function f(code: string) { setTimeout(code) }`. */
+function isStringTypedParam(node: AstNode, sc: SourceCode): boolean {
+  const n = unwrap(node);
+  if (n.type !== "Identifier") return false;
+  const v = findVariable(sc.getScope(n as never) as Scope, n.name);
+  const def = v?.defs[0];
+  if (!v || v.defs.length !== 1 || def?.type !== "Parameter") return false;
+  const name = def.name as unknown as AstNode;
+  return name.typeAnnotation?.typeAnnotation?.type === "TSStringKeyword";
+}
 const CODE_SUFFIX_RE = /\.(?:[cm]?[jt]sx?)$/;
 const UNTRUSTED_DIR_SEGMENTS = new Set(["node_modules", "vendor", "generated", "__generated__"]);
 
@@ -186,6 +199,7 @@ export const dynamicCode: Rule.RuleModule = {
       moduleInternals: "`{{name}}` drives the CommonJS compiler directly and can run strings as code.",
       nativeBinding: "`process.{{name}}` reaches native internals that can evaluate code.",
       workerEval: "`new Worker(code, { eval: true })` evaluates a string as code.",
+      impliedEval: "`{{name}}` with a string evaluates it as code.",
       destructure: "Destructuring `constructor` can extract the Function constructor.",
     },
   },
@@ -273,8 +287,15 @@ export const dynamicCode: Rule.RuleModule = {
           else if (VM_MODULES.has(s)) report(n, "vm");
           return;
         }
-        // Reflect.get(fn, "constructor"), Object.getOwnPropertyDescriptor(F.prototype, "constructor")
         const callee = unwrap(n.callee);
+        const timer = callee.type === "Identifier" ? callee.name : callee.type === "MemberExpression" && isGlobalObject(callee.object, sc) ? staticPropertyName(callee) : null;
+        if (timer !== null && STRING_TIMERS.has(timer) && n.arguments[0]) {
+          const first = n.arguments[0];
+          const folded = unwrap(first).type === "Identifier" && foldString(first, sc) !== null;
+          if (folded || isStringTypedParam(first, sc)) report(n, "impliedEval", { name: timer });
+          return;
+        }
+        // Reflect.get(fn, "constructor"), Object.getOwnPropertyDescriptor(F.prototype, "constructor")
         if (callee.type !== "MemberExpression" || unwrap(callee.object).type !== "Identifier") return;
         const holder = unwrap(callee.object).name;
         const method = staticPropertyName(callee);

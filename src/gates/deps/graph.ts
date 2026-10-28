@@ -1,10 +1,10 @@
 // Module graph of one tree, built with dependency-cruiser from an in-code
 // options object. Nothing that can execute code is consulted: no
-// .dependency-cruiser.js, no webpack or babel config. tsconfig `paths` are
-// read as data only (see aliases.ts).
+// .dependency-cruiser.js, no webpack or babel config. tsconfig `paths` and
+// `baseUrl` are read as data only, from B's tree (see aliases.ts).
 
 import { cruise, type ICruiseResult, type IDependency } from "dependency-cruiser";
-import { readPathAliases } from "./aliases.js";
+import { applyAliasSpec, readAliasSpec, type AliasSpec, type ResolveSettings } from "./aliases.js";
 
 export interface DepEdge {
   from: string;
@@ -23,6 +23,8 @@ export interface ModuleGraph {
   edges: DepEdge[];
   /** Relative specifiers that resolved to nothing: a sign the tree is incomplete. */
   unresolvedLocal: Array<{ from: string; specifier: string }>;
+  /** Bare specifiers that resolved to nothing (packages, or aliases the resolver missed). */
+  unresolvedBare: Array<{ from: string; specifier: string }>;
 }
 
 /**
@@ -46,9 +48,9 @@ const NON_RUNTIME_KINDS = new Set([
 
 export const CODE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".d.ts"];
 
-export type Cruiser = (files: string[], baseDir: string, alias: Record<string, string>) => Promise<ICruiseResult>;
+export type Cruiser = (files: string[], baseDir: string, resolve: ResolveSettings) => Promise<ICruiseResult>;
 
-export const defaultCruiser: Cruiser = async (files, baseDir, alias) => {
+export const defaultCruiser: Cruiser = async (files, baseDir, { alias, baseUrlDir }) => {
   const result = await cruise(
     files,
     {
@@ -63,6 +65,8 @@ export const defaultCruiser: Cruiser = async (files, baseDir, alias) => {
     {
       extensions: CODE_EXTENSIONS,
       alias,
+      // tsconfig baseUrl makes bare specifiers resolve inside the repository.
+      ...(baseUrlDir ? { modules: ["node_modules", "node_modules/@types", baseUrlDir] } : {}),
     },
   );
   return (typeof result.output === "string" ? JSON.parse(result.output) : result.output) as ICruiseResult;
@@ -76,13 +80,15 @@ export function graphFromCruise(files: readonly string[], result: ICruiseResult)
   const nodes = new Set(files);
   const edges: DepEdge[] = [];
   const unresolvedLocal: ModuleGraph["unresolvedLocal"] = [];
+  const unresolvedBare: ModuleGraph["unresolvedBare"] = [];
   for (const mod of result.modules) {
     if (!nodes.has(mod.source)) continue;
     for (const dep of mod.dependencies as IDependency[]) {
       const kinds = [...(dep.dependencyTypes ?? [])];
       const local = !dep.couldNotResolve && nodes.has(dep.resolved);
-      if (dep.couldNotResolve && /^\.{1,2}(\/|$)/.test(dep.module)) {
-        unresolvedLocal.push({ from: mod.source, specifier: dep.module });
+      if (dep.couldNotResolve) {
+        const relativeSpec = /^\.{1,2}(\/|$)/.test(dep.module);
+        (relativeSpec ? unresolvedLocal : unresolvedBare).push({ from: mod.source, specifier: dep.module });
       }
       edges.push({
         from: mod.source,
@@ -94,7 +100,7 @@ export function graphFromCruise(files: readonly string[], result: ICruiseResult)
       });
     }
   }
-  return { nodes, edges, unresolvedLocal };
+  return { nodes, edges, unresolvedLocal, unresolvedBare };
 }
 
 /**
@@ -106,8 +112,9 @@ export async function buildModuleGraph(
   treeRoot: string,
   files: readonly string[],
   cruiser: Cruiser = defaultCruiser,
+  aliases: AliasSpec = readAliasSpec(treeRoot),
 ): Promise<ModuleGraph> {
-  if (files.length === 0) return { nodes: new Set(), edges: [], unresolvedLocal: [] };
-  const result = await cruiser([...files], treeRoot, readPathAliases(treeRoot));
+  if (files.length === 0) return { nodes: new Set(), edges: [], unresolvedLocal: [], unresolvedBare: [] };
+  const result = await cruiser([...files], treeRoot, applyAliasSpec(aliases, treeRoot));
   return graphFromCruise(files, result);
 }

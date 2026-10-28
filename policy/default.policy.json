@@ -151,6 +151,13 @@
       "test/**",
       "tests/**"
     ],
+    "test_support_globs": [
+      "**/fixtures/**",
+      "**/__fixtures__/**",
+      "**/helpers/**",
+      "**/__mocks__/**",
+      "**/testutils/**"
+    ],
     "jsx_in_js": [],
     "max_file_bytes": 2097152,
     "rename_similarity": 70,

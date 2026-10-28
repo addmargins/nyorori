@@ -140,3 +140,40 @@ export function findNewCycles(
   }
   return out.sort((a, b) => a.members[0]!.localeCompare(b.members[0]!));
 }
+
+/** Members of every cyclic SCC (size ≥ 2, or a self-import), each sorted. */
+export function cyclicComponents(nodes: Iterable<string>, edges: ReadonlyArray<{ from: string; to: string }>): string[][] {
+  const adj = adjacency(edges);
+  const comp = stronglyConnectedComponents(nodes, adj);
+  const members = new Map<number, string[]>();
+  for (const [n, id] of comp) {
+    const list = members.get(id) ?? [];
+    list.push(n);
+    members.set(id, list);
+  }
+  return [...members.values()]
+    .filter((m) => m.length > 1 || (adj.get(m[0]!) ?? []).includes(m[0]!))
+    .map((m) => m.sort())
+    .sort((a, b) => a[0]!.localeCompare(b[0]!));
+}
+
+/**
+ * Ruling D7: the cyclic part of the graph changed when a C component holds a
+ * module that is new, was acyclic in B, or came from a different B component
+ * (a merge). A component that equals or shrank from a B component did not.
+ */
+export function changedComponents(
+  componentsC: readonly string[][],
+  componentsB: readonly string[][],
+  toB: (cPath: string) => string | undefined,
+): string[][] {
+  const bComponentOf = new Map<string, number>();
+  componentsB.forEach((members, i) => members.forEach((m) => bComponentOf.set(m, i)));
+  return componentsC.filter((members) => {
+    const ids = new Set<number | undefined>(members.map((m) => {
+      const b = toB(m);
+      return b === undefined ? undefined : bComponentOf.get(b);
+    }));
+    return ids.size !== 1 || ids.has(undefined);
+  });
+}

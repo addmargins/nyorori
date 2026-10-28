@@ -74,6 +74,7 @@ function hasWrite(n: AstNode): boolean {
 
 /** An assignment or update outside nested functions. */
 function hasAssignment(n: AstNode): boolean {
+  if (isAnyFunction(n)) return false;
   return contains(n, (x) => x.type === "AssignmentExpression" || x.type === "UpdateExpression", true);
 }
 

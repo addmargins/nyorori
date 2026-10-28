@@ -67,14 +67,16 @@ describe("new cycles", () => {
     expect(result.violations.map((v) => v.details?.members)).toEqual([["src/a.ts", "src/b.ts", "src/c.ts"]]);
   });
 
-  it("FAILs on a new edge inside an existing tangle", async () => {
+  it("routes a new edge inside an unchanged cyclic component as S3 (ruling D7)", async () => {
     const tree = {
       "src/a.ts": `import "./b";\n`,
       "src/b.ts": `import "./c";\n`,
       "src/c.ts": `import "./a";\n`,
     };
-    const { result } = await run(tree, { ...tree, "src/c.ts": `import "./a";\nimport "./b";\n` });
-    expect(result.violations[0]!.details?.new_edges).toEqual([{ from: "src/c.ts", to: "src/b.ts" }]);
+    const { result, state } = await run(tree, { ...tree, "src/c.ts": `import "./a";\nimport "./b";\n` });
+    expect(state).toBe("PASS");
+    expect(result.triggers.map((t) => t.id)).toEqual(["S3"]);
+    expect(result.triggers[0]!.evidence).toContain("src/c.ts → src/b.ts inside an existing import cycle");
   });
 
   it("FAILs on a self import", async () => {
