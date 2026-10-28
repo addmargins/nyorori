@@ -6,7 +6,6 @@
 import type { Policy } from "../policy/schema.js";
 import {
   ALWAYS_ROUTING_TRIGGERS,
-  GATE_STATES,
   worstState,
   type GateId,
   type GateMode,
@@ -17,6 +16,7 @@ import {
   type ReasonCode,
   type TriggerHit,
   type Violation,
+  type WaiverApplied,
 } from "../types.js";
 import { deriveState } from "../report/result.js";
 import {
@@ -350,7 +350,7 @@ export function aggregateQualityGate(input: AggregateInput): QualityGateVerdict 
     blocking,
     triggers,
     review,
-    summary: verdictHeadline(state, blocking, reasons, rows),
+    summary: verdictHeadline(state, blocking, reasons, rows, counted.flatMap((r) => r.waivers_applied)),
   };
 }
 
@@ -359,7 +359,21 @@ function reasonRank(r: ReasonCode, blocking: Violation[]): number {
   return blocking.some((v) => v.reason === r) ? 0 : 1;
 }
 
-function verdictHeadline(state: GateState, blocking: Violation[], reasons: ReasonCode[], rows: GateVerdictRow[]): string {
+/** Spec 9.1: an accepted-with-waiver title names what was accepted. */
+function waiverTitle(waivers: readonly WaiverApplied[]): string {
+  const shown = waivers
+    .slice(0, 3)
+    .map((w) => (w.metric === TEST_APPROVAL_METRIC ? `${w.unit} approved` : `${w.unit} ${w.metric} ≤ ${w.ceiling}`));
+  return `PASS with waiver: ${shown.join("; ")}${waivers.length > 3 ? ` (+${waivers.length - 3} more)` : ""}`;
+}
+
+function verdictHeadline(
+  state: GateState,
+  blocking: Violation[],
+  reasons: ReasonCode[],
+  rows: GateVerdictRow[],
+  waivers: readonly WaiverApplied[],
+): string {
   switch (state) {
     case "FAIL": {
       const failing = rows.filter((r) => r.counted && r.state === "FAIL").map((r) => r.gate);
@@ -368,16 +382,12 @@ function verdictHeadline(state: GateState, blocking: Violation[], reasons: Reaso
     case "INCONCLUSIVE":
       return `INCONCLUSIVE: ${reasons.join(", ")}`;
     case "ACCEPTED_WITH_WAIVER":
-      return "PASS with waiver";
+      return waiverTitle(waivers);
     case "PASS":
       return "PASS";
     case "NOT_APPLICABLE":
       return "N/A";
   }
-}
-
-export function stateRank(s: GateState): number {
-  return GATE_STATES.indexOf(s);
 }
 
 /**

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { matchesAny, matchesGlob } from "../../src/git/glob.js";
+import { matchesAny, matchesGlob } from "../../src/util/glob.js";
 
 describe("matchesGlob", () => {
   it.each([

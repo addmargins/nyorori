@@ -1,12 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-  addedCLines,
   cRangeTouched,
   hunkOfB,
   hunkOfC,
   mapLine,
   parseUnifiedZeroDiff,
-  removedBLines,
 } from "../../src/git/linemap.js";
 
 const map = (patch: string) => ({ hunks: parseUnifiedZeroDiff(patch) });
@@ -81,9 +79,11 @@ describe("hunk lookups", () => {
     expect(hunkOfC(m, 13)).toBe(1);
     expect(hunkOfC(m, 23)).toBe(-1);
   });
-  it("added/removed line sets", () => {
-    expect([...addedCLines(m)]).toEqual([3, 4, 5, 6, 13, 14]);
-    expect([...removedBLines(m)]).toEqual([3, 4, 20]);
+  it("every rewritten or added C line belongs to exactly one hunk; every removed B line too", () => {
+    const changedC = Array.from({ length: 30 }, (_, i) => i + 1).filter((l) => hunkOfC(m, l) !== -1);
+    const removedB = Array.from({ length: 30 }, (_, i) => i + 1).filter((l) => hunkOfB(m, l) !== -1);
+    expect(changedC).toEqual([3, 4, 5, 6, 13, 14]);
+    expect(removedB).toEqual([3, 4, 20]);
   });
   it("cRangeTouched sees rewrites and deletions inside a range", () => {
     expect(cRangeTouched(m, 1, 2)).toBe(false);

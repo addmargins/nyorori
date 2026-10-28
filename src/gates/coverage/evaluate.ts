@@ -6,7 +6,7 @@ import ts from "typescript";
 import type { Policy } from "../../policy/schema.js";
 import type { FileLineMap, Inconclusive, Manifest, ManifestEntry, Violation } from "../../types.js";
 import { deriveState, type GateEvaluation } from "../tests/evaluation.js";
-import { matchesAnyGlob } from "../tests/glob.js";
+import { matchesAny } from "../../util/glob.js";
 import { findIgnoreComments } from "../tests/static.js";
 import { allLines, changedLinesFromHunks, lineCountOf, lineMapsByC, overlaps } from "./changed.js";
 import { exportedFunctions } from "./exports.js";
@@ -43,7 +43,7 @@ const GATE = "coverage" as const;
 
 function isTarget(e: ManifestEntry, policy: Policy): e is ManifestEntry & { c: NonNullable<ManifestEntry["c"]> } {
   if (!e.c || e.status === "D" || e.isTest || e.excluded || e.unmeasured) return false;
-  return !matchesAnyGlob(e.c.path, policy.scope.test_globs);
+  return !matchesAny(e.c.path, policy.scope.test_globs);
 }
 
 /** Type-only modules emit no JavaScript, so providers legitimately omit them. */

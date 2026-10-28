@@ -83,26 +83,3 @@ export async function normalizedLineCount(source: string, path: string): Promise
   const formatted = await normalizeSource(source, path);
   return formatted === null ? null : normalizedCodeLines(formatted, path);
 }
-
-/** Normalized line counts for every path present on either side. */
-export async function normalizedLineCounts(
-  sourcesB: Map<string, string>,
-  sourcesC: Map<string, string>,
-  pairs: Array<{ b: string | null; c: string | null }>,
-): Promise<Map<string, { B?: number; C?: number }>> {
-  const out = new Map<string, { B?: number; C?: number }>();
-  for (const { b, c } of pairs) {
-    const key = c ?? b!;
-    const rec: { B?: number; C?: number } = {};
-    if (b !== null && sourcesB.has(b)) {
-      const n = await normalizedLineCount(sourcesB.get(b)!, b);
-      if (n !== null) rec.B = n;
-    }
-    if (c !== null && sourcesC.has(c)) {
-      const n = await normalizedLineCount(sourcesC.get(c)!, c);
-      if (n !== null) rec.C = n;
-    }
-    out.set(key, rec);
-  }
-  return out;
-}

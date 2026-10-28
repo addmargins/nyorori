@@ -104,7 +104,7 @@ spec 3.3의 구문별 계산 규칙 픽스처(`test/fixtures/cccc-rules`)를 새
 ## Deploying the gate service
 
 1. GitHub App을 만든다. 권한은 Checks: write, Contents: read, Pull requests: read, Issues: write(부채 이슈), Actions: read, Members: read(org)이고, 이벤트는 `pull_request`, `merge_group`, `issue_comment`를 구독한다.
-2. 게이트 저장소의 commit을 조직 ruleset의 "Require workflows to pass before merging"으로 붙인다. 대상은 `.github/workflows/gate-untrusted-tests.yml`이고, 그 저장소·경로·SHA를 정책 `provenance.trusted_workflows`에 넣는다.
+2. 게이트 저장소의 commit을 조직 ruleset의 "Require workflows to pass before merging"으로 붙인다. 대상은 `templates/workflows/gate-untrusted-tests.yml`(이 저장소에서는 실행되지 않는 템플릿)이고, 그 저장소·경로·SHA를 정책 `provenance.trusted_workflows`에 넣는다.
 3. 대상 저장소의 필수 체크는 `quality-gate` 하나만 두고, 예상 출처를 게이트 App으로 고정한다. merge queue를 켠다. 공식 판정은 `merge_group`이다.
 4. 서비스를 실행한다. App 키는 이 프로세스에만 둔다.
 
@@ -122,7 +122,7 @@ NYORORI_RUNNER_COMMIT=$(git rev-parse HEAD) node dist/cli.js serve --port 8080
 
 | 명령 | 누가 | 바인딩 |
 |---|---|---|
-| `/gate-waive gate=… unit="…" metric=… ceiling=N reason="…"` | 작성자 (AI 루프 봇 제외) | 신청 |
+| `/gate-waive gate=… unit="…" metric=… ceiling=N reason="…"` | 누구나 (AI 루프 봇 제외) | 신청 |
 | `/gate-waive-approve <id> blob=<C blob>` | `waiver_approvers` | 그 파일의 blob (단위 밖 변경은 이어짐) |
 | `/simplification-review <VERDICT> sha=<PR head>` + `q1..q5: pass/fail` + 트리거별 `S<n>: 처분` | `simplification_reviewers` | `sha=` (patch-id 동일 rebase 또는 트리거 파일 무변경이면 이어짐) |
 | `/gate-approve-tests key="<REASON>:<unit>" sha=<PR head> note="…"` | `gate_owners` | `sha=` (push마다 다시) |
@@ -160,10 +160,14 @@ npm test                         # NYORORI_CCCC로 cccc 위치 지정 (기본 /h
 npm run typecheck
 ```
 
+```bash
+npm run lint
+```
+
 - `test/fixtures/cccc-rules`: spec 3.3 구문별 기대값(측정기 업그레이드 검사)
 - `test/fixtures/manipulation`: spec 7.2 동작 보존 변환 17종과 `RESULTS.md`
 - `test/e2e`: 실제 git 저장소와 실제 cccc로 spec 14 시나리오를 끝까지 실행
-- `npm run gen:policy`: 스키마 기본값으로 `policy/default.policy.json` 재생성
+- `npm run gen:policy`: 빌드한 뒤 `dist/`의 스크립트로 스키마 기본값에서 `policy/default.policy.json`을 재생성
 
 ## Known limitations
 
@@ -171,7 +175,7 @@ npm run typecheck
 - **신규 코드에는 S1·S9가 발화하지 않는다.** 두 트리거는 B에 집중된 원본이 있어야 비교할 수 있다. 처음부터 분기 은닉형으로 쓴 코드는 G2의 S9 선택자와 Function 생성자 차단에 의존한다.
 - **cccc의 계산 특성**(논리 할당 무비용, 콜백 비가산, 이름 기반 재귀)은 고정해도 사라지지 않는다. 이를 G2와 트리거로 보완한다.
 - **PR 코드를 실행해 얻은 증거(G4 테스트 결과, G5, G7)는 악의적인 PR이 위조할 수 있다**(spec 10.3). 이 게이트들은 최적화 압력을 막을 뿐이다.
-- override 시 ESLint `complexity` 대체 측정은 아직 구현하지 않았다.
+- 측정 override된 파일에는 대체 측정기를 돌리지 않는다. 그 파일의 복잡도는 S6으로 필수가 된 단순화 리뷰에서 사람이 본다.
 - waiver carry-over(ruling D15)는 승인 당시 blob이 서비스 mirror에 있어야 판단할 수 있다. 없으면 "변경됨"으로 보고 다시 승인받는다.
 - 서비스는 issue comment가 게시된 시점의 head SHA를 "그 댓글로 처음 판정한 head"로 기록한다(`comment-heads.json`). 댓글과 push가 경합하면 승인이 stale로 처리된다(안전한 방향).
 - `scripts/fetch-cccc.sh`의 릴리스 다운로드 경로와 워크플로 템플릿의 action SHA는 실제 환경에서 검증해야 한다.

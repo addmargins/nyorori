@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { decideRetry, detectForbiddenChanges } from "../../src/ailoop/index.js";
-import { matchGlob } from "../../src/ailoop/glob.js";
+import { addedLineDirectives, decideRetry, detectForbiddenChanges } from "../../src/ailoop/index.js";
+import { matchesGlob as matchGlob } from "../../src/util/glob.js";
 import { policy } from "./helpers.js";
 
 describe("glob", () => {
@@ -37,6 +37,15 @@ describe("AI loop forbidden changes (spec 12.2)", () => {
     expect(detectForbiddenChanges([change], p)).toHaveLength(2);
     const allow = policy({ lint: { suppression_allowlist: ["eslint-disable-next-line no-new-func", "v8 ignore next"] } });
     expect(detectForbiddenChanges([change], allow)).toHaveLength(0);
+  });
+
+  it("classifies directives in real comments only, Stryker included", () => {
+    const kinds = (t: string) => addedLineDirectives(t).map((d) => d.kind);
+    expect(kinds("// Stryker disable next-line all")).toEqual(["stryker-disable"]);
+    expect(kinds(" * eslint-disable no-new-func")).toEqual(["eslint-disable"]);
+    expect(kinds("const s = '// eslint-disable-next-line';")).toEqual([]);
+    expect(kinds("foo(); /* @ts-nocheck */ // istanbul ignore next")).toEqual(["ts-nocheck", "coverage-ignore"]);
+    expect(kinds("{/* eslint-disable-next-line */}")).toEqual(["eslint-disable"]);
   });
 
   it("flags test script changes in package.json but not dependency bumps", () => {

@@ -37,14 +37,6 @@ export interface ReviewComment extends IssueComment {
   headSha: string;
 }
 
-export const RUBRIC_QUESTIONS = [
-  "같은 동작을 훨씬 적은 개념이나 행으로 쓸 수 없다 (pass = 더 단순한 모양이 없다).",
-  "새 helper·모듈·매개변수·옵션 객체·제네릭은 두 곳 이상에서 쓰이거나 이름 붙일 수 있는 도메인 개념이다.",
-  "추측성 일반화, 죽은 코드, 중복 로직, 불가능한 일에 대한 방어 코드가 없다.",
-  "중첩된 제어 흐름을 early return, 데이터 표, 조건 병합으로 더 평평하게 만들 여지가 없다.",
-  "독자가 다른 새 정의를 두 번 넘게 따라가지 않고 각 변경 함수를 이해할 수 있다.",
-] as const;
-
 const EVIDENCE = /^[^\s:]+:\d+$/;
 
 /**

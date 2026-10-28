@@ -15,7 +15,7 @@ import type {
   UnmeasuredReason,
 } from "../types.js";
 import { decodePath, git, isInvalidPath, resolveCommit, splitNul } from "./exec.js";
-import { matchesAny } from "./glob.js";
+import { matchesAny } from "../util/glob.js";
 
 export const MODE_REGULAR = "100644";
 export const MODE_EXECUTABLE = "100755";
@@ -549,16 +549,6 @@ function checkCollisions(
       });
     }
   }
-}
-
-/** Paths of each side that are handed to cccc. */
-export function measuredSides(manifest: Manifest, side: "B" | "C"): ManifestSide[] {
-  const out: ManifestSide[] = [];
-  for (const e of manifest.entries) {
-    const s = side === "B" ? e.b : e.c;
-    if (s && e.measure[side]) out.push(s);
-  }
-  return out;
 }
 
 export function problemIsAuthorFixable(reason: InconclusiveReason): boolean {

@@ -2,9 +2,13 @@
 // mechanically on the loop's diff; prompt instructions alone do not stop a
 // reward-hacking agent from editing the gate's own inputs.
 
+import ts from "typescript";
+import { classifyDirectiveComment, isAllowlisted, type Directive } from "../gates/lint/text.js";
 import type { Policy } from "../policy/schema.js";
 import { ALWAYS_ROUTING_TRIGGERS, NON_ROUTING_TRIGGERS, type ChangeStatus, type TriggerHit, type Violation } from "../types.js";
-import { matchAny, matchGlob } from "./glob.js";
+import { matchesGlob } from "../util/glob.js";
+
+const matchAny = (path: string, patterns: readonly string[]): string | null => patterns.find((p) => matchesGlob(path, p)) ?? null;
 
 /** Spec 12.2 paths on top of policy.tests.protected_paths. */
 export const AI_LOOP_FORBIDDEN_PATHS: readonly string[] = [
@@ -26,16 +30,30 @@ export const AI_LOOP_FORBIDDEN_PATHS: readonly string[] = [
   "*.snap",
 ];
 
-/** Suppression directives the loop may not add (allowlist exempt). */
-export const SUPPRESSION_PATTERNS: ReadonlyArray<{ id: string; re: RegExp }> = [
-  { id: "eslint-disable", re: /eslint-disable(?:-next-line|-line)?\b/ },
-  { id: "istanbul ignore", re: /istanbul\s+ignore\b/ },
-  { id: "v8 ignore", re: /\bv8\s+ignore\b/ },
-  { id: "c8 ignore", re: /\bc8\s+ignore\b/ },
-  { id: "@ts-ignore", re: /@ts-ignore\b/ },
-  { id: "@ts-nocheck", re: /@ts-nocheck\b/ },
-  { id: "@ts-expect-error", re: /@ts-expect-error\b/ },
-];
+/**
+ * Suppression directives in one added line, classified by the same rules G2
+ * uses (eslint disable/inline config, @ts-*, coverage ignores, Stryker
+ * disable). Only real comments count: the line is tokenized, so a directive
+ * inside a string literal is not one. A line that continues a block comment
+ * (`* eslint-disable …`) is read as comment text.
+ */
+export function addedLineDirectives(text: string): Directive[] {
+  const out: Directive[] = [];
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("*") && !trimmed.startsWith("*/")) {
+    const d = classifyDirectiveComment(trimmed.replace(/\*\/\s*$/, ""), "Block");
+    if (d) out.push(d);
+  }
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, ts.LanguageVariant.JSX, text);
+  for (let kind = scanner.scan(); kind !== ts.SyntaxKind.EndOfFileToken; kind = scanner.scan()) {
+    const tok = scanner.getTokenText();
+    let d: Directive | null = null;
+    if (kind === ts.SyntaxKind.SingleLineCommentTrivia) d = classifyDirectiveComment(tok.slice(2), "Line");
+    else if (kind === ts.SyntaxKind.MultiLineCommentTrivia) d = classifyDirectiveComment(tok.slice(2).replace(/\*\/$/, ""), "Block");
+    if (d) out.push(d);
+  }
+  return out;
+}
 
 export interface LoopChange {
   status: ChangeStatus;
@@ -98,15 +116,14 @@ export function detectForbiddenChanges(
         out.push(v(c.pathC, `AI fix loop moved ${c.pathB} out of the measured extensions`));
       }
     }
-    if (c.pathC && policy.scope.exclude.some((g) => matchGlob(c.pathC!, g))) {
-      const wasExcluded = c.pathB ? policy.scope.exclude.some((g) => matchGlob(c.pathB!, g)) : false;
+    if (c.pathC && policy.scope.exclude.some((g) => matchesGlob(c.pathC!, g))) {
+      const wasExcluded = c.pathB ? policy.scope.exclude.some((g) => matchesGlob(c.pathB!, g)) : false;
       if (!wasExcluded) out.push(v(c.pathC, `AI fix loop moved code into excluded path ${c.pathC}`));
     }
     for (const added of c.addedLines ?? []) {
-      for (const s of SUPPRESSION_PATTERNS) {
-        if (!s.re.test(added.text)) continue;
-        if (policy.lint.suppression_allowlist.some((a) => added.text.includes(a))) continue;
-        out.push(v(c.pathC ?? c.pathB ?? "", `AI fix loop added a suppression directive (${s.id})`, { directive: s.id }, added.line));
+      for (const d of addedLineDirectives(added.text)) {
+        if (isAllowlisted(d, policy.lint.suppression_allowlist)) continue;
+        out.push(v(c.pathC ?? c.pathB ?? "", `AI fix loop added a suppression directive (${d.normalized})`, { directive: d.kind }, added.line));
       }
     }
   }
@@ -134,10 +151,11 @@ export type RetryDecision =
   | { action: "retry"; reason: string }
   | { action: "handoff"; reason: string };
 
-export function violationKey(v: Violation): string {
-  return `${v.gate}|${v.reason}|${v.unit ?? v.file}|${v.metric ?? ""}`;
-}
-
+/**
+ * Library decision for an AI fix-loop runner (spec 12.3); nyorori does not
+ * drive the loop itself. Hands off on a forbidden change, on any new routing
+ * trigger, on no progress, and at the retry limit.
+ */
 export function decideRetry(state: RetryState, policy: Policy): RetryDecision {
   if (state.forbidden.length > 0) return { action: "handoff", reason: "forbidden change (spec 12.2)" };
   // Any new routing trigger means the fix needs a human (S1/S9: redistributing or hiding branches).

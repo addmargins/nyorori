@@ -185,6 +185,12 @@ export function policyIntegrity(ctx: RunContext): Violation[] | undefined {
 }
 
 export function finalize(ctx: RunContext, d: GateDraft): GateResult {
+  const r = finalizeResult(ctx, d);
+  if (r.state !== "NOT_APPLICABLE" || !d.notApplicableReason) return r;
+  return { ...r, summary: `N/A: ${d.notApplicableReason}`, observe: { ...r.observe, not_applicable_reason: d.notApplicableReason } };
+}
+
+function finalizeResult(ctx: RunContext, d: GateDraft): GateResult {
   return finalizeGateResult({
     gate: d.gate,
     mode: policyMode(ctx.policy, d.gate),

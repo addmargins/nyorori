@@ -3,9 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { addedCLines, fileLineMaps, mapLine } from "../../src/git/linemap.js";
+import { fileLineMaps, hunkOfC, mapLine } from "../../src/git/linemap.js";
 import { buildManifest } from "../../src/git/manifest.js";
-import { assertSafeRelativePath, countLines, materializeFullTree, materializeSide } from "../../src/git/tree.js";
+import { assertSafeRelativePath, countLines, materializeFullTree, materializeSideChecked } from "../../src/git/tree.js";
 import { runCccc, validateRuns } from "../../src/measure/cccc.js";
 import { measureSides } from "../../src/measure/measure.js";
 import { defaultPolicy } from "../../src/policy/schema.js";
@@ -54,7 +54,8 @@ describe("tree materialization", () => {
     const c = repo.commit({ "src/a.ts": complex("a2"), ".gitattributes": "*.ts working-tree-encoding=UTF-16 eol=crlf\n" });
     const m = await buildManifest(repo.dir, b, c, defaultPolicy());
     const dest = join(newWork(), "C");
-    const files = await materializeSide(repo.dir, m, "C", dest);
+    const { files, problems } = await materializeSideChecked(repo.dir, m, "C", dest);
+    expect(problems).toEqual([]);
     expect(files.map((f) => f.path)).toEqual(["src/a.ts"]);
     expect(await readFile(join(dest, "src/a.ts"), "utf8")).toBe(complex("a2"));
     expect(await readdir(dest)).toEqual(["src"]); // nothing but the manifest's measured files
@@ -81,7 +82,8 @@ describe("line maps on real repositories", () => {
     expect(map).toMatchObject({ pathB: "src/old.ts", pathC: "src/new.ts" });
     expect(mapLine(map!, 5)).toBe(5);
     expect(mapLine(map!, 12)).toBe(13);
-    expect([...addedCLines(map!)]).toEqual([12]);
+    expect(map!.hunks).toEqual([{ bStart: 11, bCount: 0, cStart: 12, cCount: 1 }]);
+    expect(hunkOfC(map!, 12)).toBe(0);
   });
 
   it("ignores -diff/binary attributes in the candidate tree", async () => {

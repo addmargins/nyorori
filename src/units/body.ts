@@ -14,7 +14,7 @@ function sliceLines(source: string, start: number, end: number): string {
     .join("\n");
 }
 
-function tokens(text: string, cutAtFirstBlock: boolean): string[] {
+function tokens(text: string): string[] {
   const scanner = ts.createScanner(ts.ScriptTarget.Latest, true, ts.LanguageVariant.JSX, text);
   const out: string[] = [];
   // Openers: "(" "[" "{" and "`" for template substitutions.
@@ -44,7 +44,7 @@ function tokens(text: string, cutAtFirstBlock: boolean): string[] {
       case ts.SyntaxKind.CloseBracketToken:
       case ts.SyntaxKind.CloseBraceToken:
         stack.pop();
-        if (cutAtFirstBlock && blockOpened && stack.length === 0 && kind === ts.SyntaxKind.CloseBraceToken) {
+        if (blockOpened && stack.length === 0 && kind === ts.SyntaxKind.CloseBraceToken) {
           return out;
         }
         break;
@@ -53,11 +53,7 @@ function tokens(text: string, cutAtFirstBlock: boolean): string[] {
   return out;
 }
 
-/** Tokens without whitespace or comments, joined by single spaces. */
-export function normalizedTokens(text: string): string {
-  return tokens(text, false).join(" ");
-}
-
+/** The unit's tokens without whitespace or comments, joined by single spaces. */
 export function unitBodyText(source: string, u: Unit): string {
-  return tokens(sliceLines(source, u.line, u.endLine), true).join(" ");
+  return tokens(sliceLines(source, u.line, u.endLine)).join(" ");
 }

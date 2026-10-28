@@ -13,10 +13,8 @@ import type { Manifest } from "../types.js";
 import { matchesAny } from "../util/glob.js";
 import type { RunContext } from "./context.js";
 import { emptyDraft, type GateDraft } from "./draft.js";
+import { candidateProductCode, touchesMeasuredCode } from "./scope.js";
 
-function hasCodeChange(manifest: Manifest): boolean {
-  return manifest.entries.some((e) => e.measure.B || e.measure.C);
-}
 
 function touchesTestConfig(ctx: RunContext): boolean {
   return ctx.manifest.entries.some((e) =>
@@ -49,7 +47,7 @@ export function isAiLoopRun(ctx: RunContext): boolean {
 export async function testsGate(ctx: RunContext): Promise<GateDraft> {
   const { manifest, policy, opts } = ctx;
   const art = opts.artifacts?.tests;
-  const applicable = hasCodeChange(manifest) || touchesTestConfig(ctx);
+  const applicable = touchesMeasuredCode(manifest) || touchesTestConfig(ctx);
   const draft = emptyDraft("tests", ctx.fingerprint, applicable);
   if (!applicable && !art) return draft;
   if (art?.provenance) draft.provenance = art.provenance;
@@ -73,14 +71,11 @@ export async function testsGate(ctx: RunContext): Promise<GateDraft> {
   return draft;
 }
 
-function nonTestCodeChanged(manifest: Manifest): boolean {
-  return manifest.entries.some((e) => e.c && e.measure.C && !e.isTest);
-}
 
 /** G5 (observe in v1). */
 export async function coverageGate(ctx: RunContext): Promise<GateDraft> {
   const art = ctx.opts.artifacts?.coverage;
-  const draft = emptyDraft("coverage", ctx.fingerprint, nonTestCodeChanged(ctx.manifest));
+  const draft = emptyDraft("coverage", ctx.fingerprint, candidateProductCode(ctx.manifest));
   if (!art) return draft.applicable ? missingArtifact(draft, "coverage") : draft;
   if (art.provenance) draft.provenance = art.provenance;
   const e = evaluateCoverage({
@@ -99,7 +94,7 @@ export async function coverageGate(ctx: RunContext): Promise<GateDraft> {
 /** G7 (observe): surviving mutants on changed lines, for a PR comment. */
 export async function mutationGate(ctx: RunContext): Promise<GateDraft> {
   const art = ctx.opts.artifacts?.mutation;
-  const draft = emptyDraft("mutation", ctx.fingerprint, nonTestCodeChanged(ctx.manifest));
+  const draft = emptyDraft("mutation", ctx.fingerprint, candidateProductCode(ctx.manifest));
   if (!art) return draft.applicable ? missingArtifact(draft, "mutation") : draft;
   if (art.provenance) draft.provenance = art.provenance;
   const added = ctx.manifest.entries.flatMap((e) => (e.status === "A" && e.c ? [e.c.path] : []));

@@ -98,18 +98,6 @@ export async function materializeSideChecked(
   return { files, problems };
 }
 
-/** As materializeSideChecked, but throws on the first side that cannot be written. */
-export async function materializeSide(
-  repoDir: string,
-  manifest: Manifest,
-  side: Side,
-  destDir: string,
-): Promise<MaterializedFile[]> {
-  const r = await materializeSideChecked(repoDir, manifest, side, destDir);
-  if (r.problems.length > 0) throw new Error(r.problems.map((p) => p.detail).join("; "));
-  return r.files;
-}
-
 export interface FullTreeFile {
   path: string;
   blob: string;

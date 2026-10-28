@@ -12,6 +12,7 @@ import type {
   Violation,
   WaiverApplied,
 } from "../types.js";
+import type { Scope } from "./scope.js";
 
 export interface GateDraft {
   gate: GateId;
@@ -23,13 +24,27 @@ export interface GateDraft {
   waivers: WaiverApplied[];
   /** False when no in-scope file changed (NOT_APPLICABLE when nothing else was found). */
   applicable: boolean;
+  /** Why the gate had nothing in scope; shown in the N/A summary. */
+  notApplicableReason?: string;
   fingerprint: MeasurementFingerprint;
   /** Provenance of the untrusted artifact this draft consumed, if any. */
   provenance?: ArtifactProvenance;
 }
 
-export function emptyDraft(gate: GateId, fingerprint: MeasurementFingerprint, applicable: boolean): GateDraft {
-  return { gate, violations: [], inconclusive: [], triggers: [], observe: {}, unmeasured: [], waivers: [], applicable, fingerprint };
+export function emptyDraft(gate: GateId, fingerprint: MeasurementFingerprint, scope: boolean | Scope): GateDraft {
+  const s: Scope = typeof scope === "boolean" ? (scope ? { applicable: true } : { applicable: false, reason: "no in-scope changes" }) : scope;
+  return {
+    gate,
+    violations: [],
+    inconclusive: [],
+    triggers: [],
+    observe: {},
+    unmeasured: [],
+    waivers: [],
+    applicable: s.applicable,
+    ...(s.applicable ? {} : { notApplicableReason: s.reason }),
+    fingerprint,
+  };
 }
 
 /** Runs one gate step; any thrown error becomes INCONCLUSIVE(TOOL_ERROR) for that gate. */

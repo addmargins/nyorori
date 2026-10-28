@@ -18,6 +18,7 @@ import { matchUnits, type MatchResult } from "../units/match.js";
 import { isAiLoopRun } from "./actions-gates.js";
 import type { RunContext } from "./context.js";
 import { dedupeInconclusive, emptyDraft, type GateDraft } from "./draft.js";
+import { candidateScope } from "./scope.js";
 import { allSettledOrThrow } from "./settle.js";
 
 export interface Normalization {
@@ -33,9 +34,6 @@ export interface MeasuredState {
   normalization: Normalization;
 }
 
-function hasMeasuredCode(manifest: Manifest): boolean {
-  return manifest.entries.some((e) => e.measure.B || e.measure.C);
-}
 
 /**
  * One Prettier pass per side feeds both the S9 line counts and the
@@ -110,7 +108,13 @@ export async function complexityGate(ctx: RunContext, state: MeasuredState): Pro
     isAiLoop: isAiLoopRun(ctx),
   });
   const unmeasured = unmeasuredRecords(manifest);
-  const draft = emptyDraft("complexity", meas.fingerprint, hasMeasuredCode(manifest) || unmeasured.length > 0 || manifest.problems.length > 0);
+  // Unmeasured C files and manifest problems still need a verdict (S11, INCONCLUSIVE).
+  const scope = candidateScope(manifest);
+  const draft = emptyDraft(
+    "complexity",
+    meas.fingerprint,
+    unmeasured.some((u) => u.side === "C") || manifest.problems.length > 0 ? { applicable: true } : scope,
+  );
   draft.violations = evaluation.violations;
   draft.triggers = evaluation.triggers;
   draft.inconclusive = dedupeInconclusive([
@@ -196,7 +200,7 @@ function splitEnforced(violations: Violation[], enforced: readonly string[]): { 
 /** G2. Uses its own blob trees so it does not depend on cccc having run. */
 export async function lintGate(ctx: RunContext, state: MeasuredState): Promise<GateDraft> {
   const { opts, manifest, policy, lineMaps } = ctx;
-  const draft = emptyDraft("lint-structure", ctx.fingerprint, hasMeasuredCode(manifest));
+  const draft = emptyDraft("lint-structure", ctx.fingerprint, candidateScope(manifest));
   if (!draft.applicable) return draft;
   const root = await mkdtemp(join(opts.workDir, "lint-"));
   try {
@@ -244,7 +248,7 @@ function isResolutionConfig(path: string): boolean {
 /** G3 needs the whole module graph of both trees, not only the changed files. */
 export async function depsGate(ctx: RunContext): Promise<GateDraft> {
   const { opts, manifest, policy } = ctx;
-  const draft = emptyDraft("deps", ctx.fingerprint, hasMeasuredCode(manifest));
+  const draft = emptyDraft("deps", ctx.fingerprint, candidateScope(manifest));
   if (!draft.applicable) return draft;
   const root = await mkdtemp(join(opts.workDir, "deps-"));
   try {

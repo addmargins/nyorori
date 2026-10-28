@@ -18,7 +18,7 @@ import type {
 } from "../../types.js";
 import { analyzeConfigChange } from "./config.js";
 import { deriveState, type GateEvaluation } from "./evaluation.js";
-import { matchesAnyGlob } from "./glob.js";
+import { matchesAny } from "../../util/glob.js";
 import type { NormalizedReport, ReportParse } from "./report.js";
 import {
   FOCUS_SKIP_MARKERS,
@@ -326,13 +326,13 @@ function weakeningSignals(
 function protectedChanges(files: ChangedFile[], policy: Policy, extra: string[]): string[] {
   const set = new Set(extra);
   for (const f of files) {
-    for (const p of [f.pathB, f.pathC]) if (p && matchesAnyGlob(p, policy.tests.protected_paths)) set.add(p);
+    for (const p of [f.pathB, f.pathC]) if (p && matchesAny(p, policy.tests.protected_paths)) set.add(p);
   }
   return [...set].sort();
 }
 
 function isTestPath(p: string, sources: Map<string, string>, policy: Policy): boolean {
-  return sources.has(p) || matchesAnyGlob(p, policy.scope.test_globs);
+  return sources.has(p) || matchesAny(p, policy.scope.test_globs);
 }
 
 function changedTestFiles(files: ChangedFile[], input: TestsGateInput) {
@@ -361,7 +361,7 @@ function pick(sources: Map<string, string>, paths: Set<string>): Map<string, str
 }
 
 function isConfigPath(p: string | null, policy: Policy): p is string {
-  return p !== null && (posix.basename(p) === "package.json" || matchesAnyGlob(p, policy.tests.protected_paths));
+  return p !== null && (posix.basename(p) === "package.json" || matchesAny(p, policy.tests.protected_paths));
 }
 
 export function evaluateTests(input: TestsGateInput): GateEvaluation {

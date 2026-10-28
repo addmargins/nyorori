@@ -4,7 +4,7 @@
 // make the verdict stricter. Rulings D21 add two narrow cases: a file whose
 // normalized text did not change, and k-to-k groups of same-named siblings.
 
-import { cRangeTouched as linemapCRangeTouched } from "../git/linemap.js";
+import { cRangeTouched as linemapCRangeTouched, hunkOfB, hunkOfC, mapLine } from "../git/linemap.js";
 import type {
   FileLineMap,
   FileMeasurement,
@@ -24,37 +24,9 @@ const ANONYMOUS = "<anonymous>";
 // Line-map helpers over `git diff -U0` hunks
 // ---------------------------------------------------------------------------
 
-/** True when the hunk replaces/removes B lines containing `bLine`. */
-function bHunkContains(h: Hunk, bLine: number): boolean {
-  return h.bCount > 0 && bLine >= h.bStart && bLine < h.bStart + h.bCount;
-}
-
-/** True when the hunk adds C lines containing `cLine`. */
-function cHunkContains(h: Hunk, cLine: number): boolean {
-  return h.cCount > 0 && cLine >= h.cStart && cLine < h.cStart + h.cCount;
-}
-
-/** Hunks lie entirely before `bLine` in B (insertions sit after `bStart`). */
-function hunkBeforeB(h: Hunk, bLine: number): boolean {
-  return h.bCount > 0 ? h.bStart + h.bCount - 1 < bLine : h.bStart < bLine;
-}
-
-/** C line for an unmodified B line, or undefined when the B line was changed. */
-export function mapBLine(hunks: readonly Hunk[], bLine: number): number | undefined {
-  let offset = 0;
-  for (const h of hunks) {
-    if (bHunkContains(h, bLine)) return undefined;
-    if (hunkBeforeB(h, bLine)) offset += h.cCount - h.bCount;
-  }
-  return bLine + offset;
-}
-
-export function hunkIndexOfB(hunks: readonly Hunk[], bLine: number): number {
-  return hunks.findIndex((h) => bHunkContains(h, bLine));
-}
-
-export function hunkIndexOfC(hunks: readonly Hunk[], cLine: number): number {
-  return hunks.findIndex((h) => cHunkContains(h, cLine));
+/** linemap.ts helpers take a FileLineMap; they never mutate the hunks. */
+function lineMapOf(hunks: readonly Hunk[]): Pick<FileLineMap, "hunks"> {
+  return { hunks: hunks as Hunk[] };
 }
 
 /**
@@ -62,7 +34,7 @@ export function hunkIndexOfC(hunks: readonly Hunk[], cLine: number): number {
  * strictly inside it? Same semantics as `src/git/linemap.ts`.
  */
 export function cRangeTouched(hunks: readonly Hunk[], start: number, end: number): boolean {
-  return linemapCRangeTouched({ hunks: [...hunks] }, start, end);
+  return linemapCRangeTouched(lineMapOf(hunks), start, end);
 }
 
 /**
@@ -229,6 +201,7 @@ class Matcher {
   }
 
   private stageFixedPoint(bs: readonly Unit[], cs: readonly Unit[], hunks: readonly Hunk[]): void {
+    const lm = lineMapOf(hunks);
     const index = new Map<string, Unit[]>();
     const at = (name: string, kind: string, line: number, ordinal: number) =>
       `${name}\u0000${kind}\u0000${line}\u0000${ordinal}`;
@@ -237,7 +210,7 @@ class Matcher {
     }
     for (const b of bs) {
       if (this.unavailable(b, "B")) continue;
-      const target = mapBLine(hunks, b.line);
+      const target = mapLine(lm, b.line);
       if (target === undefined) continue;
       const candidates = (index.get(at(b.name.normalize("NFKC"), b.kind, target, b.lineOrdinal)) ?? []).filter(
         (c) => !this.unavailable(c, "C"),
@@ -247,6 +220,7 @@ class Matcher {
   }
 
   private stageSameHunk(bs: readonly Unit[], cs: readonly Unit[], hunks: readonly Hunk[]): void {
+    const lm = lineMapOf(hunks);
     const groups = new Map<string, { b: Unit[]; c: Unit[] }>();
     const group = (hunk: number, kind: string) => {
       const k = `${hunk}\u0000${kind}`;
@@ -256,12 +230,12 @@ class Matcher {
     };
     for (const b of bs) {
       if (this.unavailable(b, "B")) continue;
-      const h = hunkIndexOfB(hunks, b.line);
+      const h = hunkOfB(lm, b.line);
       if (h >= 0) group(h, b.kind).b.push(b);
     }
     for (const c of cs) {
       if (this.unavailable(c, "C")) continue;
-      const h = hunkIndexOfC(hunks, c.line);
+      const h = hunkOfC(lm, c.line);
       if (h >= 0) group(h, c.kind).c.push(c);
     }
     for (const g of groups.values()) {

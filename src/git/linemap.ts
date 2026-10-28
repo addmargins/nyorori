@@ -53,20 +53,6 @@ export function hunkOfC(map: Pick<FileLineMap, "hunks">, cLine: number): number 
   return map.hunks.findIndex((h) => h.cCount > 0 && cLine >= h.cStart && cLine < h.cStart + h.cCount);
 }
 
-/** Every C line that is new or rewritten. */
-export function addedCLines(map: Pick<FileLineMap, "hunks">): Set<number> {
-  const out = new Set<number>();
-  for (const h of map.hunks) for (let i = 0; i < h.cCount; i++) out.add(h.cStart + i);
-  return out;
-}
-
-/** Every B line that was removed or rewritten. */
-export function removedBLines(map: Pick<FileLineMap, "hunks">): Set<number> {
-  const out = new Set<number>();
-  for (const h of map.hunks) for (let i = 0; i < h.bCount; i++) out.add(h.bStart + i);
-  return out;
-}
-
 /** Whether any changed C line falls in [start, end]. */
 export function cRangeTouched(map: Pick<FileLineMap, "hunks">, start: number, end: number): boolean {
   return map.hunks.some((h) => {

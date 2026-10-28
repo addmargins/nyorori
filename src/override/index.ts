@@ -15,10 +15,13 @@ import { independenceProblem, inRoster, requiredApprovers, type PrIdentityContex
 import { CommandError, findCommands, requireArgs } from "../waivers/command.js";
 import { EDITED_COMMAND_NOTE, screenComments, type IssueComment } from "../waivers/index.js";
 
-/** Reasons a gate owner may override. PARSE_ERROR_CANDIDATE only for listed parser-lag syntax. */
+/**
+ * Reasons a gate owner may override for one file. PARSE_ERROR_CANDIDATE only
+ * for listed parser-lag syntax. MEASURER_MISMATCH and SCHEMA are never
+ * reported per file (they describe the measurer run), so they are fixed in P,
+ * not overridden.
+ */
 export const OWNER_OVERRIDABLE: ReadonlySet<InconclusiveReason> = new Set<InconclusiveReason>([
-  "MEASURER_MISMATCH",
-  "SCHEMA",
   "INVARIANT_VIOLATION",
   "NONDETERMINISM",
   "PARSE_ERROR_CANDIDATE",
@@ -59,8 +62,6 @@ export interface OverrideOutcome {
   triggers: TriggerHit[];
   applied: OverrideRequest[];
   rejected: Array<{ commentId: string; problem: string }>;
-  /** Files to re-measure with the observe-only fallback (ESLint complexity). */
-  fallbackMeasure: string[];
   /** Notes for run-scoped overrides: the measurement must be re-run before the next decision. */
   rerunRequired: string[];
 }
@@ -221,7 +222,6 @@ export function applyOverrides(
     })),
     applied: appliedList,
     rejected,
-    fallbackMeasure: files,
     rerunRequired: runScoped.map((r) => `${r.reason} overridden by ${r.owner} for ${r.base}..${r.candidate}; re-run the measurement before relying on it`),
   };
 }

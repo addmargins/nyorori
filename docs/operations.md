@@ -7,7 +7,7 @@
 | 구성 요소 | 실행 위치 | PR 코드 실행 | 비밀 |
 |---|---|---|---|
 | G1 복잡도, G2 구조 lint, G3 의존성, 집계기 `quality-gate` | 게이트 서비스 (GitHub App 백엔드, `src/service`) | 하지 않음. git blob에서 직접 트리를 만든다 | App 비공개 키 (서비스에만) |
-| G4 테스트·무결성, G5 변경 분기 커버리지, G7 변이 | Actions `gate-untrusted-tests.yml` | 함 | 없음 (`contents: read`, 토큰 비영속) |
+| G4 테스트·무결성, G5 변경 분기 커버리지, G7 변이 | Actions `templates/workflows/gate-untrusted-tests.yml` (조직 ruleset의 필수 workflow로 붙인다) | 함 | 없음 (`contents: read`, 토큰 비영속) |
 
 - 필수 체크는 `quality-gate` 하나이며, 예상 출처를 게이트 App으로 고정한다. 출처를 "GitHub Actions"로 고정하면 PR의 workflow도 같은 이름의 체크를 성공으로 올릴 수 있다.
 - 서비스는 같은 이름이라도 자기 App이 만들지 않은 체크를 읽지도 갱신하지도 않는다(`ownCheckRuns`).
@@ -46,7 +46,7 @@
 - 분기 예산: `waivers.per_quarter_budget`은 서비스의 원장(`FileLedgerStore`, `waivers.jsonl`)에서 이번 UTC 분기에 기록된 waiver 수를 세어 적용한다. 읽을 수 없는 줄은 사용한 것으로 센다.
 - waiver 가능한 게이트: `complexity`, `lint-structure`, `deps`, `coverage`, `tests`(`TESTS_FAILED_ON_BASE`만).
 - waiver 불가 (판정 D14): 모든 INCONCLUSIVE(측정 override 대상), G4 무결성(`TEST_REMOVED`, `TEST_FOCUS_OR_SKIP`, `TEST_CONFIG_WEAKENED` — 3.4절 테스트 승인 대상), `TESTS_FAILED`, 보호 경로(`PROTECTED_PATH_MODIFIED`, `POLICY_PATH_MODIFIED`), 우회 벡터(`DYNAMIC_CODE`, `BIDI_CONTROL`, `SUPPRESSION_ADDED`), 리뷰 결과.
-- waiver 가능한 변형: B에서도 실패하던 테스트(`TESTS_FAILED_ON_BASE` 또는 `details.base_broken`), `@ts-ignore` 같은 waiver 가능한 억제(`SUPPRESSION_ADDED_WAIVABLE` 또는 `details.waivable`), `TEST_NO_ASSERTION`.
+- waiver 가능한 변형: `tests` 게이트에서는 `TESTS_FAILED_ON_BASE`(B에서도 실패하던 테스트, `details.base_broken`이 붙은 `TESTS_FAILED` 포함)와 `TEST_NO_ASSERTION`, `lint-structure`에서는 `@ts-ignore` 같은 waiver 가능한 억제(`SUPPRESSION_ADDED_WAIVABLE` 또는 `details.waivable`)다.
 - 수치가 없는 위반(실패한 테스트, 억제 주석)은 `metric=<사유 코드> ceiling=0`으로 신청한다. 예: `metric=TESTS_FAILED_ON_BASE ceiling=0`.
 
 승인:
@@ -68,7 +68,7 @@
 /gate-override gate=complexity reason=NONDETERMINISM base=<B> candidate=<C> note="runner 교체 중 -j1 재측정 불일치"
 ```
 
-이번 (B, C) 실행에만 묶인다. 그 INCONCLUSIVE를 걷어내되 "재측정 필요" 메모를 남기고 S6으로 단순화 리뷰를 필수로 만든다. `MEASURER_MISMATCH`는 파일 없이 override할 수 없다.
+이번 (B, C) 실행에만 묶인다. 그 INCONCLUSIVE를 걷어내되 "재측정 필요" 메모를 남기고 S6으로 단순화 리뷰를 필수로 만든다. 파일 없는 override는 `NONDETERMINISM`만 가능하다. `MEASURER_MISMATCH`와 `SCHEMA`는 측정기 실행 전체에 대한 문제라 override 대상이 아니며, 게이트 담당자가 P(바이너리 고정, 업그레이드)에서 고친다.
 
 파일 단위 override:
 
@@ -77,10 +77,10 @@
 ```
 
 - `gate_owners`만, 작성자가 아닌 사람만 걸 수 있다.
-- 대상 사유: `MEASURER_MISMATCH`, `SCHEMA`, `INVARIANT_VIOLATION`, `NONDETERMINISM`, 그리고 `parser_lag_allowlist`에 있는 문법의 `PARSE_ERROR_CANDIDATE`.
+- 대상 사유: `INVARIANT_VIOLATION`, `NONDETERMINISM`, 그리고 `parser_lag_allowlist`에 있는 문법의 `PARSE_ERROR_CANDIDATE`.
 - 작성자가 고칠 원인(구문 오류, 1000단계 초과 중첩, 비 UTF-8, 설정 없는 JSX-in-`.js`)은 override 대상이 아니다. 허용하면 일부러 심어 파일을 영구히 측정 밖으로 빼는 경로가 된다. 예외는 `parser_lag_allowlist`에 있는 문법의 파싱 오류뿐이다(측정기는 지연과 실제 구문 오류를 구별하지 못하므로 목록이 결정한다).
 - 파일 경로가 없는 전역 측정 실패(예: 바이너리 해시 불일치)는 override하지 않는다. 측정기를 고친다.
-- 효과: 그 파일을 `MEASUREMENT_OVERRIDE`로 unmeasured 처리하고, 관측용 대체 측정 대상으로 넘기고, S6으로 단순화 리뷰를 필수로 만든다. **FAIL을 PASS로 바꾸지 않는다.**
+- 효과: 그 파일을 `MEASUREMENT_OVERRIDE`로 unmeasured 처리하고, S6으로 단순화 리뷰를 필수로 만든다. 그 파일의 복잡도는 리뷰어가 직접 본다(대체 측정기는 돌리지 않는다). **FAIL을 PASS로 바꾸지 않는다.**
 
 ### 3.3 단순화 리뷰 (G6)
 
@@ -122,7 +122,7 @@ q5: pass
 |---|---|---|
 | PASS | success | `PASS` |
 | NOT_APPLICABLE | success | `N/A` |
-| ACCEPTED_WITH_WAIVER | success | `PASS with waiver: …` |
+| ACCEPTED_WITH_WAIVER | success | `PASS with waiver: …` (적용된 waiver·테스트 승인 항목을 몇 개 나열) |
 | FAIL | failure | 첫 위반 |
 | INCONCLUSIVE | **failure** | `INCONCLUSIVE: <사유>` |
 
@@ -166,7 +166,7 @@ q5: pass
 | 단계 | 기간 | 정책 설정 | 완료 조건 |
 |---|---|---|---|
 | P0 측정 계약 | 1~2주 | 모든 게이트 `observe` | 픽스처 전부 통과, 분석 실패가 PASS로 오인되지 않음, 실행 경계 확인 |
-| P1 shadow | 3~4주 | `tests.mode=enforce`(S7 라우팅 포함), `review.mode=enforce`, `deps.mode=enforce`(`block_forbidden_edges=false`, 새 순환만), `lint.mode=enforce`(Function 생성자 계열만 — 아래 참고), 나머지 `observe` | 정책 책임자가 임계값·범위·waiver 방식 승인 |
+| P1 shadow | 3~4주 | `tests.mode=enforce`(S7 라우팅 포함), `review.mode=enforce`, `deps.mode=enforce`(`block_forbidden_edges=false`, 새 순환만), `lint.mode=enforce`(`lint.enforced_rules`에 동적 코드(Function 생성자 계열) 규칙만 지정), 나머지 `observe` | 정책 책임자가 임계값·범위·waiver 방식 승인 |
 | P2 enforce | P1 검토 후 | + `complexity.mode=enforce`, `lint.mode=enforce`(전체), `deps.block_forbidden_edges=true` | 마찰 지표가 목표 범위 |
 | P3 | +4주 | + `coverage.mode=enforce` (보정 기준 충족 시) | |
 
@@ -178,5 +178,6 @@ P1에서 G6가 enforce여도 관측 모드 게이트(G1 등)의 트리거는 라
 
 - 루프는 `ai_loop.bot_accounts`에 등록된 봇 계정으로 식별한다. PR 본문의 자기 신고는 쓰지 않는다.
 - 루프의 diff가 보호 경로(`tests.protected_paths` + 게이트·도구 설정, `.github/**`, 스냅샷, waiver 원장), 테스트 스크립트(`package.json`의 `scripts.test*`, `jest`/`vitest`/`c8`/`nyc` 키), 억제 주석 추가, 측정 확장자 밖이나 제외 경로로의 이동을 건드리면 `policy-integrity` 행이 `POLICY_PATH_MODIFIED`로 실패한다. 루프는 waiver를 신청할 수 없다.
-- 자동 재시도는 `ai_loop.max_retries`회(기본 2)까지다. 위반 집합이 그대로이거나, 수정 후 S1·S9가 새로 발화하거나, 금지 변경이 생기면 즉시 사람에게 넘긴다.
+- 자동 재시도는 `ai_loop.max_retries`회(기본 2)까지다. 위반 집합이 그대로이거나, 수정 후 라우팅 트리거가 하나라도 새로 발화하거나(S1·S9만이 아니다), 금지 변경이 생기면 즉시 사람에게 넘긴다.
+- nyorori는 재시도 루프를 직접 돌리지 않는다. `decideRetry`(`src/ailoop`)는 AI 수정 루프를 돌리는 쪽이 매 시도 뒤 호출하는 라이브러리 함수이고, 게이트는 판정과 `gate-feedback.json`만 만든다.
 - 모든 재시도는 같은 병합 기준 B에 대해 측정한다.

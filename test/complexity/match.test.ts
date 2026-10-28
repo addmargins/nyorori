@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import { checkName, skeleton } from "../../src/units/names.js";
-import { mapBLine } from "../../src/units/match.js";
+import { mapLine } from "../../src/git/linemap.js";
 import { ifChain, runScenario, violationReasons, type ScenarioResult } from "./helpers.js";
 
 const stageOf = (r: ScenarioResult, cKey: string) => r.match.byC.get(cKey)?.stage;
@@ -26,18 +26,18 @@ describe("names", () => {
 
 describe("line map", () => {
   it("maps unchanged lines across insertions and deletions", () => {
-    const hunks = [
+    const hunks = { hunks: [
       { bStart: 2, bCount: 0, cStart: 3, cCount: 2 }, // insert 2 lines after B line 2
       { bStart: 5, bCount: 1, cStart: 7, cCount: 1 }, // modify B line 5
       { bStart: 8, bCount: 2, cStart: 9, cCount: 0 }, // delete B lines 8-9
-    ];
-    expect(mapBLine(hunks, 1)).toBe(1);
-    expect(mapBLine(hunks, 2)).toBe(2);
-    expect(mapBLine(hunks, 3)).toBe(5);
-    expect(mapBLine(hunks, 5)).toBeUndefined();
-    expect(mapBLine(hunks, 6)).toBe(8);
-    expect(mapBLine(hunks, 9)).toBeUndefined();
-    expect(mapBLine(hunks, 10)).toBe(10);
+    ] };
+    expect(mapLine(hunks, 1)).toBe(1);
+    expect(mapLine(hunks, 2)).toBe(2);
+    expect(mapLine(hunks, 3)).toBe(5);
+    expect(mapLine(hunks, 5)).toBeUndefined();
+    expect(mapLine(hunks, 6)).toBe(8);
+    expect(mapLine(hunks, 9)).toBeUndefined();
+    expect(mapLine(hunks, 10)).toBe(10);
   });
 });
 
