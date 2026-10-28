@@ -57,6 +57,18 @@ export function buildLintConfig(policy: Policy): Linter.Config[] {
       languageOptions: {
         ecmaVersion: "latest",
         sourceType: "module",
+        // no-implied-eval and no-eval only recognise these when they are
+        // declared globals.
+        globals: {
+          setTimeout: "readonly",
+          setInterval: "readonly",
+          setImmediate: "readonly",
+          execScript: "readonly",
+          window: "readonly",
+          self: "readonly",
+          global: "readonly",
+          globalThis: "readonly",
+        },
         parser: tseslint.parser as Linter.Parser,
         parserOptions: {
           ecmaFeatures: { jsx: true },

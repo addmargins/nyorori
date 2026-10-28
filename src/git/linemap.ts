@@ -4,9 +4,8 @@
 
 import type { FileLineMap, Hunk, Manifest } from "../types.js";
 import { git } from "./exec.js";
-
-/** git's well-known empty blob; always resolvable, even if not stored. */
-export const EMPTY_BLOB = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
+import { readBlobs } from "./manifest.js";
+import { countLines } from "./tree.js";
 
 const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
@@ -78,10 +77,17 @@ export function cRangeTouched(map: Pick<FileLineMap, "hunks">, start: number, en
 }
 
 export async function blobLineDiff(repoDir: string, blobB: string | null, blobC: string | null): Promise<Hunk[]> {
+  if (blobB === null || blobC === null) {
+    const only = (blobB ?? blobC)!;
+    const n = countLines((await readBlobs(repoDir, [only])).get(only)!);
+    if (n === 0) return [];
+    return blobB === null
+      ? [{ bStart: 0, bCount: 0, cStart: 1, cCount: n }]
+      : [{ bStart: 1, bCount: n, cStart: 0, cCount: 0 }];
+  }
   const out = await git(repoDir, [
     "diff", "-U0", "--text", "--no-color", "--no-ext-diff", "--no-textconv",
-    "--diff-algorithm=myers", "--indent-heuristic", "--no-prefix",
-    blobB ?? EMPTY_BLOB, blobC ?? EMPTY_BLOB,
+    "--diff-algorithm=myers", "--indent-heuristic", "--no-prefix", blobB, blobC,
   ]);
   return parseUnifiedZeroDiff(out.toString("utf8"));
 }

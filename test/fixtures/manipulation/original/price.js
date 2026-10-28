@@ -23,6 +23,6 @@ export function price(order, user) {
     }
   }
   if (user.vip || total > 500) total *= 0.97;
-  const shipping = total >= 100 ? 0 : user.member ? 3 : 7;
+  const shipping = total >= 100 ? 0 : user?.member ? 3 : 7;
   return Math.round((total + shipping) * 100) / 100;
 }

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites name="vitest tests" tests="4" failures="1" errors="0" time="0.001">
+    <testsuite name="src/price.test.ts" timestamp="2026-10-28T00:00:00.000Z" hostname="vm" tests="4" failures="1" errors="0" skipped="1" time="0.001">
+        <testcase classname="src/price.test.ts" name="price &gt; zero quantity costs nothing" time="0.001">
+        </testcase>
+        <testcase classname="src/price.test.ts" name="price &gt; vip discount" time="0.001">
+        </testcase>
+        <testcase classname="src/price.test.ts" name="price &gt; regular price" time="0.001">
+            <failure message="expected 20 to be 21 // Object.is equality" type="AssertionError">
+AssertionError: expected 20 to be 21 // Object.is equality
+
+- Expected
++ Received
+
+- 21
++ 20
+
+ ❯ src/price.test.ts:12:29
+            </failure>
+        </testcase>
+        <testcase classname="src/price.test.ts" name="price &gt; bulk discount" time="0.001">
+            <skipped/>
+        </testcase>
+    </testsuite>
+</testsuites>

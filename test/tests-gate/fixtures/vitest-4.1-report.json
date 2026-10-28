@@ -1,0 +1,89 @@
+{
+  "numTotalTestSuites": 2,
+  "numPassedTestSuites": 0,
+  "numFailedTestSuites": 2,
+  "numPendingTestSuites": 0,
+  "numTotalTests": 4,
+  "numPassedTests": 2,
+  "numFailedTests": 1,
+  "numPendingTests": 0,
+  "numTodoTests": 1,
+  "snapshot": {
+    "added": 0,
+    "failure": false,
+    "filesAdded": 0,
+    "filesRemoved": 0,
+    "filesRemovedList": [],
+    "filesUnmatched": 0,
+    "filesUpdated": 0,
+    "matched": 0,
+    "total": 0,
+    "unchecked": 0,
+    "uncheckedKeysByFile": [],
+    "unmatched": 0,
+    "updated": 0,
+    "didUpdate": false
+  },
+  "startTime": 1793200000000,
+  "success": false,
+  "testResults": [
+    {
+      "assertionResults": [
+        {
+          "ancestorTitles": [
+            "price"
+          ],
+          "fullName": "price zero quantity costs nothing",
+          "status": "passed",
+          "title": "zero quantity costs nothing",
+          "duration": 1.0,
+          "failureMessages": [],
+          "meta": {},
+          "tags": []
+        },
+        {
+          "ancestorTitles": [
+            "price"
+          ],
+          "fullName": "price vip discount",
+          "status": "passed",
+          "title": "vip discount",
+          "duration": 1.0,
+          "failureMessages": [],
+          "meta": {},
+          "tags": []
+        },
+        {
+          "ancestorTitles": [
+            "price"
+          ],
+          "fullName": "price regular price",
+          "status": "failed",
+          "title": "regular price",
+          "duration": 1.0,
+          "failureMessages": [
+            "AssertionError: expected 20 to be 21 // Object.is equality"
+          ],
+          "meta": {},
+          "tags": []
+        },
+        {
+          "ancestorTitles": [
+            "price"
+          ],
+          "fullName": "price bulk discount",
+          "status": "todo",
+          "title": "bulk discount",
+          "failureMessages": [],
+          "meta": {},
+          "tags": []
+        }
+      ],
+      "startTime": 1793200000000,
+      "endTime": 1793200000010,
+      "status": "failed",
+      "message": "",
+      "name": "/home/runner/work/app/app/src/price.test.ts"
+    }
+  ]
+}

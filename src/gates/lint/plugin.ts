@@ -213,7 +213,7 @@ const dynamicCode: Rule.RuleModule = {
         const key = n.computed ? literalString(n.key) : n.key.type === "Identifier" ? n.key.name : literalString(n.key);
         if (key === "constructor") context.report({ node, messageId: "destructure" });
       },
-    } as Rule.RuleListener;
+    } as unknown as Rule.RuleListener;
   },
 };
 
@@ -489,7 +489,7 @@ const branchHiding: Rule.RuleModule = {
           }
         }
       },
-    } as Rule.RuleListener;
+    } as unknown as Rule.RuleListener;
   },
 };
 

@@ -2,7 +2,7 @@
 // blobs. The candidate's own lint setup is never loaded or executed.
 
 import { isAbsolute, relative, sep } from "node:path";
-import { ESLint } from "eslint";
+import { ESLint, type Linter } from "eslint";
 import type { Policy } from "../../policy/schema.js";
 import { buildLintConfig, categoryOf } from "./config.js";
 import type { FileLintResult, LintMessage } from "./types.js";
@@ -61,7 +61,7 @@ export async function lintFiles(
   return out;
 }
 
-export function convert(path: string, messages: readonly import("eslint").Linter.LintMessage[]): FileLintResult {
+export function convert(path: string, messages: readonly Linter.LintMessage[]): FileLintResult {
   const result: FileLintResult = { path, messages: [] };
   for (const m of messages) {
     if (m.fatal) {

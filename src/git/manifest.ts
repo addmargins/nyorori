@@ -90,19 +90,19 @@ export function extensionCandidates(path: string): string[] {
   return out.length > 0 ? out : [""];
 }
 
-function longestSuffixIn(path: string, list: readonly string[]): string | undefined {
+function hasSuffixIn(path: string, list: readonly string[]): boolean {
   const lower = new Set(list.map((e) => e.toLowerCase()));
-  return extensionCandidates(path).find((s) => lower.has(s.toLowerCase()));
+  return extensionCandidates(path).some((s) => lower.has(s.toLowerCase()));
 }
 
 /** Classification of a regular file path by policy alone (mode handled by the caller). */
 export function classifyPath(path: string, policy: Policy): PathClass {
   const s = policy.scope;
-  if (longestSuffixIn(path, s.declaration_suffixes)) return { kind: "excluded", reason: "DECLARATION_FILE" };
+  if (hasSuffixIn(path, s.declaration_suffixes)) return { kind: "excluded", reason: "DECLARATION_FILE" };
   if (matchesAny(path, s.exclude)) return { kind: "excluded", reason: "POLICY_EXCLUDE" };
-  if (longestSuffixIn(path, s.unmeasured_code_extensions)) return { kind: "unmeasured", reason: "UNSUPPORTED_FORMAT" };
-  if (longestSuffixIn(path, s.extensions)) return { kind: "measure" };
-  if (longestSuffixIn(path, s.non_code_extensions)) return { kind: "excluded", reason: "NOT_CODE" };
+  if (hasSuffixIn(path, s.unmeasured_code_extensions)) return { kind: "unmeasured", reason: "UNSUPPORTED_FORMAT" };
+  if (hasSuffixIn(path, s.extensions)) return { kind: "measure" };
+  if (hasSuffixIn(path, s.non_code_extensions)) return { kind: "excluded", reason: "NOT_CODE" };
   const cands = extensionCandidates(path);
   return { kind: "unregistered", ext: cands[cands.length - 1]! };
 }
@@ -110,8 +110,8 @@ export function classifyPath(path: string, policy: Policy): PathClass {
 /** Would this path be code (measured or a known unmeasured format) if it were not excluded? */
 export function isCodePath(path: string, policy: Policy): boolean {
   const s = policy.scope;
-  if (longestSuffixIn(path, s.declaration_suffixes)) return false;
-  return Boolean(longestSuffixIn(path, s.extensions) || longestSuffixIn(path, s.unmeasured_code_extensions));
+  if (hasSuffixIn(path, s.declaration_suffixes)) return false;
+  return Boolean(hasSuffixIn(path, s.extensions) || hasSuffixIn(path, s.unmeasured_code_extensions));
 }
 
 export function measuredPathFor(path: string, policy: Policy): string {

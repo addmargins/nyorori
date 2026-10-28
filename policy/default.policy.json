@@ -1,0 +1,173 @@
+{
+  "schema_version": 1,
+  "measurer": {
+    "cccc_version": "cccc 1.8.5",
+    "cccc_sha256": "",
+    "timeout_ms": 120000,
+    "chunk_size": 1000,
+    "jobs": 4,
+    "determinism_sample_rate": 0.05
+  },
+  "scope": {
+    "extensions": [
+      ".ts",
+      ".tsx",
+      ".mts",
+      ".cts",
+      ".js",
+      ".jsx",
+      ".mjs",
+      ".cjs"
+    ],
+    "declaration_suffixes": [
+      ".d.ts",
+      ".d.mts",
+      ".d.cts"
+    ],
+    "unmeasured_code_extensions": [
+      ".vue",
+      ".svelte",
+      ".astro",
+      ".mdx"
+    ],
+    "non_code_extensions": [
+      ".md",
+      ".txt",
+      ".json",
+      ".jsonc",
+      ".yml",
+      ".yaml",
+      ".toml",
+      ".lock",
+      ".png",
+      ".jpg",
+      ".jpeg",
+      ".gif",
+      ".svg",
+      ".ico",
+      ".webp",
+      ".css",
+      ".scss",
+      ".sass",
+      ".less",
+      ".html",
+      ".csv",
+      ".snap",
+      ".map",
+      ".gitignore",
+      ".gitattributes",
+      ".gitmodules",
+      ".npmrc",
+      ".nvmrc",
+      ".editorconfig",
+      ".prettierrc",
+      ".env.example",
+      ""
+    ],
+    "exclude": [],
+    "test_globs": [
+      "**/*.test.*",
+      "**/*.spec.*",
+      "**/__tests__/**",
+      "test/**",
+      "tests/**"
+    ],
+    "jsx_in_js": [],
+    "max_file_bytes": 2097152,
+    "rename_similarity": 70,
+    "sensitive_paths": [
+      ".gitattributes",
+      "**/.gitattributes",
+      ".gitmodules"
+    ]
+  },
+  "complexity": {
+    "mode": "enforce",
+    "cognitive_limit": 15,
+    "near_limit_low": 12,
+    "cyclomatic_observe_mark": 20,
+    "inclusive_cognitive_trigger": 25,
+    "anonymous_child_trigger": 8,
+    "vanish_min_units": 4,
+    "enforce_on_tests": false
+  },
+  "triggers": {
+    "s1": {
+      "visible_branch_slack": 2,
+      "min_unit_increase": 3,
+      "min_max_cognitive_drop": 5
+    },
+    "s4_max_function_lines": 60,
+    "s9": {
+      "branch_drop_ratio": 0.3,
+      "max_line_drop_ratio": 0.3,
+      "density_drop_ratio": 0.3,
+      "min_branch_drop": 3
+    },
+    "s10": {
+      "min_density": 0.6,
+      "min_new_units": 5
+    },
+    "s3": {
+      "min_single_importer_modules": 2,
+      "min_efferent_increase": 5
+    }
+  },
+  "lint": {
+    "mode": "enforce",
+    "max_params": 4,
+    "max_nested_callbacks": 3,
+    "max_lines_per_function": 60,
+    "suppression_allowlist": []
+  },
+  "deps": {
+    "mode": "enforce",
+    "block_forbidden_edges": false,
+    "forbidden": []
+  },
+  "tests": {
+    "mode": "enforce",
+    "protected_paths": [
+      "vitest.config.*",
+      "vite.config.*",
+      "jest.config.*",
+      "stryker.conf*",
+      ".c8rc*",
+      ".nycrc*",
+      "tsconfig*.json",
+      "eslint.config.*",
+      ".eslintrc*",
+      ".dependency-cruiser.*",
+      "cccc.toml",
+      ".cccc.toml",
+      ".github/**",
+      ".gitignore",
+      ".ignore",
+      ".gitattributes"
+    ]
+  },
+  "coverage": {
+    "mode": "observe",
+    "max_unexecuted_branches_abs": 2,
+    "max_unexecuted_branches_ratio": 0.1,
+    "provider": "v8",
+    "provider_version": "",
+    "ignore_comment_allowlist": []
+  },
+  "review": {
+    "mode": "enforce",
+    "simplification_reviewers": [],
+    "waiver_approvers": [],
+    "gate_owners": [],
+    "bots": []
+  },
+  "waivers": {
+    "per_pr_budget": 3,
+    "max_days": 90
+  },
+  "ai_loop": {
+    "bot_accounts": [],
+    "max_retries": 2
+  },
+  "parser_lag_allowlist": []
+}

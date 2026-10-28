@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "measurer": {
+    "cccc_version": "cccc 1.8.5",
+    "cccc_sha256": "",
+    "determinism_sample_rate": 0.1
+  },
+  "scope": {
+    "exclude": ["src/generated/**", "vendor/**"],
+    "jsx_in_js": ["src/legacy/**/*.js"]
+  },
+  "complexity": {
+    "mode": "enforce",
+    "cognitive_limit": 12,
+    "near_limit_low": 10
+  },
+  "lint": { "mode": "enforce" },
+  "deps": {
+    "mode": "enforce",
+    "block_forbidden_edges": true,
+    "forbidden": [
+      { "name": "ui-not-from-db", "from": "^src/ui/", "to": "^src/db/" }
+    ]
+  },
+  "tests": { "mode": "enforce" },
+  "coverage": {
+    "mode": "enforce",
+    "max_unexecuted_branches_abs": 2,
+    "max_unexecuted_branches_ratio": 0.1,
+    "provider": "v8",
+    "provider_version": "4.1.12"
+  },
+  "review": {
+    "mode": "enforce",
+    "simplification_reviewers": ["@example-org/simplification-reviewers"],
+    "waiver_approvers": ["@example-org/waiver-approvers"],
+    "gate_owners": ["@example-org/gate-owners"],
+    "bots": ["dependabot[bot]", "renovate[bot]"]
+  },
+  "waivers": { "per_pr_budget": 2, "max_days": 90 },
+  "ai_loop": { "bot_accounts": ["example-ai-agent[bot]"], "max_retries": 2 },
+  "parser_lag_allowlist": []
+}
