@@ -128,9 +128,13 @@ export type FailReason =
   | "DYNAMIC_CODE"
   | "BIDI_CONTROL"
   | "SUPPRESSION_ADDED"
+  /** `@ts-ignore` added by a human: waivable (rulings D9). */
+  | "SUPPRESSION_ADDED_WAIVABLE"
   | "DEP_NEW_CYCLE"
   | "DEP_FORBIDDEN_EDGE"
   | "TESTS_FAILED"
+  /** Failing tests that also failed on B: waivable (rulings D14). */
+  | "TESTS_FAILED_ON_BASE"
   | "TEST_REMOVED"
   | "TEST_FOCUS_OR_SKIP"
   | "TEST_NO_ASSERTION"
