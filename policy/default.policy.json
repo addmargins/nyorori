@@ -241,6 +241,7 @@
       ".c8rc*",
       ".nycrc*",
       "tsconfig*.json",
+      "jsconfig*.json",
       "eslint.config.*",
       ".eslintrc*",
       ".dependency-cruiser.*",

@@ -2,9 +2,6 @@
 // the cost on a large repository (5k commits × 300 changed files).
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { candidatesFor, cutoffCommit, historyIndex, parseHistory, readFirstParentHistory } from "../../src/pipeline/history.js";
 import { selectBaselines } from "../../src/pipeline/moving-baseline.js";
@@ -84,7 +81,6 @@ describe("moving-baseline history on a large repository", () => {
         expect(index.get(m)).toBe(latest + 4 * 300);
       }
       expect(read + select).toBeLessThan(5000);
-      // eslint-disable-next-line no-console
       console.log(`history read ${read.toFixed(0)} ms, selection ${select.toFixed(0)} ms for 5000 commits × 300 files`);
     } finally {
       repo.dispose();

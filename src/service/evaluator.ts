@@ -289,19 +289,8 @@ async function pullRequestContext(
   };
 }
 
-const text = (files: Map<string, Buffer>, name: string) => files.get(name)?.toString("utf8");
-
-/** The only artifact entries the service reads; everything else is never inflated. */
-export const ARTIFACT_ENTRIES: ReadonlySet<string> = new Set([
-  "metadata.json",
-  "tests.B.json",
-  "tests.C.json",
-  "tests.C.rc",
-  "changed.txt",
-  "coverage/coverage-final.json",
-  "coverage-meta.json",
-  "mutation.json",
-]);
+/** Entry names the gates read; the worker inflates only these (src/pipeline/artifacts.ts). */
+export { ARTIFACT_ENTRIES } from "../pipeline/artifacts.js";
 
 /**
  * The latest attempt of the required workflow for this candidate, with

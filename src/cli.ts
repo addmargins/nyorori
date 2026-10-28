@@ -2,21 +2,23 @@
 // nyorori command line: `run` one gate evaluation, check the measurer against
 // the calculation-rule `fixtures`, or `serve` the GitHub App webhook.
 
-import { existsSync, realpathSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { realpathSync, statSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import type { ArtifactProvenance } from "./aggregate/index.js";
 import { checkCalculationRules } from "./fixtures/rules.js";
 import { runGatesIsolated } from "./pipeline/isolated.js";
 import { assertToolsOutsideRepo, RepoPathError } from "./pipeline/paths.js";
 import { runGates } from "./pipeline/run.js";
 import { replayCommand } from "./replay/cli.js";
-import type { Artifacts, PullRequestContext, RunGatesOptions, RunGatesOutput } from "./pipeline/types.js";
+import type { PullRequestContext, RunGatesOptions } from "./pipeline/types.js";
 import { loadPolicy } from "./policy/load.js";
-import { dispatchEvent } from "./service/handlers.js";
+import { dispatchEvent, replayPendingJobs, type ServiceDeps } from "./service/handlers.js";
+import { FileDeliveryStore, JobJournal } from "./service/journal.js";
+import { loadArtifactDir } from "./replay/inputs.js";
+import { writeRunOutputs } from "./replay/outputs.js";
 import { createServiceEvaluator } from "./service/evaluator.js";
 import { GitHubApi } from "./service/github.js";
 import { FileLedgerStore } from "./service/ledger.js";
@@ -61,53 +63,6 @@ async function readJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
 }
 
-async function optionalText(path: string): Promise<string | undefined> {
-  return existsSync(path) ? readFile(path, "utf8") : undefined;
-}
-
-/**
- * Same layout as the required workflow's artifact (tests.C.json, tests.B.json,
- * coverage/coverage-final.json, coverage-meta.json, mutation.json,
- * metadata.json). provenance.json is a local stand-in for the provenance the
- * service reads from the GitHub API; without it no artifact can make a gate pass.
- */
-async function loadArtifacts(dir: string): Promise<Artifacts> {
-  const provPath = join(dir, "provenance.json");
-  const provenance = existsSync(provPath) ? await readJson<ArtifactProvenance>(provPath) : undefined;
-  const meta = await optionalText(join(dir, "metadata.json"));
-  const rootDir = meta ? (JSON.parse(meta) as { root_dir?: string }).root_dir : undefined;
-  const common = { ...(provenance ? { provenance } : {}), ...(rootDir ? { rootDir } : {}) };
-  const out: Artifacts = {};
-  const testsC = await optionalText(join(dir, "tests.C.json"));
-  if (testsC !== undefined) {
-    const testsB = await optionalText(join(dir, "tests.B.json"));
-    out.tests = { reportC: testsC, ...(testsB !== undefined ? { reportB: testsB } : {}), ...common };
-  }
-  const cov = await optionalText(join(dir, "coverage", "coverage-final.json"));
-  if (cov !== undefined) out.coverage = { coverageFinal: cov, meta: (await optionalText(join(dir, "coverage-meta.json"))) ?? "", ...common };
-  const mut = await optionalText(join(dir, "mutation.json"));
-  if (mut !== undefined) out.mutation = { report: mut, ...common };
-  return out;
-}
-
-async function writeOutputs(dir: string, out: RunGatesOutput): Promise<void> {
-  await mkdir(dir, { recursive: true });
-  const w = (name: string, data: string | Buffer) => writeFile(join(dir, name), data);
-  const json = (v: unknown) => JSON.stringify(v, null, 2) + "\n";
-  await w("manifest.json", json(out.manifest));
-  const bySide: Record<string, number> = {};
-  for (const run of out.ccccRuns) {
-    const n = (bySide[run.side] = (bySide[run.side] ?? 0) + 1);
-    const suffix = n === 1 ? "" : `.${n}`;
-    await w(`raw.${run.side}${suffix}.json`, run.stdout);
-    await w(`raw.${run.side}${suffix}.stderr`, run.stderr);
-  }
-  for (const r of out.results) await w(`gate-result.${r.gate}.json`, json(r));
-  await w("quality-gate.json", json(out.verdict));
-  await w("gate-summary.md", out.summaryMarkdown + "\n");
-  await w("gate-feedback.json", json(out.feedback));
-}
-
 async function cmdRun(argv: string[]): Promise<number> {
   const { values } = parseArgs({
     args: argv,
@@ -130,6 +85,7 @@ async function cmdRun(argv: string[]): Promise<number> {
     strict: true,
   });
   const repoDir = resolve(required(values, "repo"));
+  if (!statSync(repoDir, { throwIfNoEntry: false })?.isDirectory()) throw new UsageError(`--repo ${repoDir} is not a directory`);
   const ccccBinary = ccccFrom(values.cccc);
   const workDir = values.workdir ?? join(tmpdir(), "nyorori");
   if (!values["allow-repo-paths"]) {
@@ -165,12 +121,12 @@ async function cmdRun(argv: string[]): Promise<number> {
     runnerCommit: values["runner-commit"] ?? process.env.NYORORI_RUNNER_COMMIT ?? "local",
     authority: "local",
     allowRepoPaths: values["allow-repo-paths"],
-    ...(values.artifacts ? { artifacts: await loadArtifacts(values.artifacts) } : {}),
+    ...(values.artifacts ? { artifacts: await loadArtifactDir(values.artifacts) } : {}),
     ...(prContext ? { pr: prContext } : {}),
   };
   // The isolated worker is the production path; --in-process keeps stack traces for debugging.
   const out = values["in-process"] ? await runGates(options) : await runGatesIsolated(options);
-  if (values.out) await writeOutputs(values.out, out);
+  if (values.out) await writeRunOutputs(values.out, out);
   process.stdout.write(out.summaryMarkdown + "\n");
   return EXIT_CODE[out.verdict.state];
 }
@@ -228,9 +184,18 @@ async function cmdServe(argv: string[]): Promise<number> {
     const r = await recordMergedPullRequest({ client: api, ledger, verdicts, issued, policy: loaded.policy, log }, m);
     log("merge recorded", { repo: m.repo, pr: m.pr, ...r });
   };
+  // Durable job journal: deliveries queued or running at the last shutdown are replayed, old ones pruned.
+  const journal = new JobJournal(join(workDir, "jobs"));
+  const deliveries = new FileDeliveryStore(join(workDir, "deliveries.log"));
+  const deps: ServiceDeps = { client: api, appId, evaluate, log, policyRevision: loaded.revision, onMerged, journal };
+  const replayed = await replayPendingJobs(deps, journal);
+  const pruned = await journal.prune(30 * 24 * 60 * 60 * 1000);
+  log("journal", { ...replayed, pruned });
   const server = createWebhookServer({
     secret: env("NYORORI_WEBHOOK_SECRET"),
-    dispatch: (event, payload) => dispatchEvent({ client: api, appId, evaluate, log, policyRevision: loaded.revision, onMerged }, event, payload),
+    dispatch: (event, payload, delivery) => dispatchEvent(deps, event, payload, delivery),
+    deliveries,
+    health: () => ({ ok: true, policy_revision: loaded.revision, runner_commit: process.env.NYORORI_RUNNER_COMMIT ?? "service" }),
     log,
   });
   await new Promise<void>((done) => server.listen(Number(values.port), done));

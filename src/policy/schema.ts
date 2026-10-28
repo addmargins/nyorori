@@ -243,7 +243,7 @@ export const policySchema = z
           .array(glob)
           .default([
             "vitest.config.*", "vite.config.*", "jest.config.*", "stryker.conf*",
-            ".c8rc*", ".nycrc*", "tsconfig*.json", "eslint.config.*", ".eslintrc*",
+            ".c8rc*", ".nycrc*", "tsconfig*.json", "jsconfig*.json", "eslint.config.*", ".eslintrc*",
             ".dependency-cruiser.*", "cccc.toml", ".cccc.toml", ".github/**",
             ".gitignore", ".ignore", ".gitattributes",
           ]),

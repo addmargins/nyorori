@@ -284,7 +284,7 @@ async function handleMergedPullRequest(deps: ServiceDeps, payload: PullRequestPa
 export async function evaluatePullRequest(deps: ServiceDeps, repo: RepoRef, prNumber: number, headSha: string, deliveryId?: string): Promise<Evaluation | null> {
   const sleep = deps.sleep ?? realSleep;
   const pending: EvaluationContext = { repo, kind: "pull_request", prNumber, prHeadSha: headSha, base: "", candidate: "", checkSha: headSha, ...(deliveryId ? { deliveryId } : {}) };
-  let problem = "";
+  let problem: string;
   for (let attempt = 0; ; attempt++) {
     const merge = await deps.client.resolveRef(repo, `refs/pull/${prNumber}/merge`);
     if (merge) {

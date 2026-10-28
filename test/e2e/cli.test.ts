@@ -75,7 +75,12 @@ describe("nyorori CLI", () => {
   it("uses exit 64 for usage errors and 2 when the gate cannot run", () => {
     expect(nyorori(["run", "--repo", "/nonexistent"]).status).toBe(64);
     expect(nyorori(["nope"]).status).toBe(64);
-    expect(nyorori(["run", "--repo", "/nonexistent", "--base", "HEAD", "--candidate", "HEAD", "--policy", policyFile]).status).toBe(2);
+    // A repository that does not exist is a usage error, not a gate that could not run.
+    expect(nyorori(["run", "--repo", "/nonexistent", "--base", "HEAD", "--candidate", "HEAD", "--policy", policyFile]).status).toBe(64);
+    // A directory that is not a repository is a gate that could not run.
+    const notRepo = mkdtempSync(join(tmpdir(), "nyorori-notrepo-"));
+    expect(nyorori(["run", "--repo", notRepo, "--base", "HEAD", "--candidate", "HEAD", "--policy", policyFile]).status).toBe(2);
+    rmSync(notRepo, { recursive: true, force: true });
   });
 
   it("checks the calculation-rule fixtures against the binary", () => {
