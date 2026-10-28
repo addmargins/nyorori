@@ -1,3 +1,4 @@
+# TEMPLATE for adopting repositories (it does not run in the gate repository).
 # Untrusted half of the gate bundle: G4 tests/integrity, G5 changed-branch
 # coverage and G7 mutation execute PR code, so they run here and NOT in the
 # gate service. Attach this file to adopting repositories with an organization
@@ -25,9 +26,6 @@ concurrency:
 
 jobs:
   tests:
-    # The gate repository itself has no adopter test layout; set this
-    # repository variable there so the template does not run on itself.
-    if: vars.NYORORI_IS_GATE_REPO != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:

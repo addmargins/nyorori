@@ -57,6 +57,7 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
+      - run: npm run lint
       - run: npm test
       - run: npm run build
       # Spec 6.1: the calculation-rule fixtures must not drift for the pinned measurer.

@@ -14,9 +14,9 @@
     "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "lint": "eslint src test",
+    "lint": "eslint src test scripts eslint.config.js",
     "fixtures": "node dist/cli.js fixtures",
-    "gen:policy": "vite-node scripts/gen-default-policy.ts"
+    "gen:policy": "npm run build && node scripts/gen-default-policy.mjs"
   },
   "dependencies": {
     "@eslint/js": "^10.0.1",
