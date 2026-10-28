@@ -131,8 +131,8 @@ Path abbreviations: `cx` = `src/gates/complexity/evaluate.ts`, `lint` = `src/gat
 | V | Vector | Status | Implementation | Tests |
 |---|---|---|---|---|
 | V1 | PR edits CI workflow, gate scripts or the required-check name | ✅ ↪ D1 | `src/service/*` (judging runs in the service), `agg` (provenance pins workflow path + SHA), `tg/evaluate.ts` (`.github/**` → S11 for people, FAIL for the loop) | `aggregate.test.ts :: … accepts PR-executing gates only from the pinned workflow for the candidate`, `… refuses service gates submitted from Actions`; `service.test.ts :: … ignores a same-name check posted by a PR workflow and creates its own`; `evaluate.test.ts :: G4 tests gate makes weakening a FAIL for the AI fix loop, and protected paths too` |
-| V2 | `pull_request` workflow forges the check with an App key held in Actions secrets | ⚠️ | Architectural: the key exists only in `src/cli.ts serve` and `src/service/github.ts`. `.github/workflows/gate-untrusted-tests.yml` has no secrets. | Consequences only: `aggregate.test.ts :: … refuses service gates submitted from Actions`; `test/service/github.test.ts :: service helpers mirrors exactly the requested commits without putting the token in argv or the remote config`. |
-| V3 | `pull_request_target` + PR head checkout | ✅ | `.github/workflows/gate-untrusted-tests.yml` (not used), `agg` (event must match the evaluation) | `aggregate.test.ts :: … accepts PR-executing gates only from the pinned workflow for the candidate` (rejects `event: "pull_request_target"`); `security.test.ts :: defence in depth a failed run's artifacts can prove a failure but never a pass` |
+| V2 | `pull_request` workflow forges the check with an App key held in Actions secrets | ⚠️ | Architectural: the key exists only in `src/cli.ts serve` and `src/service/github.ts`. `templates/workflows/gate-untrusted-tests.yml` has no secrets. | Consequences only: `aggregate.test.ts :: … refuses service gates submitted from Actions`; `test/service/github.test.ts :: service helpers mirrors exactly the requested commits without putting the token in argv or the remote config`. |
+| V3 | `pull_request_target` + PR head checkout | ✅ | `templates/workflows/gate-untrusted-tests.yml` (not used), `agg` (event must match the evaluation) | `aggregate.test.ts :: … accepts PR-executing gates only from the pinned workflow for the candidate` (rejects `event: "pull_request_target"`); `security.test.ts :: defence in depth a failed run's artifacts can prove a failure but never a pass` |
 | V4 | PR-supplied `cccc.toml` / `.cccc.toml` / `.ignore` / `.gitignore` | ⚠️ | As 14.26 | As 14.26. `.cccc.toml`, `.ignore` and `.gitignore` are untested. |
 | V5 | Syntax error, JSX-in-`.js`, Flow, >1000-level nesting, UTF-16/Latin-1 → 0 or a dropped file, exit 0 | ⚠️ | `src/measure/cccc.ts`, `src/git/manifest.ts` (JSX suffix) | As 14.16–14.18, 14.23; `cccc-rules.test.ts :: cccc 1.8.5 I/O behaviour … routes a .js.jsx copy as JSX while the plain .js fails to parse`, `… exits 0 even with parse errors, and reports them only in parse_errors`. **Gap:** no Flow or deep-nesting case. |
 | V6 | `.gitattributes` `working-tree-encoding`, `filter=lfs`, `export-ignore` | ✅ | `src/git/tree.ts`, `src/git/manifest.ts` (`isLfsPointer`) | As 14.27; `manifest.test.ts :: pure helpers isLfsPointer`, `… detects LFS pointers, oversize blobs and case collisions`, `… ignores repository-level attributes and configs …` (`export-ignore`); `measure.test.ts :: line maps on real repositories ignores -diff/binary attributes in the candidate tree` |
@@ -174,3 +174,28 @@ Path abbreviations: `cx` = `src/gates/complexity/evaluate.ts`, `lint` = `src/gat
 | §9.1 (9 rules) | 6 | 3 | 0 |
 | §10.2 (19 vectors) | 11 | 7 | 1 |
 | §12.2 (10 items) | 10 | 0 | 0 |
+
+## Post-review updates (release cleanup)
+
+Rows that the review marked ⚠️/❌ and that the release-cleanup round closed:
+
+| Row | Was | Now | Evidence |
+|---|---|---|---|
+| 14.34 / V10 | ⚠️ no exact-shape test | ✅ | `test/e2e/release.test.ts` V10 case (S5 + S9 routed, merge blocked) |
+| 14.35 / V15 | ⚠️ S9 only, observe only | ✅ | `release.test.ts` three-PR helper split: moving baseline fires S1 and S10; `route: true` → REVIEW_REQUIRED |
+| 14.16 / V5 | ⚠️ no >1000-level nesting test | ✅ (Flow still untested) | `release.test.ts` 1,100-level literal → INCONCLUSIVE PARSE_ERROR_CANDIDATE |
+| 6.3.1 | ⚠️ `--version` branch untested | ✅ | `test/measure/contract.test.ts` version mismatch with matching sha256 |
+| 6.3.a/b/c, V16 | ⚠️ argv/env/chunking unasserted | ✅ | `contract.test.ts` argv, env, chunking, per-chunk validation |
+| 9.1.8 | ⚠️ deletion-only gave PASS (bug) | ✅ fixed | `src/pipeline/scope.ts`; `release.test.ts` deletion-only → N/A |
+| 9.1.3 | ⚠️ waiver title without items | ✅ fixed | `verdictHeadline` in `src/aggregate/index.ts`; e2e waiver test asserts the title |
+| 14.26 / V4 | ⚠️ only `cccc.toml` tested | ✅ | `release.test.ts` `.cccc.toml`, `.ignore`, `.gitignore` |
+| 14.33 | ⚠️ (b) not Prettier-reformatted | ✅ | `release.test.ts` reformatted variant (b) still fires S1/S10 |
+| 14.1 | ❌ no repeat-run test | ✅ | `release.test.ts` identical results on two runs |
+| 14.20 / 14.21 / 9.1.9 | ⚠️ | ✅ | `release.test.ts` docs-only N/A with reason, zero-function `.ts` PASS |
+
+Still open (documented gaps, not blocking v1):
+
+- **V8:** "generated code is proven by CI regeneration" is not implemented. Exclusions come from P only, and new files under excluded paths route S11.
+- **V12:** per-author/agent INCONCLUSIVE-rate tracking is a P1 operations metric, not yet built.
+- **V2:** architectural only; the key lives only in the service.
+- **Flow syntax fixture:** not added.
