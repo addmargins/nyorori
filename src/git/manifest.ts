@@ -121,7 +121,13 @@ function isExtensionless(path: string): boolean {
  */
 export function classifyPath(path: string, policy: Policy): PathClass {
   const s = policy.scope;
-  if (hasSuffixIn(path, s.declaration_suffixes)) return { kind: "excluded", reason: "DECLARATION_FILE" };
+  // Declaration files carry no logic, but cccc still parses them: an
+  // implementation inside is an "ambient context" parse error, so measuring
+  // them (declaration_impl_check) turns a hidden implementation into
+  // PARSE_ERROR_CANDIDATE and a clean one into a measured PASS (spec 2.3, 9.1).
+  if (hasSuffixIn(path, s.declaration_suffixes)) {
+    return s.declaration_impl_check ? { kind: "measure" } : { kind: "excluded", reason: "DECLARATION_FILE" };
+  }
   if (matchesAny(path, s.exclude)) return { kind: "excluded", reason: "POLICY_EXCLUDE" };
   if (hasSuffixIn(path, s.unmeasured_code_extensions)) return { kind: "unmeasured", reason: "UNSUPPORTED_FORMAT" };
   if (hasSuffixIn(path, s.extensions)) return { kind: "measure" };

@@ -16,7 +16,7 @@ import type {
 } from "../types.js";
 import { buildFileMeasurement, countableUnits } from "../units/model.js";
 import { runCccc, validateRuns, type CcccRun } from "./cccc.js";
-import { buildFingerprint, checkMeasurer, identifyMeasurer } from "./fingerprint.js";
+import { buildFingerprint, checkMeasurer, pinMeasurer } from "./fingerprint.js";
 
 export interface MeasureSidesOptions {
   repoDir: string;
@@ -28,6 +28,8 @@ export interface MeasureSidesOptions {
   runnerCommit?: string;
   /** Injectable for the determinism sample; defaults to Math.random. */
   rng?: () => number;
+  /** The official merge_group evaluation samples the -j1 re-run at determinism_sample_rate_official. */
+  official?: boolean;
   keepTrees?: boolean;
 }
 
@@ -89,14 +91,14 @@ function stdoutOf(runs: CcccRun[]): Buffer {
 }
 
 export async function measureSides(opts: MeasureSidesOptions): Promise<SideMeasurements> {
-  const { repoDir, manifest, policy, binary } = opts;
-  const id = await identifyMeasurer(binary);
-  const fingerprint = buildFingerprint(id, policy, opts.runnerCommit ?? "unknown");
-  const inconclusive: Inconclusive[] = [...checkMeasurer(id, policy), ...manifestInconclusive(manifest)];
-
+  const { repoDir, manifest, policy } = opts;
   await mkdir(opts.workDir, { recursive: true });
   const root = await mkdtemp(join(opts.workDir, "trees-"));
   const roots = { B: join(root, "B"), C: join(root, "C") };
+  const id = await pinMeasurer(opts.binary, root);
+  const binary = id.path;
+  const fingerprint = buildFingerprint(id, policy, opts.runnerCommit ?? "unknown");
+  const inconclusive: Inconclusive[] = [...checkMeasurer(id, policy), ...manifestInconclusive(manifest)];
   const reuse = reuseFromC(manifest);
   const result: SideMeasurements = {
     b: new Map(),
@@ -165,8 +167,10 @@ export async function measureSides(opts: MeasureSidesOptions): Promise<SideMeasu
     inconclusive.push(...unitsVanished(manifest, result, matB, matC, policy));
 
     const rng = opts.rng ?? Math.random;
-    if (matC.length > 0 && rng() < policy.measurer.determinism_sample_rate) {
+    const rate = opts.official ? policy.measurer.determinism_sample_rate_official : policy.measurer.determinism_sample_rate;
+    if (matC.length > 0 && rng() < rate) {
       result.determinismChecked = true;
+      // Every C chunk is measured again, single-threaded, and compared byte for byte.
       const again = await runCccc({ binary, treeRoot: roots.C, files: matC.map((f) => f.measuredPath), policy, side: "C", jobs: 1 });
       if (!stdoutOf(again).equals(stdoutOf(runsC))) {
         inconclusive.push({

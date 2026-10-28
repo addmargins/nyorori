@@ -40,10 +40,14 @@ function readJsonc(file: string): Record<string, unknown> | null {
   return parsed.error || typeof parsed.config !== "object" || parsed.config === null ? null : (parsed.config as Record<string, unknown>);
 }
 
+/** Root config files, in precedence order: tsconfig wins over jsconfig when both exist. */
+const ROOT_CONFIGS = ["tsconfig.json", "jsconfig.json"];
+
 /**
- * Effective `baseUrl` and `paths` of `<treeRoot>/tsconfig.json`, merging
- * relative `extends` like tsc does: the child's value wins, and `baseUrl` /
- * `paths` targets resolve against the file that declared them.
+ * Effective `baseUrl` and `paths` of the tree's root `tsconfig.json` (or
+ * `jsconfig.json`), merging relative `extends` like tsc does: the child's
+ * value wins, and `baseUrl` / `paths` targets resolve against the file that
+ * declared them. JSONC comments and trailing commas are accepted.
  */
 export function readAliasSpec(treeRoot: string): AliasSpec {
   const root = resolve(treeRoot);
@@ -73,7 +77,8 @@ export function readAliasSpec(treeRoot: string): AliasSpec {
       visit(existsSync(target) || target.endsWith(".json") ? target : `${target}.json`, depth + 1);
     }
   };
-  visit(join(root, "tsconfig.json"), 0);
+  const rootConfig = ROOT_CONFIGS.map((f) => join(root, f)).find((f) => existsSync(f));
+  if (rootConfig) visit(rootConfig, 0);
 
   if (baseUrlAbs !== null && inside(root, baseUrlAbs)) spec.baseUrl = relative(root, baseUrlAbs);
   const p = paths as { value: Record<string, unknown>; dir: string } | null;

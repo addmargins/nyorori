@@ -83,9 +83,59 @@ function constructorOfIsFunction(obj: AstNode, member: AstNode | null, sc: Sourc
     return holder.type === "Identifier" && holder.name === "Function";
   }
   if (o.type === "ThisExpression" || o.type === "Super") return false;
-  // `new x.constructor(...)` / `x.constructor(...)`: invoking an unknown
-  // value's constructor with arguments is how a string becomes code.
-  return member !== null && isCalleeOf(outermostWrapper(member));
+  // Any other object: the value `x.constructor` is Function whenever x is a
+  // function, and the gate cannot know. It is dangerous as soon as the value
+  // escapes into something that can call it (V17 review, round 4).
+  return member !== null && constructorValueEscapes(member);
+}
+
+/** Non-escaping uses of a `.constructor` value: reads of its own properties, comparisons, type checks. */
+const COMPARISON_OPERATORS = new Set(["==", "!=", "===", "!==", "instanceof", "in", "<", ">", "<=", ">="]);
+
+/**
+ * True when the member's value leaves the expression in a way that can lead
+ * to a call: called or `new`'d, bound to a name, passed as an argument,
+ * placed in a literal, returned, thrown, yielded, awaited, or interpolated.
+ * Reading a property of it, comparing it, `typeof`, `void`, and using it as
+ * a `switch`/`if` test stay clean.
+ */
+function constructorValueEscapes(member: AstNode): boolean {
+  const outer = outermostWrapper(member);
+  const p = outer.parent;
+  if (!p) return false;
+  switch (p.type) {
+    case "MemberExpression": {
+      if (p.object !== outer) return true; // used as a computed key: the value is read
+      // `x.constructor.call/apply/bind(...)` invokes it; `.name`, `.length`,
+      // `[k]` only read a property of it.
+      const method = staticPropertyName(p);
+      return (method === "call" || method === "apply" || method === "bind") && isCalleeOf(outermostWrapper(p));
+    }
+    case "AssignmentExpression":
+      return p.left !== outer; // `Child.prototype.constructor = Child` writes, it does not read
+    case "BinaryExpression":
+      return !COMPARISON_OPERATORS.has(p.operator);
+    case "UnaryExpression":
+      return p.operator !== "typeof" && p.operator !== "void" && p.operator !== "!";
+    case "IfStatement":
+    case "WhileStatement":
+    case "DoWhileStatement":
+    case "ForStatement":
+    case "SwitchStatement":
+    case "SwitchCase":
+    case "ExpressionStatement":
+      return false;
+    case "ConditionalExpression":
+      return p.test !== outer && constructorValueEscapes(p);
+    case "LogicalExpression":
+      return constructorValueEscapes(p);
+    case "SequenceExpression":
+      return p.expressions[p.expressions.length - 1] === outer && constructorValueEscapes(p);
+    case "ChainExpression":
+      return constructorValueEscapes(p);
+    default:
+      return true;
+  }
 }
 
 const VALUE_WRAPPER_TS = new Set(["TSAsExpression", "TSNonNullExpression", "TSSatisfiesExpression", "TSTypeAssertion"]);

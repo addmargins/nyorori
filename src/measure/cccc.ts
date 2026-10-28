@@ -76,6 +76,7 @@ export function normalizeReportedPath(p: string): string {
 
 const ENCODING_HINT = /utf-?8|invalid (byte|data|character)|stream did not contain valid/i;
 const CANNOT_READ = /^cccc: cannot read (.+): (.+)$/;
+const AMBIENT_IMPL = /implementation cannot be declared in ambient contexts/i;
 
 export interface ValidateOptions {
   /** policy.parser_lag_allowlist: parse errors containing one of these are for a gate owner, not the author. */
@@ -180,11 +181,14 @@ export function validateCcccRun(run: Omit<CcccRun, "args">, timeoutMs: number, o
       if (side === "C") {
         // Syntax the parser does not support yet (policy list) is a gate-owner matter (audit F5).
         const parserLag = errs.every((e) => lag.some((l) => e.includes(l)));
+        const ambient = errs.some((e) => AMBIENT_IMPL.test(e));
         add(
           "PARSE_ERROR_CANDIDATE",
           parserLag
             ? `${f.path}: cccc does not support this syntax yet (${errs.slice(0, 3).join("; ")}); a gate owner may override`
-            : `${f.path}: cccc could not parse the file (${errs.slice(0, 3).join("; ")}); fix the syntax error`,
+            : ambient
+              ? `${f.path} is a declaration file but contains an implementation (${errs.slice(0, 3).join("; ")}); move the code to a .ts file`
+              : `${f.path}: cccc could not parse the file (${errs.slice(0, 3).join("; ")}); fix the syntax error`,
           !parserLag,
           f.path,
         );

@@ -120,7 +120,7 @@ export function compareGraphs(
     baseUrlEntries: baseUrlEntries(input.aliases, [...gC.nodes, ...(input.allFilesC ?? [])]),
   };
   const routed = unmeasuredTargets(gB, gC, toB, targetCtx, triggers, observe);
-  internalLookingUnresolved(gB, gC, toB, input.aliases, targetCtx.baseUrlEntries, routed, triggers, observe);
+  internalLookingUnresolved(gB, gC, toB, input.aliases, targetCtx.baseUrlEntries, routed, allFiles, triggers, observe);
   moduleSplitTriggers(gB, gC, toB, input, triggers, observe);
   return { violations, triggers, inconclusive: [], observe };
 }
@@ -317,14 +317,15 @@ function internalLookingUnresolved(
   aliases: AliasSpec | undefined,
   baseEntries: ReadonlySet<string>,
   alreadyRouted: ReadonlySet<string>,
+  allFiles: ReadonlySet<string> | null,
   triggers: TriggerHit[],
   observe: DepsEvaluation["observe"],
 ): void {
-  if (!aliases) return;
+  const spec: AliasSpec = aliases ?? { aliases: {}, baseUrl: null, ignoredExtends: [] };
   const before = new Set(gB.unresolvedBare.map((u) => edgeKey(u.from, u.specifier)));
   const fresh = gC.unresolvedBare.filter((u) => {
     if (alreadyRouted.has(edgeKey(u.from, u.specifier))) return false;
-    if (!looksInternal(u.specifier, aliases, baseEntries)) return false;
+    if (!looksInternal(u.specifier, spec, baseEntries) && !resolvesByConvention(u.specifier, allFiles)) return false;
     const from = toB(u.from);
     return from === undefined || !before.has(edgeKey(from, u.specifier));
   });
@@ -340,6 +341,24 @@ function internalLookingUnresolved(
       .join(", ")}`,
     routing: true,
   });
+}
+
+/** Bundler aliases the gate has no spec for: `@/x`, `~/x`, `#x` with `src/x.*` in the tree. */
+const CONVENTION_PREFIX_RE = /^[@~#](?:\/|$)/;
+const CONVENTION_DIRS = ["src", "lib", "app", ""];
+
+/** A bare specifier that an alias-free build could not load but whose target exists under a conventional root. */
+function resolvesByConvention(specifier: string, allFiles: ReadonlySet<string> | null): boolean {
+  if (!allFiles || !CONVENTION_PREFIX_RE.test(specifier)) return false;
+  const rest = specifier.replace(CONVENTION_PREFIX_RE, "");
+  if (rest === "") return false;
+  const prefixes = CONVENTION_DIRS.map((d) => (d ? `${d}/${rest}` : rest));
+  for (const f of allFiles) {
+    for (const p of prefixes) {
+      if (f === p || f.startsWith(`${p}.`) || f.startsWith(`${p}/`)) return true;
+    }
+  }
+  return false;
 }
 
 /** First path segments (extension dropped for files) under baseUrl. */

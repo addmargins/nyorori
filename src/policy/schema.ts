@@ -23,8 +23,10 @@ export const policySchema = z
         timeout_ms: z.number().int().positive().default(120_000),
         chunk_size: z.number().int().positive().default(1000),
         jobs: z.number().int().positive().default(4),
-        /** Fraction of runs re-measured with -j1 for the determinism check (spec 6.4). */
+        /** Fraction of pull_request pre-checks re-measured with -j1 for the determinism check (spec 6.4). */
         determinism_sample_rate: z.number().min(0).max(1).default(0.05),
+        /** The same for the official merge_group evaluation; every official verdict is re-checked by default. */
+        determinism_sample_rate_official: z.number().min(0).max(1).default(1),
       })
       .strict()
       .default({}),

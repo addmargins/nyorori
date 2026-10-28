@@ -14,6 +14,7 @@ import type {
   Unit,
   UnitMatch,
 } from "../types.js";
+import { matchesAny } from "../util/glob.js";
 import { unitBodyText } from "./body.js";
 import { flattenUnits } from "./model.js";
 import { checkName } from "./names.js";
@@ -77,6 +78,29 @@ export interface MatchInput {
   normalizedIdentical?: ReadonlySet<string>;
   /** policy.complexity.cognitive_limit, for k-to-k groups (ruling D21b). Default 15. */
   limit?: number;
+  /**
+   * policy.scope.test_globs. A unit never matches across the test/product
+   * boundary: a test file's allowance must not travel into product code.
+   * Without the globs, only the manifest's primary-path `isTest` is known.
+   */
+  testGlobs?: readonly string[];
+}
+
+export type ScopeClass = "test" | "product";
+
+/** A B→C pair the matcher refused because the two sides live in different scopes. */
+export interface ScopeChange {
+  bPath: string;
+  cPath: string;
+  from: ScopeClass;
+  to: ScopeClass;
+  /** Set for a verbatim unit move between a deleted and an added file. */
+  bKey?: string;
+  cKey?: string;
+}
+
+export function scopeOf(path: string, testGlobs: readonly string[] | undefined): ScopeClass {
+  return testGlobs && matchesAny(path, testGlobs) ? "test" : "product";
 }
 
 export interface MatchResult {
@@ -87,6 +111,8 @@ export interface MatchResult {
   nameWarnings: Array<{ unit: string; warning: string }>;
   /** Keys that occur more than once on one side; such units are never matched. */
   duplicateKeys?: string[];
+  /** File pairs and verbatim moves refused for crossing the test/product boundary (S11). */
+  scopeChanges?: ScopeChange[];
 }
 
 export interface FilePair {
@@ -95,8 +121,14 @@ export interface FilePair {
   hunks: readonly Hunk[];
 }
 
-/** Modified or renamed files measured on both sides, with their hunks. */
-export function filePairs(input: Pick<MatchInput, "manifest" | "b" | "c" | "lineMaps" | "baselineMissing">): FilePair[] {
+type PairInput = Pick<MatchInput, "manifest" | "b" | "c" | "lineMaps" | "baselineMissing" | "testGlobs">;
+
+/**
+ * Modified or renamed files measured on both sides, with their hunks. A
+ * rename across the test/product boundary is not a pair: it is reported in
+ * `refused` and both sides are treated as new / deleted.
+ */
+export function filePairs(input: PairInput, refused?: ScopeChange[]): FilePair[] {
   const pairs: FilePair[] = [];
   for (const e of input.manifest.entries) {
     if (e.status !== "M" && e.status !== "R") continue;
@@ -105,6 +137,12 @@ export function filePairs(input: Pick<MatchInput, "manifest" | "b" | "c" | "line
     const b = input.b.get(e.b.path);
     const c = input.c.get(e.c.path);
     if (!b || !c) continue;
+    const from = scopeOf(e.b.path, input.testGlobs);
+    const to = scopeOf(e.c.path, input.testGlobs);
+    if (from !== to) {
+      refused?.push({ bPath: e.b.path, cPath: e.c.path, from, to });
+      continue;
+    }
     const hunks = findLineMap(input.lineMaps, e.b.path, e.c.path)?.hunks ?? [];
     pairs.push({ b, c, hunks });
   }
@@ -250,19 +288,19 @@ class Matcher {
     }
   }
 
-  private nameIndex(us: readonly Unit[], side: "B" | "C", allowAnonymous: boolean): Map<string, Unit[]> {
+  private nameIndex(us: readonly Unit[], side: "B" | "C"): Map<string, Unit[]> {
     const m = new Map<string, Unit[]>();
     for (const u of us) {
       if (this.unavailable(u, side)) continue;
-      const name = u.name === ANONYMOUS && allowAnonymous ? ANONYMOUS : this.trustedName(u);
+      const name = this.trustedName(u);
       if (name !== undefined) push(m, `${name}\u0000${u.kind}`, u);
     }
     return m;
   }
 
   private stageUniqueName(bs: readonly Unit[], cs: readonly Unit[]): void {
-    const bIdx = this.nameIndex(bs, "B", false);
-    const cIdx = this.nameIndex(cs, "C", false);
+    const bIdx = this.nameIndex(bs, "B");
+    const cIdx = this.nameIndex(cs, "C");
     for (const [k, bList] of bIdx) {
       const cList = cIdx.get(k);
       if (bList.length === 1 && cList?.length === 1) this.add(bList[0]!, cList[0]!, 3);
@@ -270,14 +308,16 @@ class Matcher {
   }
 
   /**
-   * Ruling D21b: k ≥ 2 leftover siblings of one (name, kind) on both sides.
-   * Pair them by CogC descending; accept the whole group only when no C unit
-   * would exceed max(T, its paired B), so the guess can never raise a limit
-   * above what some B unit already had. Every pair is identity-changed.
+   * Ruling D21b: k ≥ 2 leftover named siblings of one (name, kind) on both
+   * sides. Pair them by CogC descending; accept the whole group only when no
+   * C unit would exceed max(T, its paired B), so the guess can never raise a
+   * limit above what some B unit already had. Every pair is identity-changed.
+   * Anonymous units stay out (spec 5.4 step 3): a new callback could
+   * otherwise inherit a legacy callback's allowance.
    */
   private stageKToK(bs: readonly Unit[], cs: readonly Unit[]): void {
-    const bIdx = this.nameIndex(bs, "B", true);
-    const cIdx = this.nameIndex(cs, "C", true);
+    const bIdx = this.nameIndex(bs, "B");
+    const cIdx = this.nameIndex(cs, "C");
     const byCog = (x: Unit, y: Unit) => y.cognitive - x.cognitive || x.line - y.line;
     for (const [k, bList] of bIdx) {
       const cList = cIdx.get(k);
@@ -289,13 +329,34 @@ class Matcher {
     }
   }
 
-  /** Stage 4: verbatim move anywhere in the PR, unique PR-wide. */
+  /**
+   * Stage 4: verbatim move anywhere in the PR, unique PR-wide. A move across
+   * the test/product boundary is refused and reported instead.
+   */
   matchVerbatimMoves(
     bUnits: readonly Unit[],
     cUnits: readonly Unit[],
-    sourcesB?: ReadonlyMap<string, string>,
-    sourcesC?: ReadonlyMap<string, string>,
+    input: Pick<MatchInput, "sourcesB" | "sourcesC" | "testGlobs">,
+    refused: ScopeChange[],
   ): void {
+    for (const [b, c] of this.verbatimCandidates(bUnits, cUnits)) {
+      if (this.unavailable(b, "B") || this.unavailable(c, "C")) continue;
+      const from = scopeOf(b.path, input.testGlobs);
+      const to = scopeOf(c.path, input.testGlobs);
+      if (from !== to) {
+        refused.push({ bPath: b.path, cPath: c.path, from, to, bKey: b.key, cKey: c.key });
+        continue;
+      }
+      // Equal scores are not equal logic (audit F4): without proof, S5 reviews it.
+      const srcB = input.sourcesB?.get(b.path);
+      const srcC = input.sourcesC?.get(c.path);
+      const verbatim = srcB !== undefined && srcC !== undefined && unitBodyText(srcB, b) === unitBodyText(srcC, c);
+      this.pairTree(b, c, !verbatim);
+    }
+  }
+
+  /** Unmatched B/C units with a PR-wide unique (name, shape) on both sides. */
+  verbatimCandidates(bUnits: readonly Unit[], cUnits: readonly Unit[]): Array<[Unit, Unit]> {
     const pool = (us: readonly Unit[], side: "B" | "C") => {
       const m = new Map<string, Unit[]>();
       for (const u of us) {
@@ -307,17 +368,12 @@ class Matcher {
     };
     const bPool = pool(bUnits, "B");
     const cPool = pool(cUnits, "C");
+    const out: Array<[Unit, Unit]> = [];
     for (const [k, bList] of bPool) {
       const cList = cPool.get(k);
-      if (bList.length !== 1 || cList?.length !== 1) continue;
-      const [b, c] = [bList[0]!, cList[0]!];
-      if (this.unavailable(b, "B") || this.unavailable(c, "C")) continue;
-      // Equal scores are not equal logic (audit F4): without proof, S5 reviews it.
-      const srcB = sourcesB?.get(b.path);
-      const srcC = sourcesC?.get(c.path);
-      const verbatim = srcB !== undefined && srcC !== undefined && unitBodyText(srcB, b) === unitBodyText(srcC, c);
-      this.pairTree(b, c, !verbatim);
+      if (bList.length === 1 && cList?.length === 1) out.push([bList[0]!, cList[0]!]);
     }
+    return out;
   }
 
   /** Identical shapes: pair the trees node by node. */
@@ -336,19 +392,8 @@ function shape(u: Unit): string {
   return `${u.kind}:${u.cognitive}:${u.cyclomatic}(${u.children.map(shape).join(",")})`;
 }
 
-export function matchUnits(input: MatchInput): MatchResult {
-  const dupB = duplicateKeySet(input.b.values());
-  const dupC = duplicateKeySet(input.c.values());
-  const m = new Matcher(dupB, dupC, input.limit ?? 15);
-  for (const pair of filePairs(input)) {
-    if (!dupB.has(pair.b.residue.key) && !dupC.has(pair.c.residue.key)) {
-      m.add(pair.b.residue, pair.c.residue, 1);
-    }
-    if (input.normalizedIdentical?.has(pair.c.path) && m.matchIdentical(pair)) continue;
-    m.matchSiblings(pair.b.units, pair.c.units, pair.hunks);
-  }
-
-  // Stage 4 sees every measured B and C unit of the PR except files with no baseline.
+/** Every measured B and C unit of the PR, except files with no baseline. */
+function prUnits(input: PairInput): { bUnits: Unit[]; cUnits: Unit[] } {
   const bUnits: Unit[] = [];
   const cUnits: Unit[] = [];
   const missingB = new Set<string>();
@@ -365,7 +410,24 @@ export function matchUnits(input: MatchInput): MatchResult {
       if (f) cUnits.push(...flattenUnits(f.units));
     }
   }
-  m.matchVerbatimMoves(bUnits, cUnits, input.sourcesB, input.sourcesC);
+  return { bUnits, cUnits };
+}
+
+export function matchUnits(input: MatchInput): MatchResult {
+  const dupB = duplicateKeySet(input.b.values());
+  const dupC = duplicateKeySet(input.c.values());
+  const m = new Matcher(dupB, dupC, input.limit ?? 15);
+  const scopeChanges: ScopeChange[] = [];
+  for (const pair of filePairs(input, scopeChanges)) {
+    if (!dupB.has(pair.b.residue.key) && !dupC.has(pair.c.residue.key)) {
+      m.add(pair.b.residue, pair.c.residue, 1);
+    }
+    if (input.normalizedIdentical?.has(pair.c.path) && m.matchIdentical(pair)) continue;
+    m.matchSiblings(pair.b.units, pair.c.units, pair.hunks);
+  }
+
+  const { bUnits, cUnits } = prUnits(input);
+  m.matchVerbatimMoves(bUnits, cUnits, input, scopeChanges);
 
   return {
     matches: m.matches,
@@ -373,5 +435,25 @@ export function matchUnits(input: MatchInput): MatchResult {
     byB: m.byB,
     nameWarnings: m.nameWarnings,
     duplicateKeys: [...new Set([...dupB, ...dupC])].sort(),
+    scopeChanges,
   };
+}
+
+/**
+ * Re-derives the scope changes from a finished match (for a caller that has
+ * the policy but not the matcher's result): refused file pairs plus verbatim
+ * moves between a deleted product unit and an added test unit or vice versa.
+ */
+export function scopeChangesOf(input: PairInput, matches: readonly UnitMatch[]): ScopeChange[] {
+  const refused: ScopeChange[] = [];
+  filePairs(input, refused);
+  const m = new Matcher(new Set(), new Set(), 15);
+  for (const x of matches) m.matches.push(x), m.byB.set(x.bKey, x), m.byC.set(x.cKey, x);
+  const { bUnits, cUnits } = prUnits(input);
+  for (const [b, c] of m.verbatimCandidates(bUnits, cUnits)) {
+    const from = scopeOf(b.path, input.testGlobs);
+    const to = scopeOf(c.path, input.testGlobs);
+    if (from !== to) refused.push({ bPath: b.path, cPath: c.path, from, to, bKey: b.key, cKey: c.key });
+  }
+  return refused;
 }

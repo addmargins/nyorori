@@ -3,8 +3,9 @@
 // mismatch with the policy makes the run INCONCLUSIVE before anything is measured.
 
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { Policy } from "../policy/schema.js";
 import type { Inconclusive, MeasurementFingerprint } from "../types.js";
 
@@ -34,6 +35,28 @@ export interface MeasurerIdentity {
 export async function identifyMeasurer(binary: string): Promise<MeasurerIdentity> {
   const [sha256, version] = await Promise.all([sha256File(binary), probeVersion(binary)]);
   return { sha256, version };
+}
+
+export interface PinnedMeasurer extends MeasurerIdentity {
+  /** The private copy every run executes. */
+  path: string;
+}
+
+/**
+ * Reads the configured binary once, hashes those bytes and writes them to a
+ * fresh read-only file under `dir`. Every later execution (the `--version`
+ * probe included) uses that copy, so the hash in the fingerprint is the hash of
+ * the bytes that actually ran: nothing can swap the configured path between
+ * hashing and running. The copy lives and dies with the work directory.
+ */
+export async function pinMeasurer(binary: string, dir: string): Promise<PinnedMeasurer> {
+  const bytes = await readFile(binary);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  await mkdir(dir, { recursive: true });
+  const path = join(dir, `cccc-${randomBytes(8).toString("hex")}`);
+  await writeFile(path, bytes, { mode: 0o500, flag: "wx" });
+  const version = await probeVersion(path);
+  return { path, sha256, version };
 }
 
 /** Policy sections whose mode is not plain observation. */

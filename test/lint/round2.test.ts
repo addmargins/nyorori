@@ -68,6 +68,37 @@ describe("audit F7: dynamic-code gaps", () => {
     expect(await idsOf(code)).toContain(`${DYN}:${messageId}`);
   });
 
+  it.each([
+    ["alias then call", `function g() {}\nconst F = g.constructor;\nexport const price = F("o", "return o.total * 2");`],
+    [".constructor.call", `function g() {}\nexport const price = g.constructor.call(null, "o", "return o.total * 2");`],
+    [".constructor.bind", `function g() {}\nexport const price = g.constructor.bind(null)("o", "return 1");`],
+    ["Reflect.apply", `function g() {}\nexport const price = Reflect.apply(g.constructor, null, ["o", "return 1"]);`],
+    ["array index", `function g() {}\nexport const price = [g.constructor][0]("o", "return 1");`],
+    ["object literal", `function g() {}\nconst t = { F: g.constructor };\nexport const price = t.F("o", "return 1");`],
+    ["param constructor", `export function mk(fn: Function) { const F = fn.constructor; return F("o", "return 1"); }`],
+    ["returned", `function g() {}\nexport function mk() { return g.constructor; }`],
+    ["template key", "function g() {}\nexport const price = g[`constructor`](\"o\", \"return 1\");"],
+    ["computed const key, escaping", `function g() {}\nconst k = "constr" + "uctor";\nconst F = g[k];\nexport const price = F("o", "return 1");`],
+    ["optional chain", `declare const g: any;\nexport const F = g?.constructor;`],
+    ["conditional", `declare const g: any; declare const h: any;\nexport const F = (g ? g.constructor : h.constructor);`],
+  ])("constructor value escape: %s", async (_name, code) => {
+    expect(await idsOf(code)).toContain(`${DYN}:constructor`);
+  });
+
+  it.each([
+    ["name read", `export function tag(x: object) { return x.constructor.name; }`],
+    ["equality", `export const same = (x: object, Y: unknown) => x.constructor === Y;`],
+    ["typeof", `export const t = (x: object) => typeof x.constructor;`],
+    ["if test", `export const f = (x: any) => { if (x.constructor) return 1; return 0; }`],
+    ["instanceof right", `declare const x: any;\nexport const i = (y: object) => y instanceof x.constructor;`],
+    ["prototype wiring write", `function Base() {}\nfunction Child() {}\nChild.prototype = Object.create(Base.prototype);\nChild.prototype.constructor = Child;`],
+    ["this.constructor clone", `export class A { clone() { return new (this as any).constructor(); } }`],
+    ["property key string", `export const keys = { constructor: 1 };\nexport const has = (o: object) => "constructor" in o;`],
+    ["negation", `export const none = (x: any) => !x.constructor;`],
+  ])("constructor stays clean: %s", async (_name, code) => {
+    expect((await idsOf(code)).filter((h) => h.startsWith(DYN))).toEqual([]);
+  });
+
   it("every function of the audit repro is blocked", async () => {
     const repro = [
       `export function a(code: string) { const vm = require("v" + "m"); return vm.runInThisContext(code); }`,
