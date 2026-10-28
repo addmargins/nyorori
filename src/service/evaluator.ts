@@ -55,9 +55,11 @@ export class CommentHeadStore {
   }
 }
 
+/** Roster entries `@org/team`; rosters are keyed `org/team` (see inRoster). */
 function teamsIn(policy: Policy): string[] {
   const r = policy.review;
-  return [...new Set([...r.simplification_reviewers, ...r.waiver_approvers, ...r.gate_owners].filter((x) => x.includes("/")))];
+  const all = [...r.simplification_reviewers, ...r.waiver_approvers, ...r.gate_owners];
+  return [...new Set(all.filter((x) => x.startsWith("@") && x.includes("/")).map((x) => x.slice(1)))];
 }
 
 async function pullRequestContext(cfg: ServiceConfig, ctx: EvaluationContext, store: CommentHeadStore): Promise<{ pr: PullRequestContext; head: string } | undefined> {

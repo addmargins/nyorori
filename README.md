@@ -1,0 +1,139 @@
+# nyorori
+
+AI가 만든 코드(와 사람이 만든 코드)의 PR 병합을 판정하는 **품질 게이트 묶음**이다. 원칙은 하나다.
+
+> 리뷰어가 "단순하게 바꿔 달라"고 요청할 만한 변경은 병합하지 않는다.
+
+이 판단은 수치 하나로 대신할 수 없으므로 두 층으로 나눈다.
+
+- **기계적 차단(FAIL)**: 거의 모든 리뷰어가 단순화를 요구할 사례, 그리고 측정·테스트·설정이 약화된 사례를 결정론적으로 막는다.
+- **리뷰 라우팅(트리거)**: 수치로는 판별할 수 없지만 의심스러운 *모양*(복잡도 재분배, 분기 은닉, 레거시 핫스팟 수정, 측정하지 못한 코드)을 감지하면 사람의 단순화 리뷰(G6)를 필수로 만든다.
+
+복잡도 측정기는 [`moznion/cccc`](https://github.com/moznion/cccc) v1.8.5(commit `af2abb8f5`)이며, 정확한 바이너리를 sha256으로 고정한다. 설계 근거는 [`docs/SPEC.md`](docs/SPEC.md)(기획서 v0.9), 운영 방법은 [`docs/operations.md`](docs/operations.md)에 있다.
+
+## Gates
+
+| # | 체크 | 책임 | 실행 위치 | v1 기본 모드 |
+|---|---|---|---|---|
+| G1 | `gate/complexity` | 변경 단위의 Cognitive Complexity, B 대비 C (신규 ≤ 15, 기존 ≤ max(15, B)) | 게이트 서비스 | enforce |
+| G2 | `gate/lint-structure` | Function 생성자 계열, `max-params` 4, `max-nested-callbacks` 3, bidi 문자, 억제 주석 추가. 분기 은닉·긴 함수는 트리거 | 게이트 서비스 | enforce |
+| G3 | `gate/deps` | 새 런타임 순환 의존(차단), 금지 레이어 간선(P2부터), fan-out 트리거 | 게이트 서비스 | enforce |
+| G4 | `gate/tests` | 테스트 통과·1개 이상 실행, 테스트 삭제·`.only`/`.skip`·assertion 없는 테스트·설정 약화 | 서비스(정적 검사) + Actions 산출물 | enforce |
+| G5 | `gate/coverage` | 실행되지 않은 변경 분기 결과 | Actions 산출물 | observe |
+| G6 | `gate/simplification-review` | 라우팅 트리거가 발화하면 독립 리뷰어의 승인 필수 | 게이트 서비스 | enforce |
+| G7 | `gate/mutation` | 변경 행의 살아남은 변이 | Actions 산출물 | observe |
+| — | `quality-gate` | 집계. **유일한 필수 체크** | 게이트 서비스 | — |
+
+판정 상태와 종료 코드:
+
+| 상태 | 의미 | 종료 코드 | check 결론 |
+|---|---|---|---|
+| `PASS` | 측정이 완전하고 정책을 충족 | 0 | success |
+| `NOT_APPLICABLE` | 범위 안의 변경 없음 | 0 | success ("N/A") |
+| `ACCEPTED_WITH_WAIVER` | 모든 FAIL이 유효한 waiver로 덮임 | 0 | success |
+| `FAIL` | 작성자가 고칠 수 있는 정책 위반 | 1 | failure |
+| `INCONCLUSIVE` | 측정을 신뢰할 수 없음 (**절대 통과가 아님**) | 2 | failure |
+| (사용법 오류) | CLI 인자 오류 | 64 | — |
+
+집계 우선순위는 `FAIL` > `INCONCLUSIVE` > `ACCEPTED_WITH_WAIVER` > `PASS` > `NOT_APPLICABLE`이다. `neutral`·`skipped`는 쓰지 않는다(GitHub는 필수 체크의 두 결론을 통과로 취급한다).
+
+## Architecture
+
+```
+            B(병합 기준) · C(병합 후보) · P(신뢰 정책 JSON) · M(cccc sha256 + 인자 + runner)
+                                   │
+ ┌──────────── gate service (PR 코드를 실행하지 않음, App 키 보유) ────────────┐
+ │ git/manifest   git diff --name-status -M -C, ls-tree → 분류·범위·문제        │
+ │ git/tree       cat-file --batch로 blob에서 직접 트리 (.gitattributes 무력화)   │
+ │ git/linemap    blob↔blob diff -U0 → hunk                                       │
+ │ measure        cccc --no-config --no-cache, 검증 9항목, 결정론 표본, 소실 검사 │
+ │ units          단위 트리·residue·포함 CogC, 4단계 대응("확실하지 않으면 신규") │
+ │ gates/complexity  G1 판정 + S1 S2 S5 S8 S9 S10 S11                             │
+ │ gates/lint        G2 (P의 ESLint 설정, --no-inline-config) + S4 S9 S10         │
+ │ gates/deps        G3 (전체 트리 모듈 그래프, 새 순환 간선)                     │
+ │ gates/tests       G4 정적 무결성 (blob) + 산출물의 테스트 결과                 │
+ │ gates/coverage    G5,  gates/mutation  G7                                      │
+ │ override · waivers · review(G6) · ailoop(12.2) → aggregate → quality-gate     │
+ └──────────────────────────────────────┬─────────────────────────────────────────┘
+                                        │ 산출물 + GitHub API로 확인한 provenance
+ ┌──── Actions: gate-untrusted-tests.yml (PR 코드 실행, contents: read, 시크릿 없음) ┐
+ │ B·C 테스트(JSON 리포터), 변경 파일 커버리지, (선택) Stryker                        │
+ └──────────────────────────────────────────────────────────────────────────────────┘
+```
+
+코드 구조: `src/pipeline/run.ts`의 `runGates()`가 한 번의 (B, C, P, M) 판정 전체를 조립한다. CLI와 서비스, e2e 테스트가 모두 같은 함수를 쓴다.
+
+## Quick start
+
+```bash
+scripts/fetch-cccc.sh            # 릴리스 자산 + attestation 검증, 실패 시 소스 빌드. sha256 출력
+```
+
+```bash
+npm ci
+```
+
+```bash
+npm run build
+```
+
+```bash
+node dist/cli.js run --repo . --base origin/main --candidate HEAD \
+  --policy policy/default.policy.json --cccc .nyorori-work/cccc-v1.8.5/cccc --out gate-out
+```
+
+`--out` 디렉터리에는 `manifest.json`, cccc 원본 `raw.B.json`/`raw.C.json`과 stderr, 게이트별 `gate-result.<gate>.json`, 집계 `quality-gate.json`, 사람이 읽는 `gate-summary.md`, AI 수정 루프용 `gate-feedback.json`이 생긴다.
+
+로컬 실행에는 다음 옵션을 더 쓸 수 있다.
+
+- `--artifacts <dir>`: required workflow 산출물과 같은 구조(`tests.C.json`, `tests.B.json`, `coverage/coverage-final.json`, `coverage-meta.json`, `mutation.json`, `metadata.json`). `provenance.json`이 없으면 산출물은 게이트를 **통과시키지 못한다**(차단만 가능).
+- `--pr <pr.json>`: `{ comments, identity, teams, headSha, carryOver, quarterWaiversUsed }`. waiver·단순화 리뷰·override 명령을 재현할 때 쓴다.
+- `policy/default.policy.json`은 tests를 enforce로 두므로 산출물 없이 코드 변경을 판정하면 INCONCLUSIVE다. 산출물 없이 G1~G3만 보려면 정책에서 `tests.mode`와 `coverage.mode`를 `observe`로 둔다.
+
+측정기 업그레이드 검사(spec 6.1):
+
+```bash
+node dist/cli.js fixtures --cccc /path/to/new/cccc
+```
+
+spec 3.3의 구문별 계산 규칙 픽스처(`test/fixtures/cccc-rules`)를 새 바이너리로 재생해 점수 차이를 모두 출력하고, 하나라도 다르면 1로 끝난다.
+
+## Deploying the gate service
+
+1. GitHub App을 만든다. 권한은 Checks: write, Contents: read, Pull requests: read, Issues: read, Actions: read, Members: read(org)이고, 이벤트는 `pull_request`, `merge_group`, `issue_comment`를 구독한다.
+2. 게이트 저장소의 commit을 조직 ruleset의 "Require workflows to pass before merging"으로 붙인다. 대상은 `.github/workflows/gate-untrusted-tests.yml`이고, 그 저장소·경로·SHA를 정책 `provenance.trusted_workflows`에 넣는다.
+3. 대상 저장소의 필수 체크는 `quality-gate` 하나만 두고, 예상 출처를 게이트 App으로 고정한다. merge queue를 켠다. 공식 판정은 `merge_group`이다.
+4. 서비스를 실행한다. App 키는 이 프로세스에만 둔다.
+
+```bash
+NYORORI_APP_ID=123 NYORORI_PRIVATE_KEY_PATH=/secrets/app.pem NYORORI_WEBHOOK_SECRET=... \
+NYORORI_POLICY=/etc/nyorori/policy.json NYORORI_CCCC=/opt/cccc/cccc NYORORI_WORKDIR=/var/lib/nyorori \
+NYORORI_RUNNER_COMMIT=$(git rev-parse HEAD) node dist/cli.js serve --port 8080
+```
+
+서비스는 웹훅 서명(`X-Hub-Signature-256`)을 확인한 뒤 판정한다. B와 C 객체는 `NYORORI_WORKDIR/mirrors`의 bare mirror로 가져온다. 이때 토큰은 `GIT_CONFIG_*` 환경 변수로만 전달하고 argv나 remote 설정에는 남기지 않는다. 결과는 App이 만든 check run으로만 게시하며, 다른 App이나 PR workflow가 같은 이름으로 올린 체크는 읽지도 갱신하지도 않는다.
+
+## Development
+
+```bash
+npm test                         # NYORORI_CCCC로 cccc 위치 지정 (기본 /home/user/moznion/cccc/target/release/cccc)
+```
+
+```bash
+npm run typecheck
+```
+
+- `test/fixtures/cccc-rules`: spec 3.3 구문별 기대값(측정기 업그레이드 검사)
+- `test/fixtures/manipulation`: spec 7.2 동작 보존 변환 17종과 `RESULTS.md`
+- `test/e2e`: 실제 git 저장소와 실제 cccc로 spec 14 시나리오를 끝까지 실행
+- `npm run gen:policy`: 스키마 기본값으로 `policy/default.policy.json` 재생성
+
+## Known limitations
+
+- **측정할 수 없는 영역은 사람 몫이다.** 정직한 분할과 형식적 분할, 데이터 표와 클로저 표, 과잉 추상화는 트리거로 G6에 보낼 뿐 기계가 판정하지 않는다. S1은 정직한 리팩터링에도 발화한다.
+- **신규 코드에는 S1·S9가 발화하지 않는다.** 두 트리거는 B에 집중된 원본이 있어야 비교할 수 있다. 처음부터 분기 은닉형으로 쓴 코드는 G2의 S9 선택자와 Function 생성자 차단에 의존한다.
+- **cccc의 계산 특성**(논리 할당 무비용, 콜백 비가산, 이름 기반 재귀)은 고정해도 사라지지 않는다. 이를 G2와 트리거로 보완한다.
+- **PR 코드를 실행해 얻은 증거(G4 테스트 결과, G5, G7)는 악의적인 PR이 위조할 수 있다**(spec 10.3). 이 게이트들은 최적화 압력을 막을 뿐이다.
+- 여러 PR에 나눈 조작을 잡는 이동 기준 비교(spec 7.5)와 override 시 ESLint `complexity` 대체 측정은 아직 구현하지 않았다.
+- 서비스는 issue comment가 게시된 시점의 head SHA를 "그 댓글로 처음 판정한 head"로 기록한다(`comment-heads.json`). 댓글과 push가 경합하면 승인이 stale로 처리된다(안전한 방향).
+- `scripts/fetch-cccc.sh`의 릴리스 다운로드 경로와 워크플로 템플릿의 action SHA는 실제 환경에서 검증해야 한다.

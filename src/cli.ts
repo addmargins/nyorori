@@ -200,8 +200,9 @@ export async function main(argv: string[]): Promise<number> {
         throw new UsageError(cmd ? `unknown command ${cmd}` : "missing command");
     }
   } catch (e) {
-    const usage = e instanceof UsageError || (e as { code?: string }).code?.startsWith("ERR_PARSE_ARGS");
-    process.stderr.write(`nyorori: ${(e as Error).message}\n${usage ? USAGE + "\n" : ""}`);
+    const code = (e as { code?: unknown }).code;
+    const usage = e instanceof UsageError || (typeof code === "string" && code.startsWith("ERR_PARSE_ARGS"));
+    process.stderr.write(`nyorori: ${e instanceof Error ? e.message : String(e)}\n${usage ? USAGE + "\n" : ""}`);
     // Anything that is not a usage error is a gate that could not run: never a pass.
     return usage ? EXIT_USAGE : EXIT_CODE.INCONCLUSIVE;
   }
@@ -211,7 +212,13 @@ export async function main(argv: string[]): Promise<number> {
 const invokedDirectly =
   process.argv[1] !== undefined && realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url));
 if (invokedDirectly) {
-  main(process.argv.slice(2)).then((code) => {
-    process.exitCode = code;
-  });
+  main(process.argv.slice(2)).then(
+    (code) => {
+      process.exitCode = code;
+    },
+    (e: unknown) => {
+      process.stderr.write(`nyorori: ${String(e)}\n`);
+      process.exitCode = EXIT_CODE.INCONCLUSIVE;
+    },
+  );
 }

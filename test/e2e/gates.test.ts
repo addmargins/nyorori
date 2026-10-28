@@ -76,7 +76,9 @@ describe("G1 complexity end to end", () => {
   it(".gitattributes working-tree-encoding does not change measurement and routes S11 to review", async () => {
     const repo = new TestRepo();
     const b = repo.commit({ "src/a.js": fnWithCogc("a", 3) });
-    const c = repo.commit({ ".gitattributes": "*.js working-tree-encoding=UTF-16\n", "src/a.js": fnWithCogc("a", 16) });
+    repo.commit({ "src/a.js": fnWithCogc("a", 16) });
+    // With this attribute a checkout re-encodes every .js file to UTF-16 and cccc skips them all.
+    const c = repo.commit({ ".gitattributes": "*.js working-tree-encoding=UTF-16\n" });
     const out = await run(repo, b, c, servicePolicy());
     expect(reasons(out, "complexity")).toEqual(["OVER_LIMIT"]);
     expect(triggerIds(out)).toContain("S11");
@@ -97,7 +99,7 @@ describe("G1 complexity end to end", () => {
 
   it("a candidate syntax error is INCONCLUSIVE, never a pass, and its check fails", async () => {
     const repo = new TestRepo();
-    const b = repo.commit({ "src/a.ts": fnWithCogc("a", 3) });
+    const b = repo.commit({ "README.md": "x\n" });
     const c = repo.commit({ "src/a.ts": `${fnWithCogc("a", 30)}\nfunction broken( {\n` });
     const out = await run(repo, b, c, servicePolicy());
     expect(gate(out, "complexity").state).toBe("INCONCLUSIVE");
@@ -105,6 +107,18 @@ describe("G1 complexity end to end", () => {
     expect(out.verdict.state).toBe("INCONCLUSIVE");
     expect(out.checkRun.conclusion).toBe("failure");
     expect(out.checkRun.title).toMatch(/^INCONCLUSIVE/);
+    repo.dispose();
+  });
+
+  it("a syntax error that swallows named legacy units also routes S11, and FAIL outranks INCONCLUSIVE", async () => {
+    const repo = new TestRepo();
+    const b = repo.commit({ "src/a.ts": fnWithCogc("a", 3) });
+    const c = repo.commit({ "src/a.ts": `${fnWithCogc("a", 30)}\nfunction broken( {\n` });
+    const out = await run(repo, b, c, servicePolicy());
+    expect(gate(out, "complexity").state).toBe("INCONCLUSIVE");
+    expect(triggerIds(out)).toContain("S11");
+    expect(out.verdict.state).toBe("FAIL");
+    expect(out.verdict.mergeAllowed).toBe(false);
     repo.dispose();
   });
 
