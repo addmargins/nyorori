@@ -10,8 +10,11 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import type { ArtifactProvenance } from "./aggregate/index.js";
 import { checkCalculationRules } from "./fixtures/rules.js";
+import { runGatesIsolated } from "./pipeline/isolated.js";
+import { assertToolsOutsideRepo, RepoPathError } from "./pipeline/paths.js";
 import { runGates } from "./pipeline/run.js";
-import type { Artifacts, PullRequestContext, RunGatesOutput } from "./pipeline/types.js";
+import { replayCommand } from "./replay/cli.js";
+import type { Artifacts, PullRequestContext, RunGatesOptions, RunGatesOutput } from "./pipeline/types.js";
 import { loadPolicy } from "./policy/load.js";
 import { dispatchEvent } from "./service/handlers.js";
 import { createServiceEvaluator } from "./service/evaluator.js";
@@ -31,7 +34,12 @@ const USAGE = `usage:
   nyorori run --repo <dir> --base <rev> --candidate <rev> --policy <file.json>
               [--cccc <bin>] [--out <dir>] [--artifacts <dir>] [--pr <pr.json>]
               [--comments <comments.json>] [--policy-revision <rev>] [--runner-commit <sha>]
+              [--in-process] [--allow-repo-paths]
+      The policy, measurer, outputs and artifacts must live outside --repo (spec 10.2);
+      --allow-repo-paths lifts that for fixtures. Local results carry authority "local":
+      they are not merge approvals.
   nyorori fixtures [--cccc <bin>] [--dir <fixtures dir>]
+  nyorori replay --repo <dir> --pairs <pairs.json> --policy <file.json> --out <dir> [...]  (see: nyorori replay --help)
   nyorori serve [--port <n>]   (env: NYORORI_APP_ID, NYORORI_PRIVATE_KEY_PATH,
                                 NYORORI_WEBHOOK_SECRET, NYORORI_POLICY, NYORORI_CCCC, NYORORI_WORKDIR,
                                 NYORORI_LEDGER)
@@ -116,9 +124,29 @@ async function cmdRun(argv: string[]): Promise<number> {
       "policy-revision": { type: "string" },
       "runner-commit": { type: "string" },
       workdir: { type: "string" },
+      "in-process": { type: "boolean", default: false },
+      "allow-repo-paths": { type: "boolean", default: false },
     },
     strict: true,
   });
+  const repoDir = resolve(required(values, "repo"));
+  const ccccBinary = ccccFrom(values.cccc);
+  const workDir = values.workdir ?? join(tmpdir(), "nyorori");
+  if (!values["allow-repo-paths"]) {
+    const items = [
+      { label: "policy", path: required(values, "policy") },
+      { label: "cccc binary", path: ccccBinary },
+      { label: "work dir", path: workDir },
+      ...(values.out ? [{ label: "--out", path: values.out }] : []),
+      ...(values.artifacts ? [{ label: "--artifacts", path: values.artifacts }] : []),
+    ];
+    try {
+      await assertToolsOutsideRepo(repoDir, items);
+    } catch (e) {
+      if (e instanceof RepoPathError) throw new UsageError(e.message);
+      throw e;
+    }
+  }
   const loaded = await loadPolicy(required(values, "policy"), values["policy-revision"] ? { revision: values["policy-revision"] } : {});
   const pr = values.pr ? await readJson<PullRequestContext>(values.pr) : undefined;
   const comments = values.comments ? await readJson<PullRequestContext["comments"]>(values.comments) : undefined;
@@ -126,18 +154,22 @@ async function cmdRun(argv: string[]): Promise<number> {
     pr || comments
       ? { ...(pr ?? { comments: [], identity: { prAuthor: "", commits: [], agentInvokers: [] } }), ...(comments ? { comments } : {}) }
       : undefined;
-  const out = await runGates({
-    repoDir: resolve(required(values, "repo")),
+  const options: RunGatesOptions = {
+    repoDir,
     base: required(values, "base"),
     candidate: required(values, "candidate"),
     policy: loaded.policy,
     policyRevision: loaded.revision,
-    ccccBinary: ccccFrom(values.cccc),
-    workDir: values.workdir ?? join(tmpdir(), "nyorori"),
+    ccccBinary,
+    workDir,
     runnerCommit: values["runner-commit"] ?? process.env.NYORORI_RUNNER_COMMIT ?? "local",
+    authority: "local",
+    allowRepoPaths: values["allow-repo-paths"],
     ...(values.artifacts ? { artifacts: await loadArtifacts(values.artifacts) } : {}),
     ...(prContext ? { pr: prContext } : {}),
-  });
+  };
+  // The isolated worker is the production path; --in-process keeps stack traces for debugging.
+  const out = values["in-process"] ? await runGates(options) : await runGatesIsolated(options);
   if (values.out) await writeOutputs(values.out, out);
   process.stdout.write(out.summaryMarkdown + "\n");
   return EXIT_CODE[out.verdict.state];
@@ -166,7 +198,19 @@ async function cmdServe(argv: string[]): Promise<number> {
   const api = new GitHubApi({ appId, privateKeyPem: await readFile(env("NYORORI_PRIVATE_KEY_PATH"), "utf8") });
   const log = (msg: string, extra?: Record<string, unknown>) => process.stderr.write(`${JSON.stringify({ msg, ...extra })}\n`);
   const workDir = process.env.NYORORI_WORKDIR ?? join(tmpdir(), "nyorori-service");
-  const ledger = new FileLedgerStore(process.env.NYORORI_LEDGER ?? join(workDir, "waivers.jsonl"));
+  const ledgerPath = process.env.NYORORI_LEDGER ?? join(workDir, "waivers.jsonl");
+  // Mirrors of judged repositories live under the work dir; nothing the gate trusts may sit in one.
+  try {
+    await assertToolsOutsideRepo(join(workDir, "mirrors"), [
+      { label: "policy", path: env("NYORORI_POLICY") },
+      { label: "cccc binary", path: env("NYORORI_CCCC") },
+      { label: "ledger", path: ledgerPath },
+    ]);
+  } catch (e) {
+    if (e instanceof RepoPathError) throw new UsageError(e.message);
+    throw e;
+  }
+  const ledger = new FileLedgerStore(ledgerPath);
   const verdicts = new VerdictStore(join(workDir, "verdicts"));
   const issued = new IssuedDebtStore(join(workDir, "debt-issues.json"));
   const evaluate = createServiceEvaluator({
@@ -203,6 +247,8 @@ export async function main(argv: string[]): Promise<number> {
         return await cmdRun(rest);
       case "fixtures":
         return await cmdFixtures(rest);
+      case "replay":
+        return await replayCommand(rest);
       case "serve":
         return await cmdServe(rest);
       case "-h":

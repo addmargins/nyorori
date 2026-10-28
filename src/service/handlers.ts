@@ -8,6 +8,7 @@ import { QUALITY_GATE_CHECK, type QualityGateVerdict } from "../aggregate/types.
 import { toCheckRun, verdictToCheckRun, type CheckRunOutput } from "../report/checkrun.js";
 import { hasGateCommand } from "../waivers/command.js";
 import type { CheckRunRecord, GitHubClient, RepoRef } from "./client.js";
+import type { JobJournal } from "./journal.js";
 import type { MergedPullRequest } from "./merge.js";
 
 export interface EvaluationContext {
@@ -20,11 +21,15 @@ export interface EvaluationContext {
   candidate: string;
   /** Commit the check runs are attached to. */
   checkSha: string;
+  /** Webhook delivery that caused this evaluation, for the job journal. */
+  deliveryId?: string;
 }
 
 export interface Evaluation {
   verdict: QualityGateVerdict;
   results: GateResult[];
+  /** Called once the verdict's check run is published (e.g. to store it for the merge event). */
+  onPublished?: () => Promise<void>;
 }
 
 export interface ServiceDeps {
@@ -38,6 +43,10 @@ export interface ServiceDeps {
   queue?: EvaluationQueue;
   /** Called once a PR is merged (pull_request closed + merged), e.g. to record its waivers. */
   onMerged?: (m: MergedPullRequest) => Promise<void>;
+  /** Durable job records; replayed on startup by `replayPendingJobs`. */
+  journal?: JobJournal;
+  /** Injectable for tests; defaults to a real timer. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -49,6 +58,8 @@ export interface ServiceDeps {
 export class EvaluationQueue {
   private readonly gens = new Map<string, { gen: number; externalId: string }>();
   private readonly tails = new Map<string, Promise<unknown>>();
+  /** Last published check outputs per key, so a yielding evaluation can re-assert them. */
+  readonly published = new Map<string, { externalId: string; checks: CheckRunOutput[] }>();
 
   begin(key: string, externalId: string): number {
     const gen = (this.gens.get(key)?.gen ?? 0) + 1;
@@ -93,6 +104,11 @@ export function ownCheckRuns(runs: readonly CheckRunRecord[], appId: number, nam
 /** One check run per (B, C, P): concurrent evaluations of the same head never write each other's runs. */
 export function checkExternalId(ctx: Pick<EvaluationContext, "base" | "candidate">, policyRevision: string | undefined): string {
   return `${ctx.base}:${ctx.candidate}:${policyRevision ?? "-"}`;
+}
+
+async function journal(deps: ServiceDeps, ctx: EvaluationContext, status: "running" | "done" | "superseded" | "failed", note?: string): Promise<void> {
+  if (!deps.journal || !ctx.deliveryId) return;
+  await deps.journal.update(`${ctx.repo.owner}/${ctx.repo.repo}`, ctx.deliveryId, status, note).catch((e) => deps.log?.("journal write failed", { error: String(e) }));
 }
 
 async function upsertCheck(deps: ServiceDeps, ctx: EvaluationContext, out: CheckRunOutput, status: "in_progress" | "completed"): Promise<void> {
@@ -151,36 +167,64 @@ async function evaluateAndPublish(
   ext: string,
 ): Promise<Evaluation | null> {
   // A newer evaluation owns the check. If it publishes under another external
-  // id, close ours; if it shares ours, it will complete the same run.
+  // id, close ours. If it shares ours and has already published, our later
+  // in_progress upsert may have reopened the run: re-assert what it published,
+  // so no run is left pending with nobody left to complete it.
   const yieldToNewer = async () => {
-    if (queue.latestExternalId(key) !== ext) await upsertCheck(deps, ctx, SUPERSEDED(ctx), "completed");
+    const latest = queue.latestExternalId(key);
+    if (latest !== ext) {
+      await upsertCheck(deps, ctx, SUPERSEDED(ctx), "completed");
+    } else {
+      const last = queue.published.get(key);
+      if (last && last.externalId === ext) for (const c of last.checks) await upsertCheck(deps, ctx, c, "completed");
+    }
+    await journal(deps, ctx, "superseded");
     return null;
   };
   if (!queue.isLatest(key, gen)) return yieldToNewer();
+  await journal(deps, ctx, "running");
   let evaluation: Evaluation;
   try {
     evaluation = await deps.evaluate(ctx);
   } catch (e) {
     deps.log?.("evaluation failed", { error: String(e), ...ctx });
     if (!queue.isLatest(key, gen)) return yieldToNewer();
-    await upsertCheck(deps, ctx, failingCheck("INCONCLUSIVE: TOOL_ERROR", `gate evaluation failed: ${String(e)}`), "completed");
+    const out = failingCheck("INCONCLUSIVE: TOOL_ERROR", `gate evaluation failed: ${String(e)}`);
+    await upsertCheck(deps, ctx, out, "completed");
+    queue.published.set(key, { externalId: ext, checks: [out] });
+    await journal(deps, ctx, "failed", String(e));
     return null;
   }
   if (!queue.isLatest(key, gen)) return yieldToNewer();
   if (evaluation.verdict.base_sha !== ctx.base || evaluation.verdict.candidate_sha !== ctx.candidate) {
-    await upsertCheck(deps, ctx, failingCheck("INCONCLUSIVE: FINGERPRINT_MISMATCH", "evaluation was computed for a different B/C"), "completed");
+    const out = failingCheck("INCONCLUSIVE: FINGERPRINT_MISMATCH", "evaluation was computed for a different B/C");
+    await upsertCheck(deps, ctx, out, "completed");
+    queue.published.set(key, { externalId: ext, checks: [out] });
+    await journal(deps, ctx, "failed", "fingerprint mismatch");
     return null;
   }
   if (!(await stillCurrent(deps, ctx))) {
     // The test merge moved; close ours without touching any other run.
     await upsertCheck(deps, ctx, SUPERSEDED(ctx), "completed");
+    await journal(deps, ctx, "superseded", "test merge moved");
     return null;
   }
-  for (const r of evaluation.results) await upsertCheck(deps, ctx, toCheckRun(r), "completed");
-  await upsertCheck(deps, ctx, toCheckRun(evaluation.verdict.review), "completed");
-  await upsertCheck(deps, ctx, verdictToCheckRun(evaluation.verdict, evaluation.results), "completed");
+  const checks = [
+    ...evaluation.results.map((r) => toCheckRun(r)),
+    toCheckRun(evaluation.verdict.review),
+    verdictToCheckRun(evaluation.verdict, evaluation.results),
+  ];
+  for (const c of checks) await upsertCheck(deps, ctx, c, "completed");
+  queue.published.set(key, { externalId: ext, checks });
+  await evaluation.onPublished?.().catch((e) => deps.log?.("onPublished failed", { error: String(e) }));
+  await journal(deps, ctx, "done");
   return evaluation;
 }
+
+/** Linear backoff 3 s → 10 s over five tries while GitHub computes the test merge. */
+export const TEST_MERGE_BACKOFF_MS: readonly number[] = [3000, 4750, 6500, 8250, 10000];
+
+const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 interface PullRequestPayload {
   action: string;
@@ -191,14 +235,14 @@ interface PullRequestPayload {
 const PR_ACTIONS = new Set(["opened", "synchronize", "reopened", "edited", "ready_for_review"]);
 
 /** Pre-check on `refs/pull/N/merge`: C is the test merge, B its first parent (spec 6.2). */
-export async function handlePullRequestEvent(deps: ServiceDeps, payload: PullRequestPayload): Promise<Evaluation | null> {
+export async function handlePullRequestEvent(deps: ServiceDeps, payload: PullRequestPayload, deliveryId?: string): Promise<Evaluation | null> {
   if (payload.action === "closed" && payload.pull_request.merged === true) {
     await handleMergedPullRequest(deps, payload);
     return null;
   }
   if (!PR_ACTIONS.has(payload.action) || payload.pull_request.state !== "open") return null;
   const repo = { owner: payload.repository.owner.login, repo: payload.repository.name };
-  return evaluatePullRequest(deps, repo, payload.pull_request.number, payload.pull_request.head.sha);
+  return evaluatePullRequest(deps, repo, payload.pull_request.number, payload.pull_request.head.sha, deliveryId);
 }
 
 /** Merge-time bookkeeping (waiver ledger, debt issues); evaluates nothing. */
@@ -209,20 +253,38 @@ async function handleMergedPullRequest(deps: ServiceDeps, payload: PullRequestPa
   await deps.onMerged({ repo, pr: payload.pull_request.number, headSha: payload.pull_request.head.sha, mergeCommit });
 }
 
-export async function evaluatePullRequest(deps: ServiceDeps, repo: RepoRef, prNumber: number, headSha: string): Promise<Evaluation | null> {
-  const merge = await deps.client.resolveRef(repo, `refs/pull/${prNumber}/merge`);
-  const pending: EvaluationContext = { repo, kind: "pull_request", prNumber, prHeadSha: headSha, base: "", candidate: merge ?? "", checkSha: headSha };
-  if (!merge) {
-    await upsertCheck(deps, pending, failingCheck("INCONCLUSIVE: no test merge", "refs/pull/N/merge is unavailable (merge conflict or not yet computed). Resolve conflicts with the base branch."), "completed");
-    return null;
+/**
+ * GitHub computes `refs/pull/N/merge` asynchronously and sends no event when
+ * it is ready, so a missing or stale test merge is polled with backoff while
+ * the check stays in_progress (spec 11.2: one automatic retry for transient
+ * causes). Only after the last try does the failing INCONCLUSIVE go out.
+ */
+export async function evaluatePullRequest(deps: ServiceDeps, repo: RepoRef, prNumber: number, headSha: string, deliveryId?: string): Promise<Evaluation | null> {
+  const sleep = deps.sleep ?? realSleep;
+  const pending: EvaluationContext = { repo, kind: "pull_request", prNumber, prHeadSha: headSha, base: "", candidate: "", checkSha: headSha, ...(deliveryId ? { deliveryId } : {}) };
+  let problem = "";
+  for (let attempt = 0; ; attempt++) {
+    const merge = await deps.client.resolveRef(repo, `refs/pull/${prNumber}/merge`);
+    if (merge) {
+      const parents = await deps.client.getCommitParents(repo, merge);
+      if (parents.length === 2 && parents[1] === headSha) {
+        return runAndPublish(deps, { ...pending, base: parents[0]!, candidate: merge });
+      }
+      problem = `INCONCLUSIVE: stale test merge|refs/pull/${prNumber}/merge does not contain head ${headSha} yet; the next event re-evaluates.`;
+    } else {
+      problem = "INCONCLUSIVE: no test merge|refs/pull/N/merge is unavailable (merge conflict or not yet computed). Resolve conflicts with the base branch.";
+    }
+    const delay = TEST_MERGE_BACKOFF_MS[attempt];
+    if (delay === undefined) break;
+    if (attempt === 0) {
+      await upsertCheck(deps, { ...pending, candidate: merge ?? "" }, { name: QUALITY_GATE_CHECK, conclusion: "failure", title: "waiting for the test merge", summary: `head ${headSha}` }, "in_progress");
+    }
+    await sleep(delay);
   }
-  const parents = await deps.client.getCommitParents(repo, merge);
-  if (parents.length !== 2 || parents[1] !== headSha) {
-    // GitHub recomputes the test merge asynchronously; never judge a stale one.
-    await upsertCheck(deps, pending, failingCheck("INCONCLUSIVE: stale test merge", `refs/pull/${prNumber}/merge does not contain head ${headSha} yet; the next event re-evaluates.`), "completed");
-    return null;
-  }
-  return runAndPublish(deps, { ...pending, base: parents[0]!, candidate: merge });
+  const [title, summary] = problem.split("|") as [string, string];
+  await upsertCheck(deps, pending, failingCheck(title, summary), "completed");
+  await journal(deps, pending, "failed", title);
+  return null;
 }
 
 interface MergeGroupPayload {
@@ -238,13 +300,14 @@ export function mergeGroupPrNumber(headRef: string | undefined): number | undefi
 }
 
 /** Official verdict: C is the commit that will be merged, B the queue's base (spec 6.2). */
-export async function handleMergeGroupEvent(deps: ServiceDeps, payload: MergeGroupPayload): Promise<Evaluation | null> {
+export async function handleMergeGroupEvent(deps: ServiceDeps, payload: MergeGroupPayload, deliveryId?: string): Promise<Evaluation | null> {
   if (payload.action !== "checks_requested") return null;
   const repo = { owner: payload.repository.owner.login, repo: payload.repository.name };
   const prNumber = mergeGroupPrNumber(payload.merge_group.head_ref);
   return runAndPublish(deps, {
     repo,
     kind: "merge_group",
+    ...(deliveryId ? { deliveryId } : {}),
     ...(prNumber !== undefined ? { prNumber } : {}),
     base: payload.merge_group.base_sha,
     candidate: payload.merge_group.head_sha,
@@ -265,25 +328,69 @@ interface IssueCommentPayload {
  * reads all comments afresh. Edits and deletions count too: removing a command
  * (old body in changes.body.from) must retract what it granted.
  */
-export async function handleIssueComment(deps: ServiceDeps, payload: IssueCommentPayload): Promise<Evaluation | null> {
+export async function handleIssueComment(deps: ServiceDeps, payload: IssueCommentPayload, deliveryId?: string): Promise<Evaluation | null> {
   if (!payload.issue.pull_request) return null;
   const bodies = [payload.comment.body ?? "", payload.changes?.body?.from ?? ""];
   if (!bodies.some((b) => hasGateCommand(b) || GATE_COMMANDS.some((c) => b.includes(c)))) return null;
   const repo = { owner: payload.repository.owner.login, repo: payload.repository.name };
   const pr = await deps.client.getPullRequest(repo, payload.issue.number);
   if (pr.state !== "open") return null;
-  return evaluatePullRequest(deps, repo, pr.number, pr.headSha);
+  return evaluatePullRequest(deps, repo, pr.number, pr.headSha, deliveryId);
 }
 
-export async function dispatchEvent(deps: ServiceDeps, event: string, payload: unknown): Promise<Evaluation | null> {
+/** Journals the delivery as queued before dispatching; the handlers move it to running/done. */
+export async function dispatchEvent(deps: ServiceDeps, event: string, payload: unknown, deliveryId?: string): Promise<Evaluation | null> {
+  const repoOf = (payload as { repository?: { owner?: { login?: string }; name?: string } } | null)?.repository;
+  const repository = repoOf?.owner?.login && repoOf.name ? `${repoOf.owner.login}/${repoOf.name}` : undefined;
+  if (deps.journal && deliveryId && repository && JOURNALED_EVENTS.has(event)) {
+    await deps.journal.enqueue(repository, deliveryId, event, payload, 0).catch((e) => deps.log?.("journal write failed", { error: String(e) }));
+  }
+  const out = await dispatchInner(deps, event, payload, deliveryId);
+  // An event the handlers ignored (closed PR, no command) is done as far as the journal is concerned.
+  if (out === null && deps.journal && deliveryId && repository && JOURNALED_EVENTS.has(event)) {
+    await deps.journal.update(repository, deliveryId, "done", "no evaluation needed or already reported").catch(() => undefined);
+  }
+  return out;
+}
+
+const JOURNALED_EVENTS = new Set(["pull_request", "merge_group", "issue_comment"]);
+
+async function dispatchInner(deps: ServiceDeps, event: string, payload: unknown, deliveryId?: string): Promise<Evaluation | null> {
   switch (event) {
     case "pull_request":
-      return handlePullRequestEvent(deps, payload as PullRequestPayload);
+      return handlePullRequestEvent(deps, payload as PullRequestPayload, deliveryId);
     case "merge_group":
-      return handleMergeGroupEvent(deps, payload as MergeGroupPayload);
+      return handleMergeGroupEvent(deps, payload as MergeGroupPayload, deliveryId);
     case "issue_comment":
-      return handleIssueComment(deps, payload as IssueCommentPayload);
+      return handleIssueComment(deps, payload as IssueCommentPayload, deliveryId);
     default:
       return null;
   }
+}
+
+/**
+ * Startup: re-dispatch deliveries that were queued or running when the
+ * process last stopped. Each one re-reads everything from GitHub, so a stale
+ * job can only end as SUPERSEDED. Runs sequentially, oldest first.
+ */
+export async function replayPendingJobs(deps: ServiceDeps, journal: JobJournal): Promise<{ replayed: number; dropped: number }> {
+  let replayed = 0;
+  let dropped = 0;
+  for (const job of await journal.pending()) {
+    if (!job.replayable || job.payload === undefined) {
+      await journal.update(job.repository, job.delivery, "failed", "payload not retained; cannot replay").catch(() => undefined);
+      dropped++;
+      continue;
+    }
+    deps.log?.("replaying job", { delivery: job.delivery, event: job.event, repository: job.repository });
+    try {
+      await dispatchEvent({ ...deps, journal }, job.event, job.payload, job.delivery);
+      replayed++;
+    } catch (e) {
+      deps.log?.("replay failed", { delivery: job.delivery, error: String(e) });
+      await journal.update(job.repository, job.delivery, "failed", String(e)).catch(() => undefined);
+      dropped++;
+    }
+  }
+  return { replayed, dropped };
 }

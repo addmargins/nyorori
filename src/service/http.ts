@@ -6,6 +6,7 @@
 
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { MemoryDeliveryStore, type DeliveryStore } from "./journal.js";
 
 /** GitHub caps webhook payloads at 25 MB. */
 export const MAX_BODY_BYTES = 25 * 1024 * 1024;
@@ -29,6 +30,10 @@ export interface WebhookOptions {
   log?: (msg: string, extra?: Record<string, unknown>) => void;
   /** Remembered delivery ids, to drop GitHub redeliveries of the same event. */
   dedupeSize?: number;
+  /** Persisted seen-delivery keys; defaults to an in-memory store of `dedupeSize` entries. */
+  deliveries?: DeliveryStore;
+  /** Liveness: `GET /healthz` answers 200 with this when set (listener only, proves nothing else). */
+  health?: () => Promise<Record<string, unknown>> | Record<string, unknown>;
   maxBodyBytes?: number;
   bodyTimeoutMs?: number;
 }
@@ -102,12 +107,16 @@ function reply(res: ServerResponse, status: number, body = ""): void {
  * The promise never rejects.
  */
 export function createWebhookHandler(opts: WebhookOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  const seen: string[] = [];
-  const limit = opts.dedupeSize ?? 1000;
+  const deliveries = opts.deliveries ?? new MemoryDeliveryStore((opts.dedupeSize ?? 5000) * 2);
   const maxBytes = opts.maxBodyBytes ?? MAX_BODY_BYTES;
   const timeoutMs = opts.bodyTimeoutMs ?? BODY_TIMEOUT_MS;
   const handle = async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
     res.on("error", (e) => opts.log?.("response error", { error: String(e) }));
+    if (req.method === "GET" && req.url === "/healthz" && opts.health) {
+      const body = JSON.stringify({ ok: true, ...(await opts.health()) });
+      if (!res.headersSent) res.writeHead(200, { "content-type": "application/json" }).end(body);
+      return;
+    }
     if (req.method !== "POST") {
       reply(res, 405);
       return;
@@ -141,14 +150,11 @@ export function createWebhookHandler(opts: WebhookOptions): (req: IncomingMessag
     }
     // Dedupe on the delivery id and on the signed body: a replay under a new id is the same event.
     const bodyKey = `sha256:${createHash("sha256").update(body).digest("hex")}`;
-    if ((delivery && seen.includes(delivery)) || seen.includes(bodyKey)) {
+    if ((delivery && (await deliveries.has(delivery))) || (await deliveries.has(bodyKey))) {
       reply(res, 200, "duplicate");
       return;
     }
-    for (const k of delivery ? [delivery, bodyKey] : [bodyKey]) {
-      seen.push(k);
-      if (seen.length > limit * 2) seen.shift();
-    }
+    await deliveries.add(delivery ? [delivery, bodyKey] : [bodyKey]);
     reply(res, 202);
     try {
       await opts.dispatch(event, payload, delivery);

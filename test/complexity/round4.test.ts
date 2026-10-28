@@ -128,12 +128,12 @@ describe("D21b reversed: k-to-k never pairs anonymous units (differential m16/m1
 
 describe("S11 unit vanish (spec 6.4): another unit of the same name does not clear it", () => {
   const F = "src/a.js";
-  const cls = (name: string, n: number, extra = "") =>
-    `export class ${name} {\n${ifChain("run", n, "  ").replace(/function run\(x\)/, `run(x)${extra}`)}}\n`;
+  const cls = (name: string, n: number, params = "x") =>
+    `export class ${name} {\n${ifChain("run", n, "  ").replace(/function run\(x\)/, `run(${params})`)}}\n`;
 
   it("m15b: B.run (CogC 5) vanishes while `run` stays bound through another class", () => {
     const b = cls("A", 20) + cls("B", 5);
-    const c = cls("B", 20, " // rewritten");
+    const c = cls("B", 20, "x, y0"); // class A's `run` rewritten in place, class B deleted
     const r = runScenario({ b: { [F]: b }, c: { [F]: c } });
     // The surviving `run` is the stage-2 counterpart of A.run; B.run has none.
     expect(unitMatches(r).map((m) => [m.bKey, m.stage])).toEqual([[`${F}::run#method[0]`, 2]]);
@@ -183,12 +183,12 @@ describe("residue S5 covers every gap between units (review: residue precision)"
     expect(triggerIds(r)).not.toContain("S5");
   });
 
-  it("without B sources only the head range and score changes are known (old behaviour)", () => {
+  it("without B sources only the head gap and score changes are known (conservative fallback)", () => {
     const c = b.replace("out.push(3);", "out.push(30);");
     const r = runScenario({ b: { [F]: b }, c: { [F]: c }, noSourcesForMatch: true });
     expect(s5(r)).toEqual([]);
-    const head = runScenario({ b: { [F]: b }, c: { [F]: "// header\n" + c }, noSourcesForMatch: true });
-    expect(s5(head)).toEqual([]);
+    const head = runScenario({ b: { [F]: b }, c: { [F]: "// header\n" + b }, noSourcesForMatch: true });
+    expect(s5(head).map((t) => t.evidence)).toEqual([`부채 <module> residue (B CogC 21 → C 21) 범위 1-1 수정`]);
     const changed = runScenario({ b: { [F]: b }, c: { [F]: c.replace("out.push(30);", "out.push(30); if (cfg.z) out.pop();") }, noSourcesForMatch: true });
     expect(s5(changed).map((t) => t.unit)).toEqual([`${F}::<module>`]);
   });
@@ -222,7 +222,7 @@ describe(".d.ts measured on C (policy.scope.declaration_impl_check)", () => {
       expect(hit).toBeDefined();
       expect(hit.authorFixable).toBe(true);
       expect(hit.file).toBe(path);
-      expect(hit.detail).toMatch(/declaration file but contains an implementation/);
+      expect(hit.detail).toMatch(/ambient/i);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

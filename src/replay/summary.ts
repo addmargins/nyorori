@@ -30,6 +30,7 @@ function deltaSection(p: PairReport, d: PairDelta): string[] {
   const lines = [`### ${p.id} (\`${p.base.slice(0, 12)}\` → \`${p.candidate.slice(0, 12)}\`)`, ""];
   if (d.state) lines.push(`- 집계 (aggregate): **${d.state.before} → ${d.state.after}**`);
   if (d.merge_allowed) lines.push(`- 병합 허용 (mergeAllowed): ${d.merge_allowed.before} → ${d.merge_allowed.after}`);
+  if (d.would_block) lines.push(`- shadow 차단 (would_block): ${d.would_block.before} → ${d.would_block.after}`);
   for (const g of d.gates) {
     const r = (x: typeof g.before) => `${x.state}/${x.mode}${x.reasons.length ? ` [${x.reasons.join(", ")}]` : ""}`;
     lines.push(`- gate/${g.gate}: ${r(g.before)} → ${r(g.after)}`);

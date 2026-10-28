@@ -3,6 +3,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaultPolicy, type Policy, type PolicyInput } from "../../src/policy/schema.js";
+import { runGatesIsolated } from "../../src/pipeline/isolated.js";
 import { runGates } from "../../src/pipeline/run.js";
 import type { RunGatesOptions, RunGatesOutput } from "../../src/pipeline/types.js";
 import { TestRepo } from "../git/repo.js";
@@ -34,6 +35,28 @@ export function approvalBody(triggerIds: readonly string[], sha: string): string
   return [`/simplification-review NO_SIMPLIFICATION_NEEDED sha=${sha}`, RUBRIC_OK, ...lines].join("\n");
 }
 
+/** Built worker entry (vitest's globalSetup compiles it). */
+export const WORKER = new URL("../../dist/pipeline/worker.js", import.meta.url).pathname;
+
+export function baseOptions(repo: TestRepo, base: string, candidate: string, policy: Policy, workDir: string): RunGatesOptions {
+  return {
+    repoDir: repo.dir,
+    base,
+    candidate,
+    policy,
+    policyRevision: "e2e-policy",
+    ccccBinary: CCCC,
+    workDir,
+    runnerCommit: "e2e-runner",
+    // Never draw the determinism sample: the fixed value survives the worker boundary.
+    rngValue: 1,
+  };
+}
+
+/**
+ * The production path: the gates run in the detached worker (spec 10.1).
+ * `extra.rng` cannot cross the process boundary and is ignored here.
+ */
 export async function run(
   repo: TestRepo,
   base: string,
@@ -43,18 +66,24 @@ export async function run(
 ): Promise<RunGatesOutput> {
   const workDir = mkdtempSync(join(tmpdir(), "nyorori-e2e-"));
   try {
-    return await runGates({
-      repoDir: repo.dir,
-      base,
-      candidate,
-      policy,
-      policyRevision: "e2e-policy",
-      ccccBinary: CCCC,
-      workDir,
-      runnerCommit: "e2e-runner",
-      rng: () => 1,
-      ...extra,
-    });
+    const { rng: _rng, ...rest } = extra;
+    return await runGatesIsolated({ ...baseOptions(repo, base, candidate, policy, workDir), ...rest }, { workerModule: WORKER });
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+}
+
+/** Same run inside this process, for tests that need a function-valued option. */
+export async function runInProcess(
+  repo: TestRepo,
+  base: string,
+  candidate: string,
+  policy: Policy,
+  extra: Partial<RunGatesOptions> = {},
+): Promise<RunGatesOutput> {
+  const workDir = mkdtempSync(join(tmpdir(), "nyorori-e2e-"));
+  try {
+    return await runGates({ ...baseOptions(repo, base, candidate, policy, workDir), ...extra });
   } finally {
     rmSync(workDir, { recursive: true, force: true });
   }

@@ -40,6 +40,8 @@ export interface ViolationRow {
 export interface RunSummary {
   state: GateState;
   merge_allowed: boolean;
+  /** Shadow verdict (every gate enforced); null when the pipeline does not report it. */
+  would_block: boolean | null;
   exit_code: 0 | 1 | 2;
   base_sha: string;
   candidate_sha: string;
@@ -96,6 +98,7 @@ export function summarizeRun(out: RunGatesOutput, outDir: string): RunSummary {
   return {
     state: verdict.state,
     merge_allowed: verdict.mergeAllowed,
+    would_block: typeof verdict.would_block === "boolean" ? verdict.would_block : null,
     exit_code: EXIT_CODE[verdict.state],
     base_sha: verdict.base_sha,
     candidate_sha: verdict.candidate_sha,
@@ -151,6 +154,7 @@ export interface PairDelta {
   changed: boolean;
   state: { before: GateState; after: GateState } | null;
   merge_allowed: { before: boolean; after: boolean } | null;
+  would_block: { before: boolean | null; after: boolean | null } | null;
   gates: GateDelta[];
   triggers: MultisetDiff<TriggerRow>;
   violations: MultisetDiff<ViolationRow>;
@@ -172,10 +176,12 @@ export function computeDelta(current: RunSummary, comparison: RunSummary): PairD
   const violations = multisetDiff(current.violations, comparison.violations, violationKey);
   const state = current.state !== comparison.state ? { before: current.state, after: comparison.state } : null;
   const mergeAllowed = current.merge_allowed !== comparison.merge_allowed ? { before: current.merge_allowed, after: comparison.merge_allowed } : null;
+  const wouldBlock = current.would_block !== comparison.would_block ? { before: current.would_block, after: comparison.would_block } : null;
   return {
-    changed: state !== null || mergeAllowed !== null || gates.length > 0 || triggers.added.length + triggers.removed.length + violations.added.length + violations.removed.length > 0,
+    changed: state !== null || mergeAllowed !== null || wouldBlock !== null || gates.length > 0 || triggers.added.length + triggers.removed.length + violations.added.length + violations.removed.length > 0,
     state,
     merge_allowed: mergeAllowed,
+    would_block: wouldBlock,
     gates,
     triggers,
     violations,
