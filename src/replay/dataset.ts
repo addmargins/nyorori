@@ -21,7 +21,7 @@ const relPath = z
   .string()
   .min(1)
   .max(1024)
-  .refine((p) => !/[\u0000-\u001f]/.test(p), "path must not contain control characters");
+  .refine((p) => ![...p].some((ch) => ch.charCodeAt(0) < 0x20), "path must not contain control characters");
 
 export const replayPairSchema = z
   .object({

@@ -101,6 +101,24 @@ node dist/cli.js fixtures --cccc /path/to/new/cccc
 
 spec 3.3의 구문별 계산 규칙 픽스처(`test/fixtures/cccc-rules`)를 새 바이너리로 재생해 점수 차이를 모두 출력하고, 하나라도 다르면 1로 끝난다.
 
+## Replay (upgrade check)
+
+측정기나 정책을 바꾸기 전에 최근 병합된 PR 약 200개를 다시 판정해 **판정이 달라지는 쌍**을 모두 확인한다(spec 6.1 업그레이드 2단계, 13.4 복구, 13.3 마찰 지표).
+
+```bash
+scripts/build-replay-pairs.sh -R owner/repo -C /srv/git/repo -n 200 -o /srv/replay/pairs.json
+node dist/cli.js replay --repo /srv/git/repo --pairs /srv/replay/pairs.json \
+  --policy policy/current.json --compare-policy policy/proposed.json \
+  --cccc /opt/cccc-1.8.5/cccc --compare-cccc /opt/cccc-next/cccc --out /srv/replay/run-001 --jobs 2
+```
+
+- `pairs.json`: `{ schema_version: 1, repository?, pairs: [{ id, base, candidate, pr?, comments?, artifacts?, previous_attempt? }] }`. SHA는 40자 전체, 최대 1000쌍, 경로는 데이터셋 파일 기준 상대 경로이며 **저장소 밖**이어야 한다(`--out`도 마찬가지). `build-replay-pairs.sh`는 squash 병합이면 squash commit과 그 부모를, merge commit이면 merge commit과 첫 번째 부모를 쌍으로 만든다.
+- 각 쌍은 현재 정책·측정기로, 그리고 `--compare-policy`/`--compare-cccc`가 있으면 그 조합으로 한 번 더 판정한다. 산출물은 `<out>/<id>/{current,comparison}/`에 `run --out`과 같은 파일로 남고, `replay-result.json`(schema_version 1)과 `replay-summary.md`(차이 → 오류 → 마찰 지표 → 전체 쌍 순)가 생긴다.
+- 차이는 쌍마다 집계 상태·`mergeAllowed`·게이트별 상태/모드/사유, 트리거(id, 파일, 단위 다중집합), 위반(게이트, 사유, 단위, 파일 다중집합)의 추가·제거다. 총계에는 상태 분포, 트리거 id별 횟수, PR당 FAIL 비율, INCONCLUSIVE 비율, waiver 수, G6 필요 비율이 들어간다.
+- 종료 코드: 0 차이 없음 · 1 차이 있음 · 2 어느 쌍이든 실행 오류, 또는 현재 정책에서 서비스 게이트(G1~G3)가 INCONCLUSIVE · 64 사용법·데이터셋 오류.
+- **측정기 업그레이드 재생에서는 Actions 게이트(G4·G5·G7)를 `observe`로 두거나 쌍마다 `artifacts`를 넣는다.** 산출물 없이 enforce면 모든 쌍이 INCONCLUSIVE(REPORT_MISSING)로 집계되어 상태 분포가 의미를 잃는다(G1~G3 차이는 그래도 보인다). 새 바이너리는 `--compare-policy`에 `measurer.cccc_version`·`cccc_sha256`을 갱신해 넘긴다. 업그레이드는 P 변경이므로 현재 정책이 sha256을 고정하고 있으면 `--compare-cccc`만으로는 MEASURER_MISMATCH가 난다.
+- 재생은 로컬 실행이다(`authority: local`). 체크·waiver·원장을 건드리지 않는다.
+
 ## Deploying the gate service
 
 1. GitHub App을 만든다. 권한은 Checks: write, Contents: read, Pull requests: read, Issues: write(부채 이슈), Actions: read, Members: read(org)이고, 이벤트는 `pull_request`, `merge_group`, `issue_comment`를 구독한다.

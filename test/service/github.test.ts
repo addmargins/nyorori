@@ -60,7 +60,7 @@ describe("GitHub App client", () => {
       "POST /repos/o/r/check-runs": (c) => ({ body: { id: 99, echo: c.body } }),
     });
     const api = new GitHubApi({ appId: 1, privateKeyPem: PEM }, f.impl, () => Date.parse("2026-10-28T12:00:00Z"));
-    expect(await api.getPullRequest(REPO, 5)).toEqual({ number: 5, headSha: "h", author: "alice", state: "open" });
+    expect(await api.getPullRequest(REPO, 5)).toMatchObject({ number: 5, headSha: "h", author: "alice", state: "open", assignees: [] });
     const id = await api.createCheckRun(REPO, { name: "quality-gate", headSha: "h", status: "completed", conclusion: "failure", title: "t", summary: "s", externalId: "e" });
     expect(id).toBe(99);
     expect(f.calls.filter((c) => c.url.endsWith("/access_tokens"))).toHaveLength(1);
@@ -86,7 +86,7 @@ describe("GitHub App client", () => {
 describe("artifact provenance", () => {
   const run: WorkflowRun = {
     id: 10, runAttempt: 2, event: "merge_group", headSha: "c", status: "completed", conclusion: "success",
-    repository: "o/r", path: ".github/workflows/x.yml",
+    repository: "o/r", path: ".github/workflows/gate-untrusted-tests.yml",
     referencedWorkflows: [{ path: "org/gate/.github/workflows/gate-untrusted-tests.yml@refs/heads/main", sha: "w".repeat(40) }],
   };
   it("reads org-required workflows from referenced_workflows", () => {
@@ -95,8 +95,9 @@ describe("artifact provenance", () => {
       runId: 10, runAttempt: 2, headSha: "c", event: "merge_group", runConclusion: expect.any(String),
     });
   });
-  it("ignores runs of other workflows", () => {
+  it("ignores runs of other workflows, and a run whose own path is not the trusted file", () => {
     expect(provenanceOf(run, { repository: "org/gate", path: ".github/workflows/other.yml" })).toBeNull();
+    expect(provenanceOf({ ...run, path: ".github/workflows/x.yml" }, { repository: "org/gate", path: ".github/workflows/gate-untrusted-tests.yml" })).toBeNull();
   });
 });
 

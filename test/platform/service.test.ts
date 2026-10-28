@@ -61,7 +61,7 @@ function verdictFor(ctx: EvaluationContext) {
 
 function deps(client: GitHubClient, evaluate: ServiceDeps["evaluate"] = async (ctx) => verdictFor(ctx)): ServiceDeps & { calls: EvaluationContext[] } {
   const calls: EvaluationContext[] = [];
-  return { client, appId: APP, calls, evaluate: async (ctx) => (calls.push(ctx), evaluate(ctx)) };
+  return { client, appId: APP, calls, sleep: async () => {}, evaluate: async (ctx) => (calls.push(ctx), evaluate(ctx)) };
 }
 
 const prEvent = { action: "synchronize", repository: repoPayload, pull_request: { number: 7, head: { sha: HEAD }, state: "open" } };

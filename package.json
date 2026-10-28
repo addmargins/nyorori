@@ -16,7 +16,8 @@
     "test": "vitest run",
     "lint": "eslint src test scripts eslint.config.js",
     "fixtures": "node dist/cli.js fixtures",
-    "gen:policy": "npm run build && node scripts/gen-default-policy.mjs"
+    "gen:policy": "npm run build && node scripts/gen-default-policy.mjs",
+    "demo": "node scripts/demo.mjs"
   },
   "dependencies": {
     "@eslint/js": "^10.0.1",

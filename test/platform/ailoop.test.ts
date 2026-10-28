@@ -65,7 +65,7 @@ describe("retry decision (spec 12.3)", () => {
     expect(decideRetry({ ...base, attempt: 2, previousViolations: ["a", "b"] }, policy())).toMatchObject({ action: "handoff", reason: expect.stringContaining("limit") });
   });
   it("stops early on no progress, redistribution/hiding and forbidden changes", () => {
-    expect(decideRetry({ ...base, attempt: 1, previousViolations: ["a"] }, policy()).reason).toMatch(/no progress/);
+    expect(decideRetry({ ...base, attempt: 1, previousViolations: ["a"] }, policy()).reason).toMatch(/no_progress/);
     expect(decideRetry({ ...base, attempt: 1, newTriggers: [{ id: "S9", gate: "complexity", evidence: "", routing: true }] }, policy()).action).toBe("handoff");
     expect(decideRetry({ ...base, forbidden: [{ gate: "tests", reason: "POLICY_PATH_MODIFIED", file: "x", message: "m" }] }, policy()).action).toBe("handoff");
   });

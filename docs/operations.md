@@ -181,3 +181,7 @@ P1에서 G6가 enforce여도 관측 모드 게이트(G1 등)의 트리거는 라
 - 자동 재시도는 `ai_loop.max_retries`회(기본 2)까지다. 위반 집합이 그대로이거나, 수정 후 라우팅 트리거가 하나라도 새로 발화하거나(S1·S9만이 아니다), 금지 변경이 생기면 즉시 사람에게 넘긴다.
 - nyorori는 재시도 루프를 직접 돌리지 않는다. `decideRetry`(`src/ailoop`)는 AI 수정 루프를 돌리는 쪽이 매 시도 뒤 호출하는 라이브러리 함수이고, 게이트는 판정과 `gate-feedback.json`만 만든다.
 - 모든 재시도는 같은 병합 기준 B에 대해 측정한다.
+
+## 8. 재생 (기획서 6.1 업그레이드 검사, 13.4 복구)
+
+5절의 업그레이드·복구 절차에서 "최근 병합 PR 약 200개 재생"은 `nyorori replay`로 한다. `scripts/build-replay-pairs.sh -R owner/repo -C <clone> -n 200 -o <저장소 밖>/pairs.json`으로 데이터셋을 만든 뒤, 업그레이드면 `--policy <현재 P> --compare-policy <새 측정기의 sha256·버전을 넣은 P> --compare-cccc <새 바이너리>`로, 복구면 `--policy <수정된 P>`만으로 실행한다. 종료 코드 0(차이 없음)이면 P 변경을 병합하고, 1이면 `replay-summary.md`의 차이 목록 전부를 P 변경 설명에 적어 정책 책임자가 승인한 뒤 병합하며, 2(실행 오류 또는 G1~G3 INCONCLUSIVE)는 측정 계약이 깨진 것이므로 병합하지 않는다. 산출물 없이 재생할 때는 G4·G5·G7을 `observe`로 둔 P를 쓰거나 쌍마다 `artifacts`를 지정한다. 같은 보고서의 마찰 지표(PR당 FAIL·INCONCLUSIVE·waiver·G6 필요 비율)는 6절 주간 지표의 재생 버전이다. 사용법은 README의 "Replay (upgrade check)"에 있다.

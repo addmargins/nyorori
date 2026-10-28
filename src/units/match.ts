@@ -117,6 +117,36 @@ export function scopeOf(path: string, testGlobs: readonly string[] | undefined):
   return testGlobs && matchesAny(path, testGlobs) ? "test" : "product";
 }
 
+/** Scope of every B and C path of the PR, keyed by side. */
+export interface ScopeIndex {
+  b: ReadonlyMap<string, ScopeClass>;
+  c: ReadonlyMap<string, ScopeClass>;
+}
+
+/**
+ * Per-side classification: the manifest's `isTestB` / `isTestC` when present,
+ * else `policy.scope.test_globs`, else the legacy primary-path `isTest` (which
+ * cannot tell the sides of a rename apart, so it never refuses a pair).
+ */
+function sideScope(path: string, flag: boolean | undefined, legacy: boolean | undefined, globs: readonly string[] | undefined): ScopeClass {
+  if (flag !== undefined) return flag ? "test" : "product";
+  if (globs) return scopeOf(path, globs);
+  return legacy ? "test" : "product";
+}
+
+export function scopeIndex(input: Pick<MatchInput, "manifest" | "testGlobs">): ScopeIndex {
+  const b = new Map<string, ScopeClass>();
+  const c = new Map<string, ScopeClass>();
+  for (const e of input.manifest.entries) {
+    if (e.b) b.set(e.b.path, sideScope(e.b.path, e.isTestB, e.isTest, input.testGlobs));
+    if (e.c) c.set(e.c.path, sideScope(e.c.path, e.isTestC, e.isTest, input.testGlobs));
+  }
+  return { b, c };
+}
+
+const scopeB = (idx: ScopeIndex, path: string): ScopeClass => idx.b.get(path) ?? "product";
+const scopeC = (idx: ScopeIndex, path: string): ScopeClass => idx.c.get(path) ?? "product";
+
 /**
  * Records a refused verbatim move unless its file pair was already refused
  * as a whole (the units of a refused rename are left unmatched, so stage 4
@@ -154,6 +184,7 @@ type PairInput = Pick<MatchInput, "manifest" | "b" | "c" | "lineMaps" | "baselin
  */
 export function filePairs(input: PairInput, refused?: ScopeChange[]): FilePair[] {
   const pairs: FilePair[] = [];
+  const idx = scopeIndex(input);
   for (const e of input.manifest.entries) {
     if (e.status !== "M" && e.status !== "R") continue;
     if (!e.b || !e.c || !e.measure.B || !e.measure.C) continue;
@@ -161,8 +192,8 @@ export function filePairs(input: PairInput, refused?: ScopeChange[]): FilePair[]
     const b = input.b.get(e.b.path);
     const c = input.c.get(e.c.path);
     if (!b || !c) continue;
-    const from = scopeOf(e.b.path, input.testGlobs);
-    const to = scopeOf(e.c.path, input.testGlobs);
+    const from = scopeB(idx, e.b.path);
+    const to = scopeC(idx, e.c.path);
     if (from !== to) {
       refused?.push({ bPath: e.b.path, cPath: e.c.path, from, to });
       continue;
@@ -360,13 +391,14 @@ class Matcher {
   matchVerbatimMoves(
     bUnits: readonly Unit[],
     cUnits: readonly Unit[],
-    input: Pick<MatchInput, "sourcesB" | "sourcesC" | "testGlobs">,
+    input: Pick<MatchInput, "sourcesB" | "sourcesC">,
+    idx: ScopeIndex,
     refused: ScopeChange[],
   ): void {
     for (const [b, c] of this.verbatimCandidates(bUnits, cUnits)) {
       if (this.unavailable(b, "B") || this.unavailable(c, "C")) continue;
-      const from = scopeOf(b.path, input.testGlobs);
-      const to = scopeOf(c.path, input.testGlobs);
+      const from = scopeB(idx, b.path);
+      const to = scopeC(idx, c.path);
       if (from !== to) {
         refuseMove(refused, b, c, from, to);
         continue;
@@ -451,7 +483,7 @@ export function matchUnits(input: MatchInput): MatchResult {
   }
 
   const { bUnits, cUnits } = prUnits(input);
-  m.matchVerbatimMoves(bUnits, cUnits, input, scopeChanges);
+  m.matchVerbatimMoves(bUnits, cUnits, input, scopeIndex(input), scopeChanges);
 
   return {
     matches: m.matches,
