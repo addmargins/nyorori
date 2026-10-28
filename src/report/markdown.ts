@@ -110,6 +110,7 @@ export function renderSummaryMarkdown(results: GateResult[], verdict?: QualityGa
     out.push(`base \`${verdict.base_sha}\` · candidate \`${verdict.candidate_sha}\` · policy \`${verdict.policy_revision}\``, "");
     if (verdict.blocking.length) out.push("**차단 원인**", ...verdict.blocking.map(violationLine), "");
     if (verdict.inconclusive.length) out.push("**측정 불가**", ...verdict.inconclusive.map(inconclusiveLine), "");
+    out.push(...commandNotes(verdict));
     out.push("| gate | mode | state | 집계 |", "|---|---|---|---|");
     for (const g of verdict.gates) {
       out.push(`| ${g.gate} | ${g.mode} | ${g.state} | ${g.counted ? "yes" : "no"} |`);
@@ -136,6 +137,64 @@ export function renderWaiverApprovalHints(pending: ReadonlyArray<{ id: string; u
     "",
     "```",
     ...pending.map((p) => `/gate-waive-approve ${p.id} blob=${p.blob}   # ${p.unit}`),
+    "```",
+    "",
+  ].join("\n");
+}
+
+interface IgnoredCommand {
+  id: string;
+  author: string;
+}
+
+/**
+ * What the PR conversation needs to act on: edited command comments that were
+ * ignored, and ready-to-paste commands pinned to the current head.
+ */
+function commandNotes(verdict: QualityGateVerdict): string[] {
+  const out: string[] = [];
+  const obs = verdict.review.observe;
+  const ignored = Array.isArray(obs["ignored_edited_commands"]) ? (obs["ignored_edited_commands"] as IgnoredCommand[]) : [];
+  if (ignored.length) {
+    out.push(
+      "**무시된 명령** — edited command ignored; post a new comment (수정된 댓글의 명령은 효력이 없다)",
+      ...ignored.map((i) => `- comment ${escapeMd(i.id)} by ${escapeMd(i.author)}`),
+      "",
+    );
+  }
+  const head = typeof obs["head_sha"] === "string" ? (obs["head_sha"] as string) : "";
+  const fired = Array.isArray(obs["fired_triggers"]) ? (obs["fired_triggers"] as string[]) : [];
+  if (head && verdict.review.violations.some((v) => v.reason === "REVIEW_REQUIRED")) out.push(renderReviewTemplate(head, fired));
+  const tests = verdict.blocking.filter((v) => v.reason === "TEST_REMOVED" || v.reason === "TEST_CONFIG_WEAKENED");
+  if (head && tests.length) out.push(renderTestApprovalHints(tests, head));
+  return out;
+}
+
+/** Ready-to-paste `/simplification-review` for reviewers, bound to the head they are looking at. */
+export function renderReviewTemplate(headSha: string, firedTriggers: readonly string[]): string {
+  return [
+    "**단순화 리뷰 명령** — 리뷰어는 모든 문항과 트리거 처분을 채워 새 댓글로 남긴다.",
+    "",
+    "```",
+    `/simplification-review NO_SIMPLIFICATION_NEEDED sha=${headSha}`,
+    "q1: pass",
+    "q2: pass",
+    "q3: pass",
+    "q4: pass",
+    "q5: pass",
+    ...firedTriggers.map((id) => `${id}: <one-line disposition>`),
+    "```",
+    "",
+  ].join("\n");
+}
+
+/** Copyable gate-owner approvals for TEST_REMOVED / TEST_CONFIG_WEAKENED, bound to the head. */
+export function renderTestApprovalHints(violations: readonly Violation[], headSha: string): string {
+  return [
+    "**테스트 승인 명령** (gate owners)",
+    "",
+    "```",
+    ...violations.map((v) => `/gate-approve-tests key="${v.reason}:${v.unit ?? v.file}" sha=${headSha} note="<why>"`),
     "```",
     "",
   ].join("\n");

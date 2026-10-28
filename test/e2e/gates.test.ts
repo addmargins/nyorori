@@ -225,7 +225,7 @@ describe("G6 simplification review end to end", () => {
     expect(gate(before, "complexity").state).toBe("PASS");
     expect(triggerIds(before)).toEqual(expect.arrayContaining(["S1", "S10"]));
     expect(reasons(before, "simplification-review")).toEqual(["REVIEW_REQUIRED"]);
-    const APPROVE = approvalBody(triggerIds(before));
+    const APPROVE = approvalBody(triggerIds(before), c);
 
     const self = await run(repo, b, c, policy, { pr: { comments: [comment(1, "alice", APPROVE, c)], identity, headSha: c } });
     expect(reasons(self, "simplification-review")).toEqual(["REVIEW_REQUIRED"]);

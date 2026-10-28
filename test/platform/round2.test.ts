@@ -292,16 +292,19 @@ describe("bug #11: concurrent evaluations and run-scoped overrides", () => {
     const old = runAndPublish(deps, { repo: { owner: "o", repo: "r" }, kind: "pull_request", prNumber: 7, prHeadSha: HEAD, base: B, candidate: C, checkSha: HEAD });
     await new Promise((r) => setTimeout(r, 5));
     client.merge = C2; // base moved: the test merge is now C2
-    await runAndPublish(deps, { repo: { owner: "o", repo: "r" }, kind: "pull_request", prNumber: 7, prHeadSha: HEAD, base: B2, candidate: C2, checkSha: HEAD });
+    // Evaluations of one PR are serialized; the newer one waits for the slow one.
+    const newer = runAndPublish(deps, { repo: { owner: "o", repo: "r" }, kind: "pull_request", prNumber: 7, prHeadSha: HEAD, base: B2, candidate: C2, checkSha: HEAD });
+    await new Promise((r) => setTimeout(r, 5));
     release();
     expect(await old).toBeNull();
+    expect(await newer).not.toBeNull();
     const qg = client.runs.filter((r) => r.name === "quality-gate");
-    const newer = qg.find((r) => r.externalId === checkExternalId({ base: B2, candidate: C2 }, REV))!;
+    const newRun = qg.find((r) => r.externalId === checkExternalId({ base: B2, candidate: C2 }, REV))!;
     const stale = qg.find((r) => r.externalId === checkExternalId({ base: B, candidate: C }, REV))!;
-    expect(newer.req.title).not.toMatch(/SUPERSEDED/);
-    expect(newer.status).toBe("completed");
+    expect(newRun.req.title).not.toMatch(/SUPERSEDED/);
+    expect(newRun.status).toBe("completed");
     expect(stale.req).toMatchObject({ conclusion: "failure", title: expect.stringMatching(/^SUPERSEDED/) });
-    expect(newer.id).toBeGreaterThan(stale.id); // GitHub shows the latest run of the name
+    expect(newRun.id).toBeGreaterThan(stale.id); // GitHub shows the latest run of the name
   });
 
   it("gate owners may override NONDETERMINISM for this (B, C) only; MEASURER_MISMATCH stays", () => {

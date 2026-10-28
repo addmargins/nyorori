@@ -30,7 +30,11 @@
 
 ## 3. PR 댓글 명령
 
-명령은 줄 맨 앞에서만 인식한다. 인용(`>`)이나 코드 블록 안의 명령은 무시하므로, 남의 승인을 인용해도 다시 발급되지 않는다. 게이트가 PR 댓글에 보여 주는 "복사용 명령"은 코드 블록 안에 있어 그 자체로는 효력이 없다.
+명령은 GitHub가 렌더링한 화면에서 보이는 일반 문단의 줄 맨 앞에서만 인식한다. 인용(`>`와 그 lazy 연속 줄), 코드 블록(``` 와 ~~~ 펜스, info string 포함, 같은 문자로 같은 길이 이상일 때만 닫힘; 빈 줄 뒤 4칸 들여쓰기), HTML 주석(`<!-- -->`, 닫히지 않으면 끝까지) 안의 명령은 무시한다. 그래서 남의 승인을 인용해도 다시 발급되지 않고, 보이지 않는 명령도 없다. 게이트가 PR 댓글에 보여 주는 "복사용 명령"은 코드 블록 안에 있어 그 자체로는 효력이 없다.
+
+**수정된 댓글.** 쓰기 권한이 있는 사람은 다른 사람의 댓글을 수정할 수 있다. 그래서 `updated_at`이 `created_at`보다 2초 넘게 늦은 댓글의 명령은 모두 무시하고, 게이트 요약에 "edited command ignored; post a new comment"로 표시한다. 명령을 고치려면 새 댓글을 단다. 댓글을 수정하거나 지워서 명령이 사라지면(`changes.body.from`) PR을 다시 평가하므로, 승인 철회가 바로 반영된다.
+
+**독립성을 확인할 수 없을 때.** 로그인에 연결되지 않은 commit 작성자·committer 이메일, 또는 GitHub noreply가 아니고 연결된 commit 이메일도 아닌 `Co-authored-by`가 하나라도 있으면, 그 사람이 승인자일 수 있으므로 waiver, 단순화 리뷰, 테스트 승인, override 모두 **독립 승인자 두 명**이 필요하다. GitHub는 PR commit을 250개까지만 나열하므로, 250개 이상이면 승인을 아예 받지 않는다(PR을 나누거나 squash). merge group에서는 그룹에 든 모든 PR의 작성자와 commit을 합쳐 판단한다.
 
 ### 3.1 waiver (FAIL에 대한 위험 수용)
 
@@ -39,6 +43,7 @@
 ```
 
 - `unit`은 게이트 결과의 단위 키를 그대로 복사한다. 와일드카드, 파일 단위, PR 단위 waiver는 없다.
+- 분기 예산: `waivers.per_quarter_budget`은 서비스의 원장(`FileLedgerStore`, `waivers.jsonl`)에서 이번 UTC 분기에 기록된 waiver 수를 세어 적용한다. 읽을 수 없는 줄은 사용한 것으로 센다.
 - waiver 가능한 게이트: `complexity`, `lint-structure`, `deps`, `coverage`, `tests`(`TESTS_FAILED_ON_BASE`만).
 - waiver 불가 (판정 D14): 모든 INCONCLUSIVE(측정 override 대상), G4 무결성(`TEST_REMOVED`, `TEST_FOCUS_OR_SKIP`, `TEST_CONFIG_WEAKENED` — 3.4절 테스트 승인 대상), `TESTS_FAILED`, 보호 경로(`PROTECTED_PATH_MODIFIED`, `POLICY_PATH_MODIFIED`), 우회 벡터(`DYNAMIC_CODE`, `BIDI_CONTROL`, `SUPPRESSION_ADDED`), 리뷰 결과.
 - waiver 가능한 변형: B에서도 실패하던 테스트(`TESTS_FAILED_ON_BASE` 또는 `details.base_broken`), `@ts-ignore` 같은 waiver 가능한 억제(`SUPPRESSION_ADDED_WAIVABLE` 또는 `details.waivable`), `TEST_NO_ASSERTION`.
@@ -80,7 +85,7 @@
 ### 3.3 단순화 리뷰 (G6)
 
 ```
-/simplification-review REQUIRED
+/simplification-review REQUIRED sha=<리뷰한 PR head의 40자리 SHA>
 q1: pass
 q2: fail src/billing/plan.ts:42 processPart2는 지역 변수 5개를 끌고 다니는 단일 호출 helper
 q3: pass
@@ -98,17 +103,17 @@ q5: pass
   5. 독자가 다른 새 정의를 두 번 넘게 따라가지 않고 각 변경 함수를 이해할 수 있다.
 - `REQUIRED`는 q1~q4 중 하나 이상 `fail`일 때만, `NO_SIMPLIFICATION_NEEDED`는 q1~q4가 모두 `pass`일 때만 유효하다.
 - 같은 리뷰어의 나중 댓글이 이전 것을 대체한다. 유효한 `REQUIRED`가 하나라도 있으면 다른 승인이 있어도 차단한다.
-- 승인은 댓글을 단 시점의 head SHA에 묶인다. 새 push 뒤에는 (a) patch-id가 같은 rebase이거나 (b) 새 commit이 트리거된 파일을 하나도 건드리지 않았을 때만 이어진다. 파일이 없는 트리거(예: 모듈 구조 S3)는 rebase에서만 이어진다.
+- 명령에는 리뷰한 head를 `sha=`로 적어야 한다. 승인은 그 SHA에 묶인다(게이트 요약이 현재 head SHA와 발화한 트리거 줄을 채운 복사용 명령을 보여 준다). 새 push 뒤에는 (a) patch-id가 같은 rebase이거나 (b) 새 commit이 트리거된 파일을 하나도 건드리지 않았을 때만 이어진다. 파일이 없는 트리거(예: 모듈 구조 S3)는 rebase에서만 이어진다.
 - LLM 리뷰어의 판정은 v1에서 기록만 한다.
 
 ### 3.4 테스트 승인 (G4 무결성)
 
 ```
-/gate-approve-tests key="TEST_REMOVED:test/a.test.ts::adds numbers" note="b.test.ts로 옮김"
+/gate-approve-tests key="TEST_REMOVED:test/a.test.ts::adds numbers" sha=<현재 PR head> note="b.test.ts로 옮김"
 ```
 
 - `TEST_REMOVED`, `TEST_CONFIG_WEAKENED`만 대상이다. `key`는 게이트 결과가 위반마다 보여 주는 값이다.
-- `gate_owners`이고 독립적인 사람만, 댓글을 단 시점의 head SHA에서만 유효하다. 새 push 뒤에는 다시 승인한다.
+- `gate_owners`이고 독립적인 사람만 할 수 있다. `sha=`가 평가 중인 head와 같을 때만 유효하며, 새 push 뒤에는 다시 승인한다.
 - waiver가 아니라 승인으로 기록되며(`waivers_applied`의 `metric: "test-approval"`), waiver 예산을 쓰지 않는다.
 
 ## 4. 판정 상태와 체크 표현
@@ -133,6 +138,9 @@ q5: pass
 - `degraded` 모드 게이트는 차단하지 않는다. 대신 그 게이트의 열린 FAIL, INCONCLUSIVE, 라우팅 트리거가 단순화 리뷰를 필수로 만든다(증거 `degraded gate <id>: <사유>`). 보고하지 않아도 리뷰가 필수다.
 - `waivedBy`는 서비스가 적용한 waiver(또는 테스트 승인)만 믿는다. Actions 산출물의 `waivedBy`, `waivers_applied`에 없는 id, waiver 불가 사유에 붙은 `waivedBy`는 버린다.
 - pull_request 증거: run의 head는 PR head여야 하고, run이 실제로 검사한 test merge(메타데이터의 `candidate_sha`)가 C여야 한다. merge_group은 run head가 C여야 한다.
+- Actions 산출물은 run의 event가 평가 종류(pull_request / merge_group)와 같아야 하고, run의 conclusion이 `success`가 아니면 실패의 증거로는 쓰되 통과의 증거로는 쓰지 않는다. 압축 파일은 다운로드 100 MB, 항목 1,000개, 풀린 크기 합 512 MB, 항목당 64 MB와 압축비 200배로 제한하고, 겹치거나 범위를 벗어난 헤더를 거부하며, 필요한 항목만 푼다. 위반은 `INCONCLUSIVE(UNTRUSTED_ARTIFACT)`다.
+- 웹훅은 delivery id와 서명된 본문의 sha256 양쪽으로 중복을 거르고, `X-GitHub-Event`가 본문 모양과 맞지 않으면 400으로 거부한다(이벤트 헤더는 서명 밖에 있다).
+- 같은 PR의 평가는 한 번에 하나씩 돌고, 이벤트가 도착할 때마다 세대 번호를 받는다. 더 새 세대가 시작된 평가는 결과를 게시하지 않는다.
 - 체크 실행은 `external_id = <B>:<C>:<P revision>`로 구분한다. 같은 head에 대한 동시 평가가 서로의 체크를 덮어쓰지 않으며, 평가가 끝났을 때 B/C가 더 이상 현재가 아니면 자기 체크를 `SUPERSEDED`(failure)로 닫는다.
 
 ## 5. 장애 대응 (기획서 13.4)

@@ -11,7 +11,7 @@ import type { ArtifactProvenance } from "../aggregate/index.js";
 import type { CommitIdentity } from "../review/independence.js";
 import type { IssueComment } from "../waivers/index.js";
 import type { CheckRunRecord, CheckRunRequest, GitHubClient, PullRequestInfo, RepoRef } from "./client.js";
-import { readZip } from "./zip.js";
+import { DEFAULT_ZIP_LIMITS, readZip, ZipError, type ZipLimits } from "./zip.js";
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -193,9 +193,16 @@ export class GitHubApi implements GitHubClient {
   // --- evaluation data ------------------------------------------------------
 
   async listIssueComments(repo: RepoRef, number: number): Promise<IssueComment[]> {
-    type Raw = { id: number; body: string | null; created_at: string; user: { login: string } | null };
+    type Raw = { id: number; body: string | null; created_at: string; updated_at?: string; user: { login: string } | null };
     const raw = await this.paginate<Raw>(repo, `/repos/${repoKey(repo)}/issues/${number}/comments`);
-    return raw.map((c) => ({ id: c.id, body: c.body ?? "", createdAt: c.created_at, author: { login: c.user?.login ?? "ghost" } }));
+    // updated_at is what exposes an edit: commands from edited comments do not count.
+    return raw.map((c) => ({
+      id: c.id,
+      body: c.body ?? "",
+      createdAt: c.created_at,
+      updatedAt: c.updated_at ?? c.created_at,
+      author: { login: c.user?.login ?? "ghost" },
+    }));
   }
 
   async listPullCommits(repo: RepoRef, number: number): Promise<CommitIdentity[]> {
@@ -260,14 +267,52 @@ export class GitHubApi implements GitHubClient {
     return this.paginate<Raw, { artifacts: Raw[] }>(repo, `/repos/${repoKey(repo)}/actions/runs/${runId}/artifacts`, (r) => r.artifacts);
   }
 
-  /** Downloads and unzips an artifact. fetch drops the Authorization header on the cross-origin redirect. */
-  async downloadArtifact(repo: RepoRef, artifactId: number): Promise<Map<string, Buffer>> {
+  /** Open PRs, for mapping merge-group commits back to the PRs they contain. */
+  async listOpenPullRequests(repo: RepoRef): Promise<Array<{ number: number; headSha: string; author: string }>> {
+    type Raw = { number: number; head: { sha: string }; user: { login: string } | null };
+    const raw = await this.paginate<Raw>(repo, `/repos/${repoKey(repo)}/pulls?state=open`, undefined, 10);
+    return raw.map((p) => ({ number: p.number, headSha: p.head.sha, author: p.user?.login ?? "ghost" }));
+  }
+
+  /**
+   * Downloads and unzips an artifact, reading only the entries `want` accepts.
+   * The body is streamed under a byte cap so a hostile artifact cannot exhaust
+   * memory before the zip limits apply. fetch drops the Authorization header
+   * on the cross-origin redirect.
+   */
+  async downloadArtifact(
+    repo: RepoRef,
+    artifactId: number,
+    want: (name: string) => boolean = () => true,
+    limits: Partial<ZipLimits> = {},
+  ): Promise<Map<string, Buffer>> {
+    const cap = limits.maxArchiveBytes ?? DEFAULT_ZIP_LIMITS.maxArchiveBytes;
     const token = await this.installationToken(repo);
     const path = `/repos/${repoKey(repo)}/actions/artifacts/${artifactId}/zip`;
     const res = await this.call(`token ${token}`, "GET", path);
     if (!res.ok) throw new GitHubApiError(res.status, path, await res.text());
-    return readZip(Buffer.from(await res.arrayBuffer()));
+    const declared = Number(res.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > cap) throw new ZipError(`artifact archive exceeds ${cap} bytes`);
+    return readZip(await readCapped(res, cap), want, limits);
   }
+}
+
+async function readCapped(res: Response, cap: number): Promise<Buffer> {
+  if (!res.body) return Buffer.alloc(0);
+  const reader = res.body.getReader();
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > cap) {
+      await reader.cancel();
+      throw new ZipError(`artifact archive exceeds ${cap} bytes`);
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks);
 }
 
 /**
@@ -276,7 +321,7 @@ export class GitHubApi implements GitHubClient {
  * repository's own workflow is identified by the run's repository and path.
  */
 export function provenanceOf(run: WorkflowRun, workflow: { repository: string; path: string }): ArtifactProvenance | null {
-  const base = { runId: run.id, runAttempt: run.runAttempt, headSha: run.headSha, event: run.event };
+  const base = { runId: run.id, runAttempt: run.runAttempt, headSha: run.headSha, event: run.event, runConclusion: run.conclusion ?? "unknown" };
   for (const ref of run.referencedWorkflows) {
     const m = /^([^/]+\/[^/]+)\/(.+?)(?:@.*)?$/.exec(ref.path);
     if (m && m[1] === workflow.repository && m[2] === workflow.path) {

@@ -116,6 +116,23 @@ NYORORI_RUNNER_COMMIT=$(git rev-parse HEAD) node dist/cli.js serve --port 8080
 
 서비스는 웹훅 서명(`X-Hub-Signature-256`)을 확인한 뒤 판정한다. B와 C 객체는 `NYORORI_WORKDIR/mirrors`의 bare mirror로 가져온다. 이때 토큰은 `GIT_CONFIG_*` 환경 변수로만 전달하고 argv나 remote 설정에는 남기지 않는다. 결과는 App이 만든 check run으로만 게시하며, 다른 App이나 PR workflow가 같은 이름으로 올린 체크는 읽지도 갱신하지도 않는다.
 
+## PR comment commands
+
+모든 명령은 새 댓글의 줄 맨 앞에 쓴다. 자세한 규칙은 `docs/operations.md` 3절.
+
+| 명령 | 누가 | 바인딩 |
+|---|---|---|
+| `/gate-waive gate=… unit="…" metric=… ceiling=N reason="…"` | 작성자 (AI 루프 봇 제외) | 신청 |
+| `/gate-waive-approve <id> blob=<C blob>` | `waiver_approvers` | 그 파일의 blob (단위 밖 변경은 이어짐) |
+| `/simplification-review <VERDICT> sha=<PR head>` + `q1..q5: pass/fail` + 트리거별 `S<n>: 처분` | `simplification_reviewers` | `sha=` (patch-id 동일 rebase 또는 트리거 파일 무변경이면 이어짐) |
+| `/gate-approve-tests key="<REASON>:<unit>" sha=<PR head> note="…"` | `gate_owners` | `sha=` (push마다 다시) |
+| `/gate-override gate=… reason=… file="…" blob=<C blob> note="…"` 또는 `reason=NONDETERMINISM base=<B> candidate=<C>` | `gate_owners` | blob 또는 (B, C) |
+
+- **수정된 댓글의 명령은 효력이 없다.** 쓰기 권한이 있으면 남의 댓글을 고칠 수 있기 때문이다. 게이트 요약에 "edited command ignored; post a new comment"로 표시된다. 명령을 지우거나 고치면 PR이 다시 평가된다.
+- 인용(`>`와 그 연속 줄), 코드 블록(``` 와 ~~~, 들여쓰기 4칸), HTML 주석(`<!-- -->`) 안의 명령은 무시한다.
+- 승인자는 PR 작성자, commit 작성자·committer·공동 작성자, AI 에이전트 호출자, 봇, (merge group이면) 그룹의 다른 PR 작성자가 아니어야 한다. 로그인에 연결되지 않은 commit 이메일이나 `Co-authored-by`가 있으면 **독립 승인자가 두 명** 필요하다. commit이 250개 이상인 PR은 독립성을 확인할 수 없어 승인을 받지 않는다.
+- 게이트 요약은 현재 head SHA와 blob을 넣은 복사용 명령을 코드 블록 안에 보여 준다.
+
 ## Development
 
 ```bash

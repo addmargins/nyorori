@@ -4,7 +4,7 @@
 // HTTP error for that request, never in an unhandled rejection that kills the
 // service.
 
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 /** GitHub caps webhook payloads at 25 MB. */
@@ -31,6 +31,28 @@ export interface WebhookOptions {
   dedupeSize?: number;
   maxBodyBytes?: number;
   bodyTimeoutMs?: number;
+}
+
+/**
+ * X-GitHub-Event is outside the HMAC, so a captured body must not be
+ * replayable as another event: the payload has to have that event's shape.
+ */
+const EVENT_SHAPES: Record<string, (p: Record<string, unknown>) => boolean> = {
+  pull_request: (p) => isObj(p.pull_request) && isObj(p.repository),
+  merge_group: (p) => isObj(p.merge_group) && isObj(p.repository),
+  issue_comment: (p) => isObj(p.comment) && isObj(p.issue) && isObj(p.repository),
+};
+
+function isObj(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+export function payloadMatchesEvent(event: string, payload: unknown): boolean {
+  if (!isObj(payload)) return false;
+  const shape = EVENT_SHAPES[event];
+  if (shape) return shape(payload);
+  // Events the dispatcher ignores must not look like one it acts on.
+  return !Object.values(EVENT_SHAPES).some((f) => f(payload));
 }
 
 type BodyResult = { ok: true; body: Buffer } | { ok: false; status: 400 | 408 | 413; why: string };
@@ -112,13 +134,20 @@ export function createWebhookHandler(opts: WebhookOptions): (req: IncomingMessag
       reply(res, 400);
       return;
     }
-    if (delivery && seen.includes(delivery)) {
+    if (!payloadMatchesEvent(event, payload)) {
+      opts.log?.("webhook event/payload mismatch", { event, delivery });
+      reply(res, 400);
+      return;
+    }
+    // Dedupe on the delivery id and on the signed body: a replay under a new id is the same event.
+    const bodyKey = `sha256:${createHash("sha256").update(body).digest("hex")}`;
+    if ((delivery && seen.includes(delivery)) || seen.includes(bodyKey)) {
       reply(res, 200, "duplicate");
       return;
     }
-    if (delivery) {
-      seen.push(delivery);
-      if (seen.length > limit) seen.shift();
+    for (const k of delivery ? [delivery, bodyKey] : [bodyKey]) {
+      seen.push(k);
+      if (seen.length > limit * 2) seen.shift();
     }
     reply(res, 202);
     try {

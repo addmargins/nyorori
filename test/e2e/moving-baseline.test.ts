@@ -87,7 +87,7 @@ describe("moving baseline (spec 7.5)", () => {
     const review: ReviewComment = {
       id: 1,
       author: { login: "rita" },
-      body: approvalBody(required.verdict.triggers.map((t) => t.id)),
+      body: approvalBody(required.verdict.triggers.map((t) => t.id), heads[3]!),
       createdAt: "2026-10-28T12:00:00Z",
       headSha: heads[3]!,
     };

@@ -28,9 +28,10 @@ export function servicePolicy(over: Partial<PolicyInput> = {}): Policy {
 const RUBRIC_OK = "q1: pass\nq2: pass\nq3: pass\nq4: pass\nq5: pass";
 
 /** A NO_SIMPLIFICATION_NEEDED review with the disposition line every fired trigger needs (ruling D13). */
-export function approvalBody(triggerIds: readonly string[]): string {
+/** `sha` is the PR head the reviewer looked at; approvals bind to it (round-3 item 8). */
+export function approvalBody(triggerIds: readonly string[], sha: string): string {
   const lines = [...new Set(triggerIds)].map((id) => `${id}: reviewed, the shape is intended`);
-  return ["/simplification-review NO_SIMPLIFICATION_NEEDED", RUBRIC_OK, ...lines].join("\n");
+  return [`/simplification-review NO_SIMPLIFICATION_NEEDED sha=${sha}`, RUBRIC_OK, ...lines].join("\n");
 }
 
 export async function run(

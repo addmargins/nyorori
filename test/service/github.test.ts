@@ -92,7 +92,7 @@ describe("artifact provenance", () => {
   it("reads org-required workflows from referenced_workflows", () => {
     expect(provenanceOf(run, { repository: "org/gate", path: ".github/workflows/gate-untrusted-tests.yml" })).toEqual({
       repository: "org/gate", workflowPath: ".github/workflows/gate-untrusted-tests.yml", workflowSha: "w".repeat(40),
-      runId: 10, runAttempt: 2, headSha: "c", event: "merge_group",
+      runId: 10, runAttempt: 2, headSha: "c", event: "merge_group", runConclusion: expect.any(String),
     });
   });
   it("ignores runs of other workflows", () => {

@@ -6,6 +6,7 @@
 import type { GateResult } from "../types.js";
 import { QUALITY_GATE_CHECK, type QualityGateVerdict } from "../aggregate/types.js";
 import { toCheckRun, verdictToCheckRun, type CheckRunOutput } from "../report/checkrun.js";
+import { hasGateCommand } from "../waivers/command.js";
 import type { CheckRunRecord, GitHubClient, RepoRef } from "./client.js";
 
 export interface EvaluationContext {
@@ -32,6 +33,51 @@ export interface ServiceDeps {
   log?: (msg: string, extra?: Record<string, unknown>) => void;
   /** Policy revision the evaluation uses; part of the check run's external id. */
   policyRevision?: string;
+  /** Per-PR serialization and generations; defaults to one queue per process. */
+  queue?: EvaluationQueue;
+}
+
+/**
+ * Evaluations of one PR (or merge-group commit) run one at a time, and each
+ * gets a generation when its event arrives. An evaluation publishes only if
+ * no newer one has started since, so a slow evaluation built from an older
+ * comment snapshot can never overwrite a newer verdict.
+ */
+export class EvaluationQueue {
+  private readonly gens = new Map<string, { gen: number; externalId: string }>();
+  private readonly tails = new Map<string, Promise<unknown>>();
+
+  begin(key: string, externalId: string): number {
+    const gen = (this.gens.get(key)?.gen ?? 0) + 1;
+    this.gens.set(key, { gen, externalId });
+    return gen;
+  }
+
+  isLatest(key: string, gen: number): boolean {
+    return this.gens.get(key)?.gen === gen;
+  }
+
+  latestExternalId(key: string): string | undefined {
+    return this.gens.get(key)?.externalId;
+  }
+
+  run<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.tails.get(key) ?? Promise.resolve();
+    const next = prev.then(fn, fn);
+    const tail = next.catch(() => undefined);
+    this.tails.set(key, tail);
+    void tail.then(() => {
+      if (this.tails.get(key) === tail) this.tails.delete(key);
+    });
+    return next;
+  }
+}
+
+const defaultQueue = new EvaluationQueue();
+
+function queueKey(deps: ServiceDeps, ctx: EvaluationContext): string {
+  const subject = ctx.kind === "pull_request" && ctx.prNumber !== undefined ? `pr${ctx.prNumber}` : `${ctx.kind}:${ctx.checkSha}`;
+  return `${deps.appId}|${ctx.repo.owner}/${ctx.repo.repo}|${subject}`;
 }
 
 export const GATE_COMMANDS = ["/gate-waive", "/gate-waive-approve", "/gate-override", "/gate-approve-tests", "/simplification-review"];
@@ -80,23 +126,51 @@ function failingCheck(title: string, summary: string): CheckRunOutput {
   return { name: QUALITY_GATE_CHECK, conclusion: "failure", title, summary };
 }
 
+const SUPERSEDED = (ctx: EvaluationContext) =>
+  failingCheck("SUPERSEDED: base or head moved", `B ${ctx.base}\nC ${ctx.candidate} is no longer current; a newer evaluation reports the result.`);
+
 export async function runAndPublish(deps: ServiceDeps, ctx: EvaluationContext): Promise<Evaluation | null> {
+  const queue = deps.queue ?? defaultQueue;
+  const key = queueKey(deps, ctx);
+  const ext = checkExternalId(ctx, deps.policyRevision);
+  const gen = queue.begin(key, ext);
+  // Pending right away, so the previous verdict is not what the required check shows while queued.
   await upsertCheck(deps, ctx, { name: QUALITY_GATE_CHECK, conclusion: "failure", title: "running", summary: `B ${ctx.base}\nC ${ctx.candidate}` }, "in_progress");
+  return queue.run(key, () => evaluateAndPublish(deps, ctx, queue, key, gen, ext));
+}
+
+async function evaluateAndPublish(
+  deps: ServiceDeps,
+  ctx: EvaluationContext,
+  queue: EvaluationQueue,
+  key: string,
+  gen: number,
+  ext: string,
+): Promise<Evaluation | null> {
+  // A newer evaluation owns the check. If it publishes under another external
+  // id, close ours; if it shares ours, it will complete the same run.
+  const yieldToNewer = async () => {
+    if (queue.latestExternalId(key) !== ext) await upsertCheck(deps, ctx, SUPERSEDED(ctx), "completed");
+    return null;
+  };
+  if (!queue.isLatest(key, gen)) return yieldToNewer();
   let evaluation: Evaluation;
   try {
     evaluation = await deps.evaluate(ctx);
   } catch (e) {
     deps.log?.("evaluation failed", { error: String(e), ...ctx });
+    if (!queue.isLatest(key, gen)) return yieldToNewer();
     await upsertCheck(deps, ctx, failingCheck("INCONCLUSIVE: TOOL_ERROR", `gate evaluation failed: ${String(e)}`), "completed");
     return null;
   }
+  if (!queue.isLatest(key, gen)) return yieldToNewer();
   if (evaluation.verdict.base_sha !== ctx.base || evaluation.verdict.candidate_sha !== ctx.candidate) {
     await upsertCheck(deps, ctx, failingCheck("INCONCLUSIVE: FINGERPRINT_MISMATCH", "evaluation was computed for a different B/C"), "completed");
     return null;
   }
   if (!(await stillCurrent(deps, ctx))) {
-    // A newer evaluation owns the result; close ours without touching any other run.
-    await upsertCheck(deps, ctx, failingCheck("SUPERSEDED: base or head moved", `B ${ctx.base}\nC ${ctx.candidate} is no longer the test merge; a newer evaluation reports the result.`), "completed");
+    // The test merge moved; close ours without touching any other run.
+    await upsertCheck(deps, ctx, SUPERSEDED(ctx), "completed");
     return null;
   }
   for (const r of evaluation.results) await upsertCheck(deps, ctx, toCheckRun(r), "completed");
@@ -167,14 +241,19 @@ interface IssueCommentPayload {
   action: string;
   repository: { owner: { login: string }; name: string };
   issue: { number: number; pull_request?: unknown };
-  comment: { body: string; user: { login: string } };
+  comment: { body: string | null; user: { login: string } };
+  changes?: { body?: { from?: string } };
 }
 
-/** Commands change approval state, so the PR is re-evaluated; the evaluation reads all comments afresh. */
+/**
+ * Commands change approval state, so the PR is re-evaluated; the evaluation
+ * reads all comments afresh. Edits and deletions count too: removing a command
+ * (old body in changes.body.from) must retract what it granted.
+ */
 export async function handleIssueComment(deps: ServiceDeps, payload: IssueCommentPayload): Promise<Evaluation | null> {
   if (!payload.issue.pull_request) return null;
-  const body = payload.comment.body ?? "";
-  if (!GATE_COMMANDS.some((c) => body.includes(c))) return null;
+  const bodies = [payload.comment.body ?? "", payload.changes?.body?.from ?? ""];
+  if (!bodies.some((b) => hasGateCommand(b) || GATE_COMMANDS.some((c) => b.includes(c)))) return null;
   const repo = { owner: payload.repository.owner.login, repo: payload.repository.name };
   const pr = await deps.client.getPullRequest(repo, payload.issue.number);
   if (pr.state !== "open") return null;

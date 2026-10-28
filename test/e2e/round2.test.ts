@@ -28,7 +28,7 @@ describe("degraded mode (ruling D16)", () => {
     expect(out.verdict.gates.find((g) => g.gate === "complexity")).toMatchObject({ mode: "degraded", counted: false });
 
     const approved = await run(repo, b, c, policy, {
-      pr: { comments: [comment(1, "rita", approvalBody(routedIds(out)), c)], identity, headSha: c },
+      pr: { comments: [comment(1, "rita", approvalBody(routedIds(out), c), c)], identity, headSha: c },
     });
     expect(approved.verdict.mergeAllowed).toBe(true);
     repo.dispose();

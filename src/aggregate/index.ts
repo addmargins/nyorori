@@ -70,6 +70,8 @@ export interface ArtifactProvenance {
    * The API does not expose it, so it comes from the run's metadata.
    */
   testMergeSha?: string;
+  /** The run's conclusion from the API. Only a successful run can supply passing evidence. */
+  runConclusion?: string;
 }
 
 export interface TrustedWorkflows {
@@ -243,7 +245,11 @@ export function aggregateQualityGate(input: AggregateInput): QualityGateVerdict 
       const state = effectiveState(s.result);
       const needsProvenance =
         s.source === "actions" || s.provenance !== undefined || (state !== "NOT_APPLICABLE" && PASSING.has(state));
-      const p = needsProvenance ? provenanceProblem(s, input) : null;
+      let p = needsProvenance ? provenanceProblem(s, input) : null;
+      // A failed or cancelled run's artifacts may still prove a failure, never a pass.
+      if (!p && s.provenance?.runConclusion !== undefined && s.provenance.runConclusion !== "success" && PASSING.has(state)) {
+        p = `run concluded ${s.provenance.runConclusion}; its artifacts cannot be passing evidence`;
+      }
       if (p) {
         reject(p);
         continue;
@@ -372,4 +378,21 @@ function verdictHeadline(state: GateState, blocking: Violation[], reasons: Reaso
 
 export function stateRank(s: GateState): number {
   return GATE_STATES.indexOf(s);
+}
+
+/**
+ * Adds an aggregate-level INCONCLUSIVE found after aggregation (e.g. a hostile
+ * artifact the service refused to read). The verdict can only get stricter.
+ */
+export function withVerdictInconclusive(verdict: QualityGateVerdict, item: Inconclusive): QualityGateVerdict {
+  const state = worstState([verdict.state, "INCONCLUSIVE"]);
+  const reasons = verdict.reasons.includes(item.reason) ? verdict.reasons : [...verdict.reasons, item.reason];
+  return {
+    ...verdict,
+    state,
+    mergeAllowed: false,
+    reasons,
+    inconclusive: [...verdict.inconclusive, item],
+    summary: state === "INCONCLUSIVE" ? `INCONCLUSIVE: ${reasons.join(", ")}` : verdict.summary,
+  };
 }
