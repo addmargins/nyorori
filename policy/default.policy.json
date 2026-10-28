@@ -75,6 +75,7 @@
     "jsx_in_js": [],
     "max_file_bytes": 2097152,
     "rename_similarity": 70,
+    "declaration_impl_check": true,
     "sensitive_paths": [
       ".gitattributes",
       "**/.gitattributes",
@@ -117,7 +118,7 @@
     "mode": "enforce",
     "max_params": 4,
     "max_nested_callbacks": 3,
-    "max_lines_per_function": 60,
+    "enforced_rules": [],
     "suppression_allowlist": []
   },
   "deps": {
@@ -163,11 +164,18 @@
   },
   "waivers": {
     "per_pr_budget": 3,
+    "per_quarter_budget": 30,
     "max_days": 90
   },
   "ai_loop": {
     "bot_accounts": [],
     "max_retries": 2
+  },
+  "mutation": {
+    "mode": "observe"
+  },
+  "provenance": {
+    "trusted_workflows": []
   },
   "parser_lag_allowlist": []
 }

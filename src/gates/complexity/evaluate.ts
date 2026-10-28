@@ -79,6 +79,10 @@ interface Ctx {
   pairByC: Map<string, FilePair>;
   /** B paths of files whose baseline failed to parse. */
   noBaselineB: Set<string>;
+  /** B and C paths of test files while tests are observe-only: no triggers. */
+  observedOnly: Set<string>;
+  /** File pairs that produce triggers (test files excluded unless enforced). */
+  triggerPairs: FilePair[];
 }
 
 /**
@@ -131,11 +135,18 @@ function buildCtx(input: ComplexityInput): Ctx {
   }
   const pairs = filePairs(input);
   const noBaselineB = new Set<string>();
+  const observedOnly = new Set<string>();
   for (const e of input.manifest.entries) {
     if (e.b && e.c && input.baselineMissing?.has(e.c.path)) noBaselineB.add(e.b.path);
+    if (e.isTest && !input.policy.complexity.enforce_on_tests) {
+      if (e.b) observedOnly.add(e.b.path);
+      if (e.c) observedOnly.add(e.c.path);
+    }
   }
   return {
     noBaselineB,
+    observedOnly,
+    triggerPairs: pairs.filter((p) => !observedOnly.has(p.c.path)),
     input,
     T: input.policy.complexity.cognitive_limit,
     bUnits,
@@ -283,7 +294,7 @@ function redistribution(ctx: Ctx, bFiles: FileMeasurement[], cFiles: FileMeasure
 
 function s1Triggers(ctx: Ctx): TriggerHit[] {
   const hits: TriggerHit[] = [];
-  for (const p of ctx.pairs) {
+  for (const p of ctx.triggerPairs) {
     const r = redistribution(ctx, [p.b], [p.c]);
     if (r.fires) hits.push({ id: "S1", gate: "complexity", file: p.c.path, evidence: r.evidence, routing: true });
   }
@@ -294,8 +305,8 @@ function s1Triggers(ctx: Ctx): TriggerHit[] {
   for (const e of ctx.input.manifest.entries) {
     const bf = e.b && e.measure.B ? ctx.input.b.get(e.b.path) : undefined;
     const cf = e.c && e.measure.C ? ctx.input.c.get(e.c.path) : undefined;
-    if (bf) bFiles.push(bf);
-    if (cf) cFiles.push(cf);
+    if (bf && !ctx.observedOnly.has(bf.path)) bFiles.push(bf);
+    if (cf && !ctx.observedOnly.has(cf.path)) cFiles.push(cf);
   }
   if (bFiles.length + cFiles.length > 1) {
     const r = redistribution(ctx, bFiles, cFiles);
@@ -350,7 +361,7 @@ function s5Triggers(ctx: Ctx): TriggerHit[] {
     seen.add(u.key);
     hits.push({ id: "S5", gate: "complexity", file, unit: u.key, evidence, routing: true });
   };
-  for (const p of ctx.pairs) {
+  for (const p of ctx.triggerPairs) {
     if (p.hunks.length === 0) continue;
     for (const bu of flattenUnits(p.b.units)) {
       const m = ctx.byB.get(bu.key);
@@ -375,7 +386,7 @@ function s5Triggers(ctx: Ctx): TriggerHit[] {
   for (const m of ctx.input.matches) {
     if (!m.identityChanged) continue;
     const bu = ctx.bUnits.get(m.bKey);
-    if (!bu || bu.cognitive <= ctx.T) continue;
+    if (!bu || bu.cognitive <= ctx.T || ctx.observedOnly.has(bu.path)) continue;
     const file = m.cKey.slice(0, m.cKey.indexOf("::"));
     if (seen.has(bu.key)) {
       const hit = hits.find((h) => h.unit === bu.key);
@@ -396,7 +407,7 @@ function lines(ctx: Ctx, p: FilePair): { b: number; c: number; normalized: boole
 function s9Triggers(ctx: Ctx): TriggerHit[] {
   const cfg = ctx.input.policy.triggers.s9;
   const hits: TriggerHit[] = [];
-  for (const p of ctx.pairs) {
+  for (const p of ctx.triggerPairs) {
     const vb = visibleBranches(p.b);
     const vc = visibleBranches(p.c);
     const drop = vb - vc;
@@ -529,6 +540,7 @@ export function evaluateComplexity(input: ComplexityInput): ComplexityOutcome {
   const violations: Violation[] = [];
   const triggers: TriggerHit[] = [];
   const cFiles = measuredCEntries(ctx);
+  const triggerFiles = cFiles.filter(({ file }) => !ctx.observedOnly.has(file.path));
 
   for (const { entry, file } of cFiles) {
     const enforce = !entry.isTest || cfg.enforce_on_tests;
@@ -542,7 +554,7 @@ export function evaluateComplexity(input: ComplexityInput): ComplexityOutcome {
         obs.inclusive_cognitive[cu.key] = cu.inclusiveCognitive;
       }
       const isNew = !ctx.byC.has(cu.key);
-      if (isNew && cu.cognitive >= cfg.near_limit_low && cu.cognitive <= ctx.T) {
+      if (enforce && isNew && cu.cognitive >= cfg.near_limit_low && cu.cognitive <= ctx.T) {
         const o = { unit: cu.key, line: cu.line, cognitive: cu.cognitive, cyclomatic: cu.cyclomatic };
         obs.s8_near_limit.push(o);
         triggers.push({
@@ -565,10 +577,10 @@ export function evaluateComplexity(input: ComplexityInput): ComplexityOutcome {
 
   triggers.push(
     ...s1Triggers(ctx),
-    ...s2Triggers(ctx, cFiles),
+    ...s2Triggers(ctx, triggerFiles),
     ...s5Triggers(ctx),
     ...s9Triggers(ctx),
-    ...s10Triggers(ctx, cFiles),
+    ...s10Triggers(ctx, triggerFiles),
     ...s11Triggers(ctx),
   );
 

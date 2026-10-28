@@ -7,7 +7,7 @@
 // The TypeScript sources use NodeNext `.js` specifiers, so a tiny resolve
 // hook maps `./x.js` to `./x.ts` when only the TypeScript file exists.
 
-import { existsSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { register } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -94,4 +94,3 @@ out.push("");
 const target = fileURLToPath(new URL("test/fixtures/manipulation/RESULTS.md", root));
 writeFileSync(target, out.join("\n"));
 console.log(out.join("\n"));
-void existsSync;

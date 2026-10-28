@@ -118,3 +118,20 @@ export function renderSummaryMarkdown(results: GateResult[], verdict?: QualityGa
   out.push("_수치는 변경 파일에서만 계산했으며 저장소 전체 통계가 아닙니다._");
   return out.join("\n");
 }
+
+/**
+ * Copyable approval commands for pending waivers, pinned to the blob the
+ * approver is looking at. They sit inside a code fence, which the command
+ * parser ignores, so the gate's own comment never approves anything.
+ */
+export function renderWaiverApprovalHints(pending: ReadonlyArray<{ id: string; unit: string; blob: string }>): string {
+  if (pending.length === 0) return "";
+  return [
+    "**승인 대기 중인 waiver** — 승인자는 아래 명령을 복사해 새 댓글로 남긴다.",
+    "",
+    "```",
+    ...pending.map((p) => `/gate-waive-approve ${p.id} blob=${p.blob}   # ${p.unit}`),
+    "```",
+    "",
+  ].join("\n");
+}

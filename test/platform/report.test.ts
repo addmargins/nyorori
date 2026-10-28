@@ -97,3 +97,13 @@ describe("AI feedback", () => {
     expect(fb.instructions).toContain("문자열로 만든 함수");
   });
 });
+
+describe("waiver approval hints", () => {
+  it("are fenced so the gate's own comment never counts as an approval", async () => {
+    const { renderWaiverApprovalHints } = await import("../../src/report/markdown.js");
+    const { findCommands } = await import("../../src/waivers/command.js");
+    const md = renderWaiverApprovalHints([{ id: "W1", unit: "src/a.ts::f#function[0]", blob: "1".repeat(40) }]);
+    expect(md).toContain("/gate-waive-approve W1 blob=");
+    expect(findCommands(md, "gate-waive-approve")).toHaveLength(0);
+  });
+});

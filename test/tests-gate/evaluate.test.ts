@@ -12,7 +12,7 @@ describe("price", () => {
   it("snapshot", () => { expect(render()).toMatchInlineSnapshot(\`"<b>1</b>"\`); });
 });
 `;
-const ALL = [
+const ALL: Array<{ file: string; ancestors: string[]; title: string; status?: "passed" | "failed" | "skipped" | "todo" | "pending" }> = [
   { file: FILE, ancestors: ["price"], title: "zero" },
   { file: FILE, ancestors: ["price"], title: "vip" },
   { file: FILE, ancestors: ["price"], title: "snapshot" },

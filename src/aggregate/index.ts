@@ -48,7 +48,7 @@ export function policyMode(policy: Policy, gate: GateId): GateMode {
     case "simplification-review":
       return policy.review.mode;
     case "mutation":
-      return "observe"; // v1: observe only (spec 4.1)
+      return policy.mutation.mode;
   }
 }
 

@@ -111,10 +111,12 @@ describe("matchUnits", () => {
   });
 
   it("same-name methods of different classes rewritten in one hunk are not guessed", () => {
-    const cls = (name: string, n: number, ind: string) =>
-      `${ind}class ${name} {\n${ifChain("run", n, ind + "  ").replace(/function run/, "run")}${ind}}\n`;
-    const b = cls("A", 20, "") + cls("B", 18, "");
-    const c = cls("A", 20, "  ") + cls("B", 18, "  "); // every line re-indented: one hunk
+    // One class per line, so editing both lines yields one hunk holding two `run` methods.
+    const cls = (name: string, n: number) =>
+      `class ${name} { run(x) { let y = 0; ${Array.from({ length: n }, (_, i) => `if (x === ${i}) y++;`).join(" ")} return y; } }`;
+    const b = `${cls("A", 20)}\n${cls("B", 18)}\n`;
+    // Both methods even improved (20→19, 18→17), yet neither identity is certain.
+    const c = `${cls("A2", 19)}\n${cls("B2", 17)}\n`;
     const r = runScenario({ b: { [F]: b }, c: { [F]: c } });
     expect(r.match.matches.filter((m) => !m.cKey.endsWith("<module>"))).toEqual([]);
     expect(violationReasons(r).sort()).toEqual([
@@ -123,6 +125,27 @@ describe("matchUnits", () => {
     ]);
     const cands = r.outcome.violations[0]!.details!.b_candidates as unknown[];
     expect(cands).toHaveLength(2);
+  });
+
+  it("unchanged scores in the same ambiguous hunk are matched as verbatim moves (stage 4)", () => {
+    const cls = (name: string, n: number) =>
+      `class ${name} { run(x) { let y = 0; ${Array.from({ length: n }, (_, i) => `if (x === ${i}) y++;`).join(" ")} return y; } }`;
+    const r = runScenario({
+      b: { [F]: `${cls("A", 20)}\n${cls("B", 18)}\n` },
+      c: { [F]: `${cls("A2", 20)}\n${cls("B2", 18)}\n` },
+    });
+    expect(r.match.matches.filter((m) => m.stage === 4)).toHaveLength(2);
+    expect(r.outcome.violations).toEqual([]);
+  });
+
+  it("same-name methods in separate hunks are matched 1:1 per hunk (stage 2)", () => {
+    const cls = (name: string, n: number) =>
+      `class ${name} {\n${ifChain("run", n, "  ").replace(/function run/, "run")}}\n`;
+    const b = cls("A", 20) + "\n// spacer\n" + cls("B", 18);
+    const c = b.replace("class A {\n  run(x)", "class A {\n  run(x, y0)").replace("class B {\n  run(x)", "class B {\n  run(x, y1)");
+    const r = runScenario({ b: { [F]: b }, c: { [F]: c } });
+    expect(r.match.matches.filter((m) => m.stage === 2)).toHaveLength(2);
+    expect(r.outcome.violations).toEqual([]);
   });
 
   it("same-line anonymous functions: matched by line ordinal when the line is untouched", () => {

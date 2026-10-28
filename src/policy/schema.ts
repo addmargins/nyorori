@@ -60,6 +60,8 @@ export const policySchema = z
         jsx_in_js: z.array(glob).default([]),
         max_file_bytes: z.number().int().positive().default(2 * 1024 * 1024),
         rename_similarity: z.number().int().min(1).max(100).default(70),
+        /** Measure `.d.ts` on C anyway: an implementation there is a parse error (PARSE_ERROR_CANDIDATE). */
+        declaration_impl_check: z.boolean().default(true),
         /** Paths whose change is routed to S11 and requires CODEOWNERS review. */
         sensitive_paths: z
           .array(glob)
@@ -130,7 +132,11 @@ export const policySchema = z
         mode: mode.default("enforce"),
         max_params: z.number().int().positive().default(4),
         max_nested_callbacks: z.number().int().positive().default(3),
-        max_lines_per_function: z.number().int().positive().default(60),
+        /**
+         * Rules that block while `mode` is enforce. Empty means every block-category
+         * rule. P1 lists only the dynamic-code rules (spec 13.1).
+         */
+        enforced_rules: z.array(z.string()).default([]),
         /** Suppression comments that may be added (exact rule names / directive text). */
         suppression_allowlist: z.array(z.string()).default([]),
       })
@@ -192,6 +198,7 @@ export const policySchema = z
     waivers: z
       .object({
         per_pr_budget: z.number().int().nonnegative().default(3),
+        per_quarter_budget: z.number().int().nonnegative().default(30),
         max_days: z.number().int().positive().default(90),
       })
       .strict()
@@ -201,6 +208,28 @@ export const policySchema = z
       .object({
         bot_accounts: z.array(z.string()).default([]),
         max_retries: z.number().int().nonnegative().default(2),
+      })
+      .strict()
+      .default({}),
+
+    mutation: z
+      .object({ mode: mode.default("observe") })
+      .strict()
+      .default({}),
+
+    /**
+     * Only artifacts from these workflow files at these commits are accepted
+     * from the untrusted Actions job (spec 10.1).
+     */
+    provenance: z
+      .object({
+        trusted_workflows: z
+          .array(
+            z
+              .object({ repository: z.string(), path: z.string(), shas: z.array(z.string()) })
+              .strict(),
+          )
+          .default([]),
       })
       .strict()
       .default({}),
