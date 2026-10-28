@@ -1,6 +1,11 @@
 // branch-hiding (S9): syntax that moves decisions where cccc assigns no
 // cost (spec 7.2 c/d/d′/f/f′/f″, rulings D8 and D17). Routing only: each
 // shape has legitimate uses, so a human decides.
+//
+// Known gaps (accepted, documented):
+// - Arithmetic gating through clamps: `t += Math.min(1, o.b) * 2` acts as
+//   `if (o.b) t += 2` but is indistinguishable from real arithmetic without
+//   types (audit s9.ts).
 
 import type { Rule } from "eslint";
 import {

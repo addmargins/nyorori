@@ -2,7 +2,9 @@
 // properties and is called directly in the same file — the `ctx`-mutating
 // split of spec 7.2 (b). Ruling D17 narrows `no-param-reassign {props}` to
 // direct calls so Immer recipes and Express/Koa middleware (passed as values)
-// stay quiet.
+// stay quiet. A single such helper is ordinary; the split shape has several,
+// so the rule reports only when a file has at least MIN_HELPERS of them
+// (one helper fired on 2–6% of hand-written files).
 
 import type { Rule } from "eslint";
 import { isAnyFunction, isCalleeOf, isFunctionLike, outermostWrapper, unwrap, type AstNode } from "./ast.js";
@@ -31,6 +33,8 @@ function isPropertyWrite(id: AstNode): boolean {
   return (p.type === "ForInStatement" || p.type === "ForOfStatement") && p.left === n;
 }
 
+const MIN_HELPERS = 2;
+
 export const paramMutation: Rule.RuleModule = {
   meta: {
     type: "suggestion",
@@ -41,6 +45,7 @@ export const paramMutation: Rule.RuleModule = {
   },
   create(context) {
     const sc = context.sourceCode;
+    const found: Array<{ node: never; name: string; param: string }> = [];
     const check = (node: never) => {
       const fn = node as AstNode;
       if (!isAnyFunction(fn) || (!isFunctionLike(fn) && fn.type !== "FunctionDeclaration")) return;
@@ -59,12 +64,16 @@ export const paramMutation: Rule.RuleModule = {
         return id !== binding && isCalleeOf(outermostWrapper(id)) && unwrap(outermostWrapper(id).parent!.callee) === id;
       });
       if (!calledDirectly) return;
-      context.report({ node, messageId: "mutatesParam", data: { name: binding.name, param: mutated.name } });
+      found.push({ node, name: binding.name, param: mutated.name });
     };
     return {
       FunctionDeclaration: check,
       FunctionExpression: check,
       ArrowFunctionExpression: check,
+      "Program:exit"() {
+        if (found.length < MIN_HELPERS) return;
+        for (const f of found) context.report({ node: f.node, messageId: "mutatesParam", data: { name: f.name, param: f.param } });
+      },
     } as unknown as Rule.RuleListener;
   },
 };

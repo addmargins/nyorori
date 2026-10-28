@@ -144,7 +144,7 @@ describe("structural limits", () => {
 
   it("parameter property mutation by a directly called helper is an S10 hit", async () => {
     const r = await lintSnippet(
-      `function step(ctx: { total: number }) { ctx.total = 1; }\nexport function run(c: { total: number }) { step(c); return c.total; }`,
+      `function step(ctx: { total: number }) { ctx.total = 1; }\nfunction floor(ctx: { total: number }) { ctx.total = Math.max(0, ctx.total); }\nexport function run(c: { total: number }) { step(c); floor(c); return c.total; }`,
     );
     expect(r.messages.find((m) => m.ruleId === "nyorori/param-mutation")?.category).toBe("trigger:S10");
   });
@@ -153,6 +153,7 @@ describe("structural limits", () => {
     ["exported, never called here", `export function step(ctx: { total: number }) { ctx.total = 1; }`],
     ["Immer recipe passed as a value", `declare function produce<T>(s: T, f: (d: T) => void): T;\nconst recipe = (draft: { n: number }) => { draft.n += 1; };\nexport const next = produce({ n: 1 }, recipe);`],
     ["Express middleware", `declare const app: { use(f: (req: { user?: string }) => void): void };\nfunction auth(req: { user?: string }) { req.user = "u"; }\napp.use(auth);`],
+    ["a single mutating helper", `function step(ctx: { total: number }) { ctx.total = 1; }\nexport function run(c: { total: number }) { step(c); return c.total; }`],
     ["rebinding a parameter", `function inc(n: number) { n += 1; return n; }\nexport const x = inc(1);`],
   ])("no S10 hit: %s", async (_name, code) => {
     expect((await lintSnippet(code)).messages.filter((m) => m.category === "trigger:S10")).toEqual([]);
