@@ -1,0 +1,42 @@
+{
+  "name": "@addmargins/nyorori",
+  "version": "0.1.0",
+  "description": "Fail-closed JS/TS pull request quality gate built on pinned cccc measurements",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=24.11.0"
+  },
+  "bin": {
+    "nyorori": "dist/cli.js"
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "check": "npm run typecheck && npm test",
+    "start": "node dist/cli.js",
+    "service": "node --use-env-proxy dist/server.js",
+    "demo": "npm run build && node scripts/demo.mjs",
+    "test:real": "npm run build && node --test test/real-measurer.test.mjs",
+    "attest": "node --use-env-proxy dist/attestor.js",
+    "replay": "node dist/replay.js",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.mjs\" \"scripts/*.mjs\" package.json tsconfig.json examples/policy.json README.md"
+  },
+  "dependencies": {
+    "@typescript-eslint/eslint-plugin": "8.72.1",
+    "@typescript-eslint/parser": "8.72.1",
+    "eslint": "10.13.0",
+    "fflate": "0.8.3",
+    "minimatch": "11.0.2",
+    "prettier": "3.9.10",
+    "unicode-confusables": "0.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3"
+  }
+}

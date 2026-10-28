@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.nyorori/
+coverage/
+*.log
+.env
+.env.*
+!.env.example

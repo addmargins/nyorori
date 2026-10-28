@@ -1,0 +1,107 @@
+{
+  "schema_version": 1,
+  "revision": "pilot-p0-v1",
+  "phase": "P0",
+  "gates": {
+    "complexity": "observe",
+    "lint-structure": "observe",
+    "deps": "observe",
+    "tests": "observe",
+    "coverage": "observe",
+    "simplification-review": "observe",
+    "mutation": "observe"
+  },
+  "measurement": {
+    "binary": "/workspace/tools/cccc/1.8.5/cccc",
+    "sha256": "6f8b1b457526743f908da513d1f2ba9db4091ff4c3a185ce3840725bb595a819",
+    "version": "cccc 1.8.5",
+    "timeout_ms": 120000,
+    "jobs": 4,
+    "max_file_bytes": 2000000,
+    "jsx_in_js": false
+  },
+  "scope": {
+    "source_extensions": [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
+    "unmeasured_extensions": [
+      ".vue",
+      ".svelte",
+      ".astro",
+      ".mdx",
+      ".html",
+      ".svg",
+      ".sh",
+      ".py",
+      ".rs",
+      ".go",
+      ".sql"
+    ],
+    "non_code_extensions": [
+      ".md",
+      ".txt",
+      ".json",
+      ".jsonc",
+      ".yaml",
+      ".yml",
+      ".toml",
+      ".lock",
+      ".css",
+      ".scss",
+      ".png",
+      ".jpg",
+      ".jpeg",
+      ".gif",
+      ".webp",
+      ".ico",
+      ".woff",
+      ".woff2",
+      ".ttf"
+    ],
+    "test_globs": ["**/*.test.*", "**/*.spec.*", "test/**", "tests/**", "**/__tests__/**"],
+    "exclude_globs": [],
+    "protected_globs": [
+      ".github/**",
+      "**/cccc.toml",
+      "**/.cccc.toml",
+      "**/eslint.config.*",
+      "**/.eslintrc*",
+      "**/vitest.config.*",
+      "**/jest.config.*",
+      "**/stryker*",
+      "**/tsconfig*.json*",
+      "**/jsconfig*.json*",
+      "**/package.json",
+      "**/*lock*",
+      "**/.gitignore",
+      "**/.ignore",
+      "**/.gitattributes",
+      "**/.gitmodules",
+      "**/waivers.jsonl",
+      "**/policy.json"
+    ]
+  },
+  "limits": {
+    "cognitive": 15,
+    "max_params": 4,
+    "max_callbacks": 3,
+    "max_function_lines": 60,
+    "coverage_uncovered": 2,
+    "coverage_fraction": 0.1
+  },
+  "dependencies": {
+    "forbidden": []
+  },
+  "identities": {
+    "simplification_reviewers": [],
+    "waiver_approvers": [],
+    "gate_owners": [],
+    "bots": []
+  },
+  "coverage": {
+    "provider": "vitest-v8",
+    "version": "4.0.18"
+  },
+  "waiver": {
+    "max_per_pr": 2,
+    "max_days": 90
+  }
+}
