@@ -166,9 +166,9 @@ export class GitHubApi implements GitHubClient {
   }
 
   async listCheckRuns(repo: RepoRef, sha: string): Promise<CheckRunRecord[]> {
-    type Raw = { id: number; name: string; head_sha: string; app: { id: number } | null; status: CheckRunRecord["status"]; conclusion: string | null };
+    type Raw = { id: number; name: string; head_sha: string; app: { id: number } | null; status: CheckRunRecord["status"]; conclusion: string | null; external_id?: string | null };
     const runs = await this.paginate<Raw, { check_runs: Raw[] }>(repo, `/repos/${repoKey(repo)}/commits/${sha}/check-runs`, (r) => r.check_runs);
-    return runs.map((r) => ({ id: r.id, name: r.name, headSha: r.head_sha, appId: r.app?.id ?? null, status: r.status, conclusion: r.conclusion }));
+    return runs.map((r) => ({ id: r.id, name: r.name, headSha: r.head_sha, appId: r.app?.id ?? null, status: r.status, conclusion: r.conclusion, externalId: r.external_id ?? null }));
   }
 
   private checkBody(req: CheckRunRequest): Record<string, unknown> {

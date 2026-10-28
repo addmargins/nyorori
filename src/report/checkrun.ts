@@ -38,16 +38,20 @@ function titleFor(state: GateState, headline: string, reasons: readonly string[]
   }
 }
 
-/** Informational sub-check `gate/<id>`. Observe-mode gates never fail their check. */
+/**
+ * Informational sub-check `gate/<id>`. Observe and degraded gates never fail
+ * their check: a degraded gate's findings reach the verdict through the
+ * simplification review instead.
+ */
 export function toCheckRun(result: GateResult): CheckRunOutput {
-  const observe = result.mode === "observe";
+  const observe = result.mode !== "enforce";
   const conclusion: CheckConclusion = observe ? "success" : conclusionFor(result.state);
   const inconclusiveReasons = [...new Set(result.inconclusive.map((i) => i.reason))];
   const title = titleFor(result.state, result.summary, inconclusiveReasons);
   return {
     name: `gate/${result.gate}`,
     conclusion,
-    title: clip(observe ? `[observe] ${title}` : title, MAX_TITLE),
+    title: clip(observe ? `[${result.mode}] ${title}` : title, MAX_TITLE),
     summary: clip(renderGateSection(result), MAX_BODY),
   };
 }

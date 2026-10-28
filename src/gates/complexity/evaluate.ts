@@ -44,6 +44,8 @@ export interface ComplexityInput {
   baselineMissing?: ReadonlySet<string>;
   /** The PR was authored by the AI fix loop (ruling D5: foreign-language files always route). */
   isAiLoop?: boolean;
+  /** C paths whose pinned-Prettier normalization equals B's (ruling D21a): a pure reformat. */
+  normalizedIdentical?: ReadonlySet<string>;
 }
 
 /**
@@ -60,7 +62,7 @@ const RULING_DEFAULTS = {
 };
 
 function rulingThreshold(policy: Policy, group: "s9" | "s10" | "s12", field: string, key: keyof typeof RULING_DEFAULTS): number {
-  const fromPolicy = (policy.triggers as Record<string, Record<string, unknown> | undefined>)[group]?.[field];
+  const fromPolicy = (policy.triggers as unknown as Record<string, Record<string, unknown> | undefined>)[group]?.[field];
   return typeof fromPolicy === "number" ? fromPolicy : RULING_DEFAULTS[key];
 }
 
@@ -132,7 +134,12 @@ function buildCtx(input: ComplexityInput): Ctx {
     byC.set(m.cKey, m);
     byB.set(m.bKey, m);
   }
-  const pairs = filePairs(input);
+  // A pure reformat whose units all matched is no edit at all: no range touches (D21a).
+  const pairs = filePairs(input).map((p) =>
+    input.normalizedIdentical?.has(p.c.path) && flattenUnits(p.c.units).every((u) => byC.has(u.key))
+      ? { ...p, hunks: [] }
+      : p,
+  );
   const noBaselineB = new Set<string>();
   const observedOnly = new Set<string>();
   for (const e of input.manifest.entries) {

@@ -30,21 +30,27 @@ export interface ServiceDeps {
   appId: number;
   evaluate: (ctx: EvaluationContext) => Promise<Evaluation>;
   log?: (msg: string, extra?: Record<string, unknown>) => void;
+  /** Policy revision the evaluation uses; part of the check run's external id. */
+  policyRevision?: string;
 }
 
-export const GATE_COMMANDS = ["/gate-waive", "/gate-waive-approve", "/gate-override", "/simplification-review"];
+export const GATE_COMMANDS = ["/gate-waive", "/gate-waive-approve", "/gate-override", "/gate-approve-tests", "/simplification-review"];
 
 /** Checks with our name but created by another app (or a PR workflow) are ignored, never updated or trusted. */
 export function ownCheckRuns(runs: readonly CheckRunRecord[], appId: number, name?: string): CheckRunRecord[] {
   return runs.filter((r) => r.appId === appId && (name === undefined || r.name === name));
 }
 
-function externalId(ctx: EvaluationContext): string {
-  return `${ctx.kind}:${ctx.base}:${ctx.candidate}`;
+/** One check run per (B, C, P): concurrent evaluations of the same head never write each other's runs. */
+export function checkExternalId(ctx: Pick<EvaluationContext, "base" | "candidate">, policyRevision: string | undefined): string {
+  return `${ctx.base}:${ctx.candidate}:${policyRevision ?? "-"}`;
 }
 
 async function upsertCheck(deps: ServiceDeps, ctx: EvaluationContext, out: CheckRunOutput, status: "in_progress" | "completed"): Promise<void> {
-  const existing = ownCheckRuns(await deps.client.listCheckRuns(ctx.repo, ctx.checkSha), deps.appId, out.name);
+  const id = checkExternalId(ctx, deps.policyRevision);
+  const existing = ownCheckRuns(await deps.client.listCheckRuns(ctx.repo, ctx.checkSha), deps.appId, out.name).filter(
+    (r) => r.externalId === id,
+  );
   const req = {
     name: out.name,
     headSha: ctx.checkSha,
@@ -53,11 +59,21 @@ async function upsertCheck(deps: ServiceDeps, ctx: EvaluationContext, out: Check
     title: out.title,
     summary: out.summary,
     ...(out.text ? { text: out.text } : {}),
-    externalId: externalId(ctx),
+    externalId: id,
   };
-  const target = existing.find((r) => r.status !== "completed") ?? existing[0];
+  const target = existing.sort((a, b) => b.id - a.id)[0];
   if (target) await deps.client.updateCheckRun(ctx.repo, target.id, req);
   else await deps.client.createCheckRun(ctx.repo, req);
+}
+
+/**
+ * Whether B/C are still what GitHub would evaluate now. A merge group's
+ * commits never move; a PR's test merge does when its base or head moves.
+ */
+async function stillCurrent(deps: ServiceDeps, ctx: EvaluationContext): Promise<boolean> {
+  if (ctx.kind !== "pull_request" || ctx.prNumber === undefined) return true;
+  const merge = await deps.client.resolveRef(ctx.repo, `refs/pull/${ctx.prNumber}/merge`);
+  return merge === ctx.candidate;
 }
 
 function failingCheck(title: string, summary: string): CheckRunOutput {
@@ -76,6 +92,11 @@ export async function runAndPublish(deps: ServiceDeps, ctx: EvaluationContext): 
   }
   if (evaluation.verdict.base_sha !== ctx.base || evaluation.verdict.candidate_sha !== ctx.candidate) {
     await upsertCheck(deps, ctx, failingCheck("INCONCLUSIVE: FINGERPRINT_MISMATCH", "evaluation was computed for a different B/C"), "completed");
+    return null;
+  }
+  if (!(await stillCurrent(deps, ctx))) {
+    // A newer evaluation owns the result; close ours without touching any other run.
+    await upsertCheck(deps, ctx, failingCheck("SUPERSEDED: base or head moved", `B ${ctx.base}\nC ${ctx.candidate} is no longer the test merge; a newer evaluation reports the result.`), "completed");
     return null;
   }
   for (const r of evaluation.results) await upsertCheck(deps, ctx, toCheckRun(r), "completed");

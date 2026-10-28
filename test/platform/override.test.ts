@@ -28,7 +28,8 @@ describe("measurement override", () => {
     const ownerAuthor = policy({ review: { gate_owners: ["author-erin"] } });
     expect(run([schema], [cmd("SCHEMA", "author-erin")], ownerAuthor).rejected[0]!.problem).toMatch(/author/);
     expect(run([schema], [cmd("SCHEMA", "owner-dave", BLOB2)]).inconclusive).toHaveLength(1);
-    expect(run([syntax], [cmd("PARSE_ERROR_CANDIDATE")], policy({ parser_lag_allowlist: ["Expected"] })).inconclusive).toHaveLength(1);
+    // An author-fixable syntax error that is not on the parser-lag list stays.
+    expect(run([syntax], [cmd("PARSE_ERROR_CANDIDATE")], policy({ parser_lag_allowlist: ["`accessor`"] })).inconclusive).toHaveLength(1);
     expect(run([schema], [cmd("MANIFEST_MISMATCH")]).rejected[0]!.problem).toMatch(/cannot be overridden/);
   });
 

@@ -139,7 +139,7 @@ describe("quality-gate aggregation", () => {
   });
 
   it("waived violations give ACCEPTED_WITH_WAIVER and allow merge", () => {
-    const v = agg(all().map((s) => (s.result.gate === "complexity" ? svc("complexity", { violations: [violation({ waivedBy: "W1" })] }) : s)));
+    const v = agg(all().map((s) => (s.result.gate === "complexity" ? svc("complexity", { violations: [violation({ waivedBy: "W1" })], waivers: [{ id: "W1", unit: violation().unit!, metric: "cognitive", ceiling: 22, approver: "appr-carol" }] }) : s)));
     expect(v.state).toBe("ACCEPTED_WITH_WAIVER");
     expect(v.mergeAllowed).toBe(true);
   });

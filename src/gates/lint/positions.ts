@@ -3,7 +3,7 @@
 // attributed to a unit, otherwise invisible separators in a string literal
 // shift a hit onto a neighbouring function (audit bug #2).
 
-const ESLINT_LINE_BREAK = /\r\n|[\r\n  ]/g;
+const ESLINT_LINE_BREAK = /\r\n|[\r\n\u2028\u2029]/g;
 
 export type PositionMapper = (line: number, column: number) => { line: number; column: number };
 

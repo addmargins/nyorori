@@ -114,7 +114,7 @@ export interface MatchResult {
   /** C units whose suspicious names barred them from name-based matching. */
   nameWarnings: Array<{ unit: string; warning: string }>;
   /** Keys that occur more than once on one side; such units are never matched. */
-  duplicateKeys: string[];
+  duplicateKeys?: string[];
 }
 
 export interface FilePair {

@@ -64,7 +64,12 @@ function legacyDebt(result: GateResult): LegacyDebtEntry[] {
 
 export function renderGateSection(result: GateResult): string {
   const lines: string[] = [];
-  const mode = result.mode === "observe" ? " _(observe — 집계 제외)_" : "";
+  const mode =
+    result.mode === "observe"
+      ? " _(observe — 집계 제외)_"
+      : result.mode === "degraded"
+        ? " _(degraded — 차단하지 않고 단순화 리뷰로 라우팅)_"
+        : "";
   lines.push(`### gate/${result.gate}: ${result.state}${mode}`, "");
   const open = result.violations.filter((v) => !v.waivedBy);
   const waived = result.violations.filter((v) => v.waivedBy);

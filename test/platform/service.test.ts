@@ -29,7 +29,7 @@ class FakeClient implements GitHubClient {
   }
   async createCheckRun(_r: unknown, req: CheckRunRequest) {
     const id = this.nextId++;
-    this.runs.push({ id, name: req.name, headSha: req.headSha, appId: APP, status: req.status, conclusion: req.conclusion ?? null, req });
+    this.runs.push({ id, name: req.name, headSha: req.headSha, appId: APP, status: req.status, conclusion: req.conclusion ?? null, externalId: req.externalId, req });
     return id;
   }
   async updateCheckRun(_r: unknown, id: number, req: CheckRunRequest) {
@@ -37,8 +37,9 @@ class FakeClient implements GitHubClient {
     const run = this.runs.find((r) => r.id === id)!;
     Object.assign(run, { status: req.status, conclusion: req.conclusion ?? null, req });
   }
+  /** The latest own run of that name, as GitHub would show for the required check. */
   final(name: string, sha = HEAD) {
-    return this.runs.find((r) => r.name === name && r.headSha === sha && r.appId === APP)?.req;
+    return this.runs.filter((r) => r.name === name && r.headSha === sha && r.appId === APP).sort((a, b) => b.id - a.id)[0]?.req;
   }
 }
 

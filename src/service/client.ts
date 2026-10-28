@@ -17,6 +17,8 @@ export interface CheckRunRecord {
   appId: number | null;
   status: "queued" | "in_progress" | "completed";
   conclusion?: string | null;
+  /** external_id the run was created with; the service only updates runs carrying its own (B, C, P) id. */
+  externalId?: string | null;
 }
 
 export interface CheckRunRequest {

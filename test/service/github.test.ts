@@ -106,11 +106,19 @@ describe("service helpers", () => {
     expect(mergeGroupPrNumber("refs/heads/feature")).toBeUndefined();
   });
 
-  it("records the head a comment was first evaluated against", async () => {
+  it("binds a comment to the head observed before it was written, never to a later one", async () => {
     const dir = mkdtempSync(join(tmpdir(), "nyorori-store-"));
-    const store = new CommentHeadStore(join(dir, "heads.json"));
-    expect(await store.resolve([{ id: 1 }], "h1")).toEqual(new Map([["1", "h1"]]));
-    expect(await store.resolve([{ id: 1 }, { id: 2 }], "h2")).toEqual(new Map([["1", "h1"], ["2", "h2"]]));
+    const store = new CommentHeadStore(join(dir, "heads.json"), 30_000);
+    const t = (m: number) => new Date(Date.UTC(2026, 9, 28, 12, m));
+    const c = (id: number, m: number) => ({ id, createdAt: t(m).toISOString() });
+    // h1 observed at 12:00; comment 1 at 12:05 saw h1.
+    expect(await store.resolve("o/r#1", [c(1, 5)], "h1", t(0))).toEqual(new Map([["1", "h1"]]));
+    // h2 pushed and first observed at 12:10, while comment 1 was evaluated late: it stays on h1.
+    // Comment 2 written at 12:09 (before h2 was observed) binds to h1, comment 3 at 12:12 to h2.
+    const m = await store.resolve("o/r#1", [c(1, 5), c(2, 9), c(3, 12)], "h2", t(10));
+    expect(m).toEqual(new Map([["1", "h1"], ["2", "h1"], ["3", "h2"]]));
+    // A comment older than any observation is unbound, and other PRs are separate.
+    expect(await store.resolve("o/r#2", [c(4, 1)], "x1", t(2))).toEqual(new Map([["4", ""]]));
     rmSync(dir, { recursive: true, force: true });
   });
 

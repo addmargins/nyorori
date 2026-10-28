@@ -188,6 +188,7 @@ export function runScenario(s: Scenario): ScenarioResult {
     sourcesC: new Map(Object.entries(s.c)),
     baselineMissing,
     ...(s.isAiLoop !== undefined ? { isAiLoop: s.isAiLoop } : {}),
+    ...(s.normalizedIdentical ? { normalizedIdentical: new Set(s.normalizedIdentical) } : {}),
     ...(s.normalizedLines ? { normalizedLines: s.normalizedLines } : {}),
   });
   return { manifest, b, c, lineMaps, match, outcome, policy };

@@ -4,7 +4,6 @@
 
 import type { Rule } from "eslint";
 import {
-  constInit,
   contains,
   findVariable,
   isAnyFunction,
@@ -70,6 +69,74 @@ const SIDE_EFFECT_TYPES = new Set([
 
 function hasWrite(n: AstNode): boolean {
   return contains(n, (x) => SIDE_EFFECT_TYPES.has(x.type) || (x.type === "UnaryExpression" && x.operator === "delete"));
+}
+
+/** An assignment or update outside nested functions. */
+function hasAssignment(n: AstNode): boolean {
+  return contains(n, (x) => x.type === "AssignmentExpression" || x.type === "UpdateExpression", true);
+}
+
+/** `await f(x)` with nothing else going on: the async memo `c ??= await create()`. */
+function isSingleAwaitedCall(n: AstNode): boolean {
+  const a = unwrap(n);
+  if (a.type !== "AwaitExpression") return false;
+  const call = unwrap(a.argument);
+  return call.type === "CallExpression" && !hasWrite(call);
+}
+
+/** A local initialised from a boolean-ish expression: `let done = false`. */
+function isBooleanLocal(id: AstNode, sc: SourceCode): boolean {
+  if (id.type !== "Identifier") return false;
+  const v = findVariable(sc.getScope(id as never) as Scope, id.name);
+  const def = v?.defs[0];
+  if (!v || v.defs.length !== 1 || def?.type !== "Variable") return false;
+  const init = (def.node as unknown as AstNode).init as AstNode | null;
+  return !!init && isBooleanish(init);
+}
+
+const TEST_PARENTS: Record<string, string> = {
+  IfStatement: "test",
+  WhileStatement: "test",
+  DoWhileStatement: "test",
+  ForStatement: "test",
+  ConditionalExpression: "test",
+};
+
+/** Statement or test position: shortCircuitStatement covers the former, loops/ifs the latter. */
+function inStatementOrTestPosition(n: AstNode): boolean {
+  const outer = outermostWrapper(n);
+  const p = outer.parent;
+  if (!p) return false;
+  if (p.type === "ExpressionStatement") return true;
+  if (p.type === "UnaryExpression" && p.operator === "void" && p.parent?.type === "ExpressionStatement") return true;
+  const key = TEST_PARENTS[p.type];
+  return key !== undefined && p[key] === outer;
+}
+
+/** `x || (x = …)` / `x ?? (x = …)`: lazy initialisation. */
+function isLazyInit(n: AstNode, sc: SourceCode): boolean {
+  if (n.type !== "LogicalExpression" || (n.operator !== "||" && n.operator !== "??")) return false;
+  const r = unwrap(n.right);
+  return r.type === "AssignmentExpression" && r.operator === "=" && sc.getText(r.left as never) === sc.getText(n.left as never);
+}
+
+/** Operands that run conditionally; the test of `?:` runs always. */
+function conditionalOperands(n: AstNode): AstNode[] {
+  return n.type === "ConditionalExpression" ? [n.consequent, n.alternate] : [n.left, n.right];
+}
+
+function isLogicalOrConditional(n: AstNode | undefined): boolean {
+  return !!n && (n.type === "LogicalExpression" || n.type === "ConditionalExpression");
+}
+
+/** The function a name is bound to: `function f(){}` or `const f = () => {}`. */
+function functionBoundTo(v: ReturnType<typeof findVariable>): AstNode | null {
+  const def = v?.defs[0];
+  if (!v || v.defs.length !== 1 || !def) return null;
+  const node = def.node as unknown as AstNode;
+  if (def.type === "FunctionName" && isAnyFunction(node)) return node;
+  if (def.type === "Variable" && node.init && isFunctionLike(unwrap(node.init))) return unwrap(node.init);
+  return null;
 }
 
 function hasCall(n: AstNode): boolean {
@@ -143,6 +210,10 @@ export const branchHiding: Rule.RuleModule = {
     schema: [],
     messages: {
       logicalAssignment: "Logical assignment `{{op}}` with a side effect hides a branch from the complexity measurement.",
+      logicalAssignmentFlag: "`{{op}}` on a boolean flag with a call runs the call conditionally: a hidden `if`.",
+      switchTrue: "`switch (true)` is an if/else chain the measurement scores as one switch.",
+      assignmentInOperand: "An assignment inside a short-circuit or conditional operand is a hidden branch.",
+      aliasRecursion: "Recursion through the alias `{{alias}}` of `{{fn}}` is not counted by the measurement.",
       shortCircuitStatement: "A short-circuit or conditional expression used as a statement is an `if` the measurement scores flat.",
       iife: "An immediately-invoked function moves logic out of the enclosing unit.",
       booleanIndex: "Indexing by a coerced boolean is a branch the measurement cannot see.",
@@ -186,10 +257,57 @@ export const branchHiding: Rule.RuleModule = {
       AssignmentExpression(node: never) {
         const n = node as AstNode;
         if (!["&&=", "||=", "??="].includes(n.operator)) return;
-        // `cache ||= compute()` / `x ??= load()` is the memo idiom; only a
-        // nested write, or a call under `&&=`, turns it into a hidden `if`.
-        const hidden = hasWrite(n.right) || (n.operator === "&&=" && hasCall(n.right));
-        if (hidden) context.report({ node, messageId: "logicalAssignment", data: { op: n.operator } });
+        // `cache ||= compute()` / `x ??= load()` / `this.c ??= await create()`
+        // are the memo idiom; a nested write, or a call under `&&=`, turns
+        // the assignment into a hidden `if` (ruling D8).
+        const memoOp = n.operator !== "&&=";
+        const write = hasWrite(n.right) && !(memoOp && isSingleAwaitedCall(n.right));
+        if (write || (!memoOp && hasCall(n.right))) {
+          context.report({ node, messageId: "logicalAssignment", data: { op: n.operator } });
+        } else if (memoOp && hasCall(n.right) && isBooleanLocal(unwrap(n.left), sc)) {
+          context.report({ node, messageId: "logicalAssignmentFlag", data: { op: n.operator } });
+        }
+      },
+      SwitchStatement(node: never) {
+        const d = unwrap((node as AstNode).discriminant);
+        if (d.type === "Literal" && d.value === true) context.report({ node, messageId: "switchTrue" });
+      },
+      "LogicalExpression, ConditionalExpression"(node: never) {
+        const n = node as AstNode;
+        // Report the outermost expression only, once.
+        if (isLogicalOrConditional(outermostWrapper(n).parent)) return;
+        if (inStatementOrTestPosition(n)) return;
+        const hidden = (e: AstNode): boolean => {
+          const x = unwrap(e);
+          if (isLazyInit(x, sc)) return false;
+          if (isLogicalOrConditional(x)) return conditionalOperands(x).some(hidden);
+          return hasAssignment(x);
+        };
+        if (isLazyInit(n, sc)) return;
+        if (conditionalOperands(n).some(hidden)) context.report({ node, messageId: "assignmentInOperand" });
+      },
+      VariableDeclarator(node: never) {
+        const n = node as AstNode;
+        if (n.id.type !== "Identifier" || !n.init) return;
+        let init = unwrap(n.init);
+        // `const g = f.bind(null)` aliases too.
+        if (init.type === "CallExpression" && unwrap(init.callee).type === "MemberExpression" && staticPropertyName(unwrap(init.callee)) === "bind") {
+          init = unwrap(unwrap(init.callee).object);
+        }
+        if (init.type !== "Identifier") return;
+        const target = functionBoundTo(findVariable(sc.getScope(init as never) as Scope, init.name));
+        if (!target) return;
+        for (const alias of sc.getDeclaredVariables(n as never)) {
+          for (const ref of alias.references) {
+            const id = ref.identifier as unknown as AstNode;
+            if (!isCalleeOf(outermostWrapper(id))) continue;
+            let inside = false;
+            for (let a: AstNode | undefined = id.parent; a; a = a.parent) if (a === target) inside = true;
+            if (inside) {
+              context.report({ node: id as never, messageId: "aliasRecursion", data: { alias: alias.name, fn: init.name } });
+            }
+          }
+        }
       },
       ExpressionStatement(node: never) {
         const e = unwrap((node as AstNode).expression);

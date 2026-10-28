@@ -23,35 +23,52 @@ export interface ServiceConfig {
 }
 
 /**
- * Issue comments carry no head SHA. Every gate command triggers an evaluation
- * right away, so the head seen when a comment is first evaluated is recorded
- * as the head it was posted against (a push racing the comment makes the
- * approval stale, which is the safe direction).
+ * Issue comments carry no head SHA, so the service keeps a timeline of the PR
+ * heads it has observed. A comment is bound to the latest head observed at
+ * least `skewMs` before the comment was created. A head the service has not
+ * observed yet can therefore never receive an approval written before it
+ * existed: binding errs towards an older head, which only makes an approval
+ * stale (re-approve) and never makes it cover unseen code.
  */
 export class CommentHeadStore {
-  constructor(private readonly file: string) {}
+  constructor(
+    private readonly file: string,
+    private readonly skewMs = 30_000,
+  ) {}
 
-  async resolve(comments: readonly { id: number | string }[], head: string): Promise<Map<string, string>> {
-    let known: Record<string, string> = {};
+  private async load(): Promise<Record<string, Array<{ sha: string; observedAt: string }>>> {
     try {
-      known = JSON.parse(await readFile(this.file, "utf8")) as Record<string, string>;
+      return JSON.parse(await readFile(this.file, "utf8")) as Record<string, Array<{ sha: string; observedAt: string }>>;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+      return {};
     }
-    let dirty = false;
-    for (const c of comments) {
-      const id = String(c.id);
-      if (known[id] === undefined) {
-        known[id] = head;
-        dirty = true;
-      }
-    }
-    if (dirty) {
-      const tmp = `${this.file}.tmp`;
-      await writeFile(tmp, JSON.stringify(known));
+  }
+
+  /** Records `head` as observed now (if it is new) and returns commentId → bound head ("" when none). */
+  async resolve(
+    prKey: string,
+    comments: readonly { id: number | string; createdAt: string }[],
+    head: string,
+    now: Date = new Date(),
+  ): Promise<Map<string, string>> {
+    const all = await this.load();
+    const timeline = all[prKey] ?? [];
+    if (timeline[timeline.length - 1]?.sha !== head) {
+      timeline.push({ sha: head, observedAt: now.toISOString() });
+      all[prKey] = timeline;
+      const tmp = `${this.file}.${process.pid}.tmp`;
+      await writeFile(tmp, JSON.stringify(all));
       await rename(tmp, this.file);
     }
-    return new Map(Object.entries(known));
+    const out = new Map<string, string>();
+    for (const c of comments) {
+      const created = Date.parse(c.createdAt);
+      let bound = "";
+      for (const h of timeline) if (Date.parse(h.observedAt) + this.skewMs <= created) bound = h.sha;
+      out.set(String(c.id), bound);
+    }
+    return out;
   }
 }
 
@@ -70,7 +87,7 @@ async function pullRequestContext(cfg: ServiceConfig, ctx: EvaluationContext, st
     cfg.api.listIssueComments(ctx.repo, ctx.prNumber),
     cfg.api.listPullCommits(ctx.repo, ctx.prNumber),
   ]);
-  const heads = await store.resolve(raw, head);
+  const heads = await store.resolve(`${ctx.repo.owner}/${ctx.repo.repo}#${ctx.prNumber}`, raw, head);
   const comments: ReviewComment[] = raw.map((c) => ({ ...c, headSha: heads.get(String(c.id)) ?? "" }));
   const teams: TeamRosters = {};
   for (const t of teamsIn(cfg.policy)) teams[t] = await cfg.api.listTeamMembers(ctx.repo, t);
@@ -97,23 +114,24 @@ async function findArtifacts(cfg: ServiceConfig, ctx: EvaluationContext, prHead:
     }
   }
   if (!best) return {};
-  // A pull_request run reports the PR head; it tested refs/pull/N/merge, which
-  // the handler already verified is exactly C with that head as second parent.
-  const prov =
-    ctx.kind === "pull_request" && best.prov.event === "pull_request" && best.prov.headSha === prHead
-      ? { ...best.prov, headSha: ctx.candidate }
-      : best.prov;
   const artifact = (await cfg.api.listRunArtifacts(ctx.repo, best.run.id)).find(
     (a) => a.name === `nyorori-gate-${ctx.candidate}` && !a.expired,
   );
   if (!artifact) return {};
   const files = await cfg.api.downloadArtifact(ctx.repo, artifact.id);
   let rootDir: string | undefined;
+  let testMerge: string | undefined;
   try {
-    rootDir = (JSON.parse(text(files, "metadata.json") ?? "{}") as { root_dir?: string }).root_dir;
+    const meta = JSON.parse(text(files, "metadata.json") ?? "{}") as { root_dir?: string; candidate_sha?: string };
+    rootDir = meta.root_dir;
+    testMerge = typeof meta.candidate_sha === "string" ? meta.candidate_sha : undefined;
   } catch {
     rootDir = undefined;
   }
+  // A pull_request run reports the PR head as head_sha; the commit it tested
+  // (refs/pull/N/merge) is only in its metadata, and must equal C (spec 6.2).
+  const prov: ArtifactProvenance =
+    best.prov.event === "pull_request" && testMerge ? { ...best.prov, testMergeSha: testMerge } : best.prov;
   const root = rootDir ? { rootDir } : {};
   const out: Artifacts = {};
   const testsC = text(files, "tests.C.json");
