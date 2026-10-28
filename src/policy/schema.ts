@@ -51,7 +51,7 @@ export const policySchema = z
           .array(z.string())
           .default([
             // docs and text
-            ".md", ".markdown", ".txt", ".rst", ".adoc", ".html", ".htm", ".csv", ".tsv",
+            ".md", ".markdown", ".txt", ".rst", ".adoc", ".csv", ".tsv",
             // data and config
             ".json", ".jsonc", ".json5", ".yml", ".yaml", ".toml", ".xml", ".ini", ".cfg",
             ".conf", ".properties", ".env.example", ".env.sample", ".tsbuildinfo",
@@ -62,7 +62,7 @@ export const policySchema = z
             // styles
             ".css", ".scss", ".sass", ".less",
             // images
-            ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".webp", ".avif", ".bmp",
+            ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".avif", ".bmp",
             // fonts
             ".woff", ".woff2", ".ttf", ".otf", ".eot",
             // media and documents
@@ -76,6 +76,12 @@ export const policySchema = z
             ".editorconfig", ".prettierrc", ".prettierignore", ".eslintignore", ".dockerignore",
             "",
           ]),
+        /**
+         * Markup that can carry inline script (`<script>`, `on*=` handlers,
+         * `javascript:` URLs). A candidate file with any of them is unmeasured
+         * UNSUPPORTED_FORMAT (routed to S11); without them it is non-code.
+         */
+        script_capable_extensions: z.array(z.string()).default([".html", ".htm", ".xhtml", ".svg"]),
         /** Code in other languages: unmeasured FOREIGN_LANGUAGE, routed to S11 when it may hide JS/TS logic. */
         foreign_code_extensions: z
           .array(z.string())

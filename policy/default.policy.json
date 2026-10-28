@@ -37,8 +37,6 @@
       ".txt",
       ".rst",
       ".adoc",
-      ".html",
-      ".htm",
       ".csv",
       ".tsv",
       ".json",
@@ -74,7 +72,6 @@
       ".jpg",
       ".jpeg",
       ".gif",
-      ".svg",
       ".ico",
       ".webp",
       ".avif",
@@ -115,6 +112,12 @@
       ".eslintignore",
       ".dockerignore",
       ""
+    ],
+    "script_capable_extensions": [
+      ".html",
+      ".htm",
+      ".xhtml",
+      ".svg"
     ],
     "foreign_code_extensions": [
       ".py",

@@ -18,6 +18,7 @@ import { matchUnits, type MatchResult } from "../units/match.js";
 import { isAiLoopRun } from "./actions-gates.js";
 import type { RunContext } from "./context.js";
 import { dedupeInconclusive, emptyDraft, type GateDraft } from "./draft.js";
+import { allSettledOrThrow } from "./settle.js";
 
 export interface Normalization {
   /** Pinned-Prettier code-line counts, keyed by C path (B path for deletions). */
@@ -199,7 +200,7 @@ export async function lintGate(ctx: RunContext, state: MeasuredState): Promise<G
   if (!draft.applicable) return draft;
   const root = await mkdtemp(join(opts.workDir, "lint-"));
   try {
-    const [b, c] = await Promise.all([lintSide(ctx, "B", join(root, "B")), lintSide(ctx, "C", join(root, "C"))]);
+    const [b, c] = await allSettledOrThrow([lintSide(ctx, "B", join(root, "B")), lintSide(ctx, "C", join(root, "C"))]);
     const evaluation = evaluateLint({
       manifest,
       lintB: b.results,
@@ -248,7 +249,7 @@ export async function depsGate(ctx: RunContext): Promise<GateDraft> {
         maxFileBytes: policy.scope.max_file_bytes,
         onSkip: (path, reason) => skipped.push({ side, path, reason }),
       });
-    const [treeB, treeC] = await Promise.all([tree("B", manifest.baseSha), tree("C", manifest.candidateSha)]);
+    const [treeB, treeC] = await allSettledOrThrow([tree("B", manifest.baseSha), tree("C", manifest.candidateSha)]);
     const renames = new Map<string, string>();
     for (const e of manifest.entries) if (e.status === "R" && e.b && e.c) renames.set(e.c.path, e.b.path);
     const evaluation = await evaluateDeps({

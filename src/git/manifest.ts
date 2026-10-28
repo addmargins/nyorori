@@ -49,7 +49,9 @@ export type PathClass =
   | { kind: "unmeasured"; reason: UnmeasuredReason }
   | { kind: "excluded"; reason: ExcludedReason }
   /** No extension: the first line decides (classifyExtensionless). */
-  | { kind: "extensionless" };
+  | { kind: "extensionless" }
+  /** Markup that may embed script: the content decides (classifyScriptCapable). */
+  | { kind: "script-capable" };
 
 export type ShebangKind = "js" | "ts" | "foreign";
 
@@ -125,6 +127,7 @@ export function classifyPath(path: string, policy: Policy): PathClass {
   if (hasSuffixIn(path, s.extensions)) return { kind: "measure" };
   if (hasSuffixIn(path, s.foreign_code_extensions)) return { kind: "unmeasured", reason: "FOREIGN_LANGUAGE" };
   if (isExtensionless(path)) return { kind: "extensionless" };
+  if (hasSuffixIn(path, s.script_capable_extensions)) return { kind: "script-capable" };
   if (hasSuffixIn(path, s.non_code_extensions)) return { kind: "excluded", reason: "NOT_CODE" };
   return { kind: "unmeasured", reason: "UNSUPPORTED_FORMAT" };
 }
@@ -149,6 +152,41 @@ export function classifyExtensionless(path: string, content: Buffer | null, poli
   return hasSuffixIn(path, policy.scope.non_code_extensions)
     ? { kind: "excluded", reason: "NOT_CODE" }
     : { kind: "unmeasured", reason: "UNSUPPORTED_FORMAT" };
+}
+
+const EMBEDDED_SCRIPT = [/<script\b/i, /\son[a-z]+\s*=/i, /javascript:/i];
+
+/** Whether markup carries inline script (case-insensitive, whole blob). */
+export function hasEmbeddedScript(content: Buffer): boolean {
+  const text = content.toString("latin1");
+  return EMBEDDED_SCRIPT.some((re) => re.test(text));
+}
+
+/** Final class of script-capable markup given its content (null when unread, e.g. oversize). */
+export function classifyScriptCapable(content: Buffer | null): PathClass {
+  if (content === null || hasEmbeddedScript(content)) return { kind: "unmeasured", reason: "UNSUPPORTED_FORMAT" };
+  return { kind: "excluded", reason: "NOT_CODE" };
+}
+
+/** Linux limits: NAME_MAX per segment, PATH_MAX for the whole path (in bytes). */
+export const MAX_SEGMENT_BYTES = 255;
+export const MAX_PATH_BYTES = 4096;
+
+/** Why a repository path cannot be written under the gate's work dir, or null. */
+export function pathTooLong(path: string): string | null {
+  const total = Buffer.byteLength(path, "utf8");
+  if (total > MAX_PATH_BYTES) return `path is ${total} bytes (limit ${MAX_PATH_BYTES})`;
+  const seg = path.split("/").find((x) => Buffer.byteLength(x, "utf8") > MAX_SEGMENT_BYTES);
+  return seg === undefined ? null : `a path segment is ${Buffer.byteLength(seg, "utf8")} bytes (limit ${MAX_SEGMENT_BYTES})`;
+}
+
+/**
+ * Collision key: Unicode NFC (APFS/HFS+ treat NFC and NFD as one name) plus a
+ * full case fold through upper case (NTFS upcase maps ı→I and ſ→S). NFKC is
+ * deliberately not applied: no common file system folds compatibility forms.
+ */
+export function foldPathForCollision(path: string): string {
+  return path.normalize("NFC").toUpperCase().toLowerCase();
 }
 
 /** Would this path be code (measured or a known unmeasured format) if it were not excluded? */
@@ -193,7 +231,8 @@ function verdictOf(cls: PathClass): SideVerdict {
     case "excluded":
       return { measure: false, excluded: cls.reason };
     case "extensionless":
-      throw new Error("extensionless paths need their content");
+    case "script-capable":
+      throw new Error(`${cls.kind} paths need their content`);
   }
 }
 
@@ -296,8 +335,8 @@ interface PendingSide {
   tree: TreeEntry;
 }
 
-/** First bytes of every extensionless regular side, for the shebang rule. Oversize blobs stay unread (null). */
-async function readExtensionless(
+/** Content of every side the path alone cannot classify. Oversize blobs stay unread (null). */
+async function readContentClassified(
   repoDir: string,
   sides: PendingSide[],
   policy: Policy,
@@ -324,18 +363,18 @@ async function assembleManifest(
   const entries: ManifestEntry[] = [];
   const sensitive = new Set<string>();
 
-  const extensionless: PendingSide[] = [];
+  const pending: PendingSide[] = [];
   for (const ch of changes) {
     for (const [p, tree] of [[ch.pathB, treeB], [ch.pathC, treeC]] as const) {
       const t = p ? tree.get(p) : undefined;
-      if (p && t && isRegular(t.mode) && !isInvalidPath(p) && classifyPath(p, policy).kind === "extensionless") {
-        extensionless.push({ path: p, tree: t });
-      }
+      if (!p || !t || !isRegular(t.mode) || isInvalidPath(p)) continue;
+      const kind = classifyPath(p, policy).kind;
+      if (kind === "extensionless" || kind === "script-capable") pending.push({ path: p, tree: t });
     }
   }
-  const firstBytes = await readExtensionless(repoDir, extensionless, policy);
+  const firstBytes = await readContentClassified(repoDir, pending, policy);
 
-  const judge = (path: string, t: TreeEntry): { v: SideVerdict; shebang: ShebangKind | null } => {
+  const judge = (path: string, t: TreeEntry): { v: SideVerdict; shebang: ShebangKind | null; tooLong?: string } => {
     const byMode = modeUnmeasured(t.mode);
     if (byMode) return { v: { measure: false, unmeasured: byMode }, shebang: null };
     if (!isRegular(t.mode)) return { v: { measure: false, unmeasured: "TYPE_CHANGE" }, shebang: null };
@@ -346,7 +385,11 @@ async function assembleManifest(
       const content = firstBytes.get(t.blob) ?? null;
       shebang = content ? shebangKind(content) : null;
       cls = classifyExtensionless(path, content, policy);
+    } else if (cls.kind === "script-capable") {
+      cls = classifyScriptCapable(firstBytes.get(t.blob) ?? null);
     }
+    const tooLong = cls.kind === "measure" ? pathTooLong(path) : null;
+    if (tooLong !== null) return { v: { measure: false }, shebang, tooLong };
     return { v: verdictOf(cls), shebang };
   };
 
@@ -396,6 +439,16 @@ async function assembleManifest(
     }
     if (matchesAny(primaryPath, policy.scope.test_globs)) entry.isTest = true;
 
+    // A measurable file whose path the work dir cannot hold (ENAMETOOLONG). No
+    // dedicated reason code exists yet; INVALID_ENCODING is the author-fixable
+    // "this path is unusable" bucket.
+    if (c && jc?.tooLong) {
+      problems.push({
+        reason: "INVALID_ENCODING",
+        path: c.path,
+        detail: `path too long for the gate's work dir (${jc.tooLong}); rename it`,
+      });
+    }
     if (c && isInvalidPath(c.path)) {
       problems.push({
         reason: "INVALID_ENCODING",
@@ -474,7 +527,7 @@ function checkCollisions(
 ): void {
   const owners = new Map<string, Set<string>>();
   const claim = (name: string, owner: string) => {
-    const folded = name.toLowerCase();
+    const folded = foldPathForCollision(name);
     let set = owners.get(folded);
     if (!set) owners.set(folded, (set = new Set()));
     set.add(owner);
@@ -487,7 +540,7 @@ function checkCollisions(
   }
   for (const e of measured) {
     const s = (key === "B" ? e.b : e.c)!;
-    const others = [...(owners.get(s.measuredPath.toLowerCase()) ?? [])].filter((o) => o !== s.path);
+    const others = [...(owners.get(foldPathForCollision(s.measuredPath)) ?? [])].filter((o) => o !== s.path);
     if (others.length === 0) continue;
     e.measure[key] = false;
     if (key === "C") {

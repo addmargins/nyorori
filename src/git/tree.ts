@@ -7,7 +7,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Inconclusive, Manifest, Side } from "../types.js";
 import { isInvalidPath } from "./exec.js";
-import { batchCheck, listTree, MODE_EXECUTABLE, MODE_REGULAR, readBlobsBatched } from "./manifest.js";
+import { batchCheck, listTree, MODE_EXECUTABLE, MODE_REGULAR, pathTooLong, readBlobsBatched } from "./manifest.js";
 
 export interface MaterializedFile {
   /** Repository path. */
@@ -120,7 +120,7 @@ export interface FullTreeOptions {
   /** Files above this size are skipped (default 2 MiB, the policy default). */
   maxFileBytes?: number;
   /** Called for every file that was filtered in but not written (oversize, invalid path). */
-  onSkip?: (path: string, reason: "FILE_TOO_LARGE" | "INVALID_ENCODING") => void;
+  onSkip?: (path: string, reason: "FILE_TOO_LARGE" | "INVALID_ENCODING" | "PATH_TOO_LONG") => void;
 }
 
 /**
@@ -143,6 +143,7 @@ export async function materializeFullTree(
   const chosen: typeof candidates = [];
   for (const c of candidates) {
     if (isInvalidPath(c[0])) opts.onSkip?.(c[0], "INVALID_ENCODING");
+    else if (pathTooLong(c[0]) !== null) opts.onSkip?.(c[0], "PATH_TOO_LONG");
     else chosen.push(c);
   }
   const sizes = await batchCheck(repoDir, [...new Set(chosen.map(([, t]) => t.blob))]);

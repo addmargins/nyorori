@@ -15,6 +15,7 @@ import { coverageGate, isAiLoopRun, mutationGate, testsGate } from "./actions-ga
 import { candidateTree, readChangedTexts, toolVersions, type RunContext } from "./context.js";
 import { aggregate, applyMeasurementOverrides, applyWaiverDecisions, finalize } from "./decisions.js";
 import { guard, type GateDraft } from "./draft.js";
+import { allSettledOrThrow } from "./settle.js";
 import { addMovingBaselineTriggers } from "./moving-baseline.js";
 import { complexityGate, depsGate, lintGate, measure, type MeasuredState } from "./service-gates.js";
 import type { RunGatesOptions, RunGatesOutput } from "./types.js";
@@ -24,7 +25,8 @@ async function buildContext(opts: RunGatesOptions, workDir: string): Promise<Run
   const base = await resolveCommit(opts.repoDir, opts.base);
   const candidate = await resolveCommit(opts.repoDir, opts.candidate);
   const manifest = await buildManifest(opts.repoDir, base, candidate, policy);
-  const [lineMaps, treeC, texts] = await Promise.all([
+  // Inside runGates' cleanup scope: settle every read before the work dir is removed.
+  const [lineMaps, treeC, texts] = await allSettledOrThrow([
     fileLineMaps(opts.repoDir, manifest),
     candidateTree(opts.repoDir, candidate),
     readChangedTexts(opts.repoDir, manifest, policy.scope.max_file_bytes),
