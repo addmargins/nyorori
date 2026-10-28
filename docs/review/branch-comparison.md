@@ -92,3 +92,11 @@ dependency-cruiser resolver with S3/S11 routing instead of INCONCLUSIVE-by-prese
 - G4: `it.each` / template titles make the whole PR INCONCLUSIVE; test IDs are bare titles so deleting one of two same-titled tests is PASS; new `todo` FAILs. G5: Istanbul implicit-else locations throw; every changed function including anonymous callbacks is a hard FAIL. G7: no survivor list.
 - G3 INCONCLUSIVE by presence of any bundler/tsconfig feature or any unknown extension anywhere in the tree; per-edge cycle FAIL including type-only and lazy edges; `max-params` and non-waivable suppressions in test files; `x.constructor.name` FAIL; dispatch-table S9 on any object with one arrow property.
 - No approval ingestion (authority file trusted verbatim), `merge_group` only (no pre-check), AI-loop rules keyed on an evidence actor that defaults to unknown, no measurement override, no `degraded` mode, attestation manual and voided by any service upgrade.
+
+## Re-verification after round 4
+
+Clean clone of 97fdd27: typecheck, lint, 976 tests in 60 files, build, 39 rule fixtures with 0 drift,
+regenerated policy identical. The 89-scenario differential harness re-run on the rebuilt CLI changed only
+the rows the rulings targeted — zero-function `.d.ts` N/A → measured PASS; the two anonymous-unit
+rows PASS → `UNMATCHED_OVER_BUDGET`; the vanished-unit row now routes S11 — and every other row is
+identical to the previous run.
