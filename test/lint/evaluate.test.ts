@@ -174,14 +174,14 @@ describe("new-violation rule", () => {
 describe("suppressions and bidi", () => {
   it("FAILs on an added suppression but not on an existing one", async () => {
     const b = { path: "src/s.ts", code: `// @ts-ignore\nexport const a: number = "x";\n`, fns: [] };
-    const c = { path: "src/s.ts", code: `// @ts-ignore\nexport const a: number = "x";\n// eslint-disable-next-line no-console\nconsole.log(a);\n`, fns: [] };
+    const c = { path: "src/s.ts", code: `// @ts-ignore\nexport const a: number = "x";\n// eslint-disable-next-line no-new-func\nconsole.log(a);\n`, fns: [] };
     const { result } = await runCase({ b, c });
     expect(result.violations.map((v) => [v.reason, v.line])).toEqual([["SUPPRESSION_ADDED", 3]]);
   });
 
   it("honours the policy allowlist", async () => {
-    const policy = defaultPolicy({ lint: { suppression_allowlist: ["eslint-disable-next-line no-console"] } });
-    const c = { path: "src/s.ts", code: `// eslint-disable-next-line no-console\nconsole.log(1);\n`, fns: [] };
+    const policy = defaultPolicy({ lint: { suppression_allowlist: ["eslint-disable-next-line max-params"] } });
+    const c = { path: "src/s.ts", code: `// eslint-disable-next-line max-params\nconsole.log(1);\n`, fns: [] };
     const { result } = await runCase({ c, policy });
     expect(result.violations).toEqual([]);
   });

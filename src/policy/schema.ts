@@ -137,7 +137,10 @@ export const policySchema = z
             branch_drop_ratio: z.number().min(0).max(1).default(0.3),
             max_line_drop_ratio: z.number().min(0).max(1).default(0.3),
             density_drop_ratio: z.number().min(0).max(1).default(0.3),
+            /** Density path (rulings D20). */
             min_branch_drop: z.number().int().positive().default(3),
+            /** Line path: lines must not shrink, so a smaller drop suffices (rulings D20). */
+            min_branch_drop_lines: z.number().int().positive().default(2),
           })
           .strict()
           .default({}),
@@ -145,6 +148,17 @@ export const policySchema = z
           .object({
             min_density: z.number().positive().default(0.6),
             min_new_units: z.number().int().positive().default(5),
+            /** File visible branches V at least this (rulings D17). */
+            min_visible_branches: z.number().int().nonnegative().default(8),
+          })
+          .strict()
+          .default({}),
+        /** S12 residue shift (rulings D18). */
+        s12: z
+          .object({
+            min_residue: z.number().int().positive().default(8),
+            min_rise: z.number().int().positive().default(5),
+            pr_total_rise: z.number().int().positive().default(15),
           })
           .strict()
           .default({}),

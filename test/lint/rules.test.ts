@@ -127,8 +127,8 @@ describe("structural limits", () => {
   it("max-nested-callbacks blocks depth 4 in source", async () => {
     expect(await ids(nested4)).toContain("max-nested-callbacks");
   });
-  it("max-nested-callbacks is off in test files", async () => {
-    expect(await ids(nested4, "src/x.test.ts")).not.toContain("max-nested-callbacks");
+  it("max-nested-callbacks still reports in test files (evaluate makes it observe, D11)", async () => {
+    expect(await ids(nested4, "src/x.test.ts")).toContain("max-nested-callbacks");
   });
   it("depth 3 callbacks pass", async () => {
     expect(await ids(`declare function cb(f: () => void): void;\ncb(() => { cb(() => { cb(() => {}); }); });`)).not.toContain(
@@ -142,9 +142,20 @@ describe("structural limits", () => {
     expect(r.messages.find((m) => m.ruleId === "max-lines-per-function")?.category).toBe("trigger:S4");
   });
 
-  it("parameter property mutation is an S10 hit", async () => {
-    const r = await lintSnippet(`export function step(ctx: { total: number }) { ctx.total = 1; }`);
-    expect(r.messages.find((m) => m.ruleId === "no-param-reassign")?.category).toBe("trigger:S10");
+  it("parameter property mutation by a directly called helper is an S10 hit", async () => {
+    const r = await lintSnippet(
+      `function step(ctx: { total: number }) { ctx.total = 1; }\nexport function run(c: { total: number }) { step(c); return c.total; }`,
+    );
+    expect(r.messages.find((m) => m.ruleId === "nyorori/param-mutation")?.category).toBe("trigger:S10");
+  });
+
+  it.each([
+    ["exported, never called here", `export function step(ctx: { total: number }) { ctx.total = 1; }`],
+    ["Immer recipe passed as a value", `declare function produce<T>(s: T, f: (d: T) => void): T;\nconst recipe = (draft: { n: number }) => { draft.n += 1; };\nexport const next = produce({ n: 1 }, recipe);`],
+    ["Express middleware", `declare const app: { use(f: (req: { user?: string }) => void): void };\nfunction auth(req: { user?: string }) { req.user = "u"; }\napp.use(auth);`],
+    ["rebinding a parameter", `function inc(n: number) { n += 1; return n; }\nexport const x = inc(1);`],
+  ])("no S10 hit: %s", async (_name, code) => {
+    expect((await lintSnippet(code)).messages.filter((m) => m.category === "trigger:S10")).toEqual([]);
   });
 });
 

@@ -19,8 +19,9 @@ import type {
   Violation,
 } from "../../types.js";
 import { flattenUnits, residueKey } from "../../units/model.js";
-import { DYNAMIC_CODE_RULES, SUPPRESSION_RULE } from "./config.js";
-import { isAllowlisted, scanBidi, type BidiHit } from "./text.js";
+import { matchesAny } from "../../util/glob.js";
+import { DYNAMIC_CODE_RULES, OBSERVE_IN_TESTS, RULE_CATEGORY, SUPPRESSION_RULE } from "./config.js";
+import { isAllowlisted, scanBidi, type BidiHit, type DirectiveKind } from "./text.js";
 import type { FileLintResult, LintMessage } from "./types.js";
 
 export interface EvaluateLintInput {
@@ -36,6 +37,8 @@ export interface EvaluateLintInput {
   sourcesB: ReadonlyMap<string, string>;
   sourcesC: ReadonlyMap<string, string>;
   policy: Policy;
+  /** The PR comes from the AI fix loop: every added suppression fails (spec 12.2). */
+  isAiLoop?: boolean;
 }
 
 export interface LintEvaluation {
@@ -43,7 +46,7 @@ export interface LintEvaluation {
   triggers: TriggerHit[];
   inconclusive: Inconclusive[];
   observe: {
-    new_observe_hits: Array<{ rule: string; file: string; line: number; unit: string }>;
+    new_observe_hits: Array<{ rule: string; file: string; line: number; unit: string; why: string }>;
     new_hits_by_category: Record<string, number>;
     base_parse_errors: string[];
     files_linted: number;
@@ -92,6 +95,17 @@ function fileLevelKey(path: string): string {
   return `${path}::<file>`;
 }
 
+interface FileWork {
+  pathC: string;
+  pathB: string | null;
+  isTest: boolean;
+  isAdded: (line: number) => boolean;
+  groups: Map<string, Attributed[]>;
+}
+
+/** Per (B file, rule group): hits that sat in B units which no longer exist in C. */
+type CreditPools = Map<string, Map<string, number>>;
+
 export function evaluateLint(input: EvaluateLintInput): LintEvaluation {
   const { manifest, policy } = input;
   const violations: Violation[] = [];
@@ -105,9 +119,41 @@ export function evaluateLint(input: EvaluateLintInput): LintEvaluation {
   };
 
   const matchByC = new Map(input.matches.map((m) => [m.cKey, m]));
+  const matchedB = new Set(input.matches.map((m) => m.bKey));
   const lineMapByC = new Map(input.lineMaps.map((l) => [l.pathC, l]));
   const allow = policy.lint.suppression_allowlist;
+  const ctx: RouteContext = {
+    isAiLoop: input.isAiLoop === true,
+    dynamicAllowlist: policy.lint.dynamic_code_allowlist,
+  };
 
+  // Baseline counts over every B file, so a unit that moved to another file
+  // (stage-4 match) keeps its baseline. Counts are kept both per unit and per
+  // file, for C files that must fall back to file-level comparison.
+  const countsB = new Map<string, number>();
+  const credits: CreditPools = new Map();
+  const cPathsWithB = new Set(manifest.entries.flatMap((e) => (e.c && e.b ? [e.b.path] : [])));
+  for (const entry of manifest.entries) {
+    if (!entry.b || !entry.measure.B) continue;
+    const pathB = entry.b.path;
+    const lintB = input.lintB.get(pathB);
+    if (!lintB) continue;
+    if (lintB.parseError) observe.base_parse_errors.push(pathB);
+    const mB = input.measurementsB.get(pathB);
+    const fileDeleted = !cPathsWithB.has(pathB);
+    for (const msg of lintB.messages) {
+      if (isAllowedSuppression(msg, allow)) continue;
+      const group = groupOf(msg);
+      bump(countsB, `${fileLevelKey(pathB)}|${group}`);
+      if (!mB) continue;
+      const unit = unitAtLine(mB, msg.line);
+      bump(countsB, `${unit.key}|${group}`);
+      const vanished = unit.isResidue ? fileDeleted : !matchedB.has(unit.key);
+      if (vanished) bump(pool(credits, pathB), group);
+    }
+  }
+
+  const work: FileWork[] = [];
   for (const entry of manifest.entries) {
     if (!entry.c || !entry.measure.C) continue;
     const pathC = entry.c.path;
@@ -127,24 +173,11 @@ export function evaluateLint(input: EvaluateLintInput): LintEvaluation {
     }
     observe.files_linted++;
     const pathB = entry.b && entry.measure.B ? entry.b.path : null;
-    const lintB = pathB ? input.lintB.get(pathB) : undefined;
-    if (lintB?.parseError) observe.base_parse_errors.push(pathB!);
-
-    const isAdded = addedLines(pathB ? lineMapByC.get(pathC) : undefined);
     const mB = pathB ? input.measurementsB.get(pathB) : undefined;
     const mC = input.measurementsC.get(pathC);
     // Without unit trees on both sides, compare at file level so that a
     // missing measurement can only make the comparison stricter.
     const fileLevel = !mC || (pathB !== null && !mB);
-
-    const countsB = new Map<string, number>();
-    for (const msg of lintB?.messages ?? []) {
-      if (isAllowedSuppression(msg, allow)) continue;
-      const unitKey = fileLevel || !mB ? fileLevelKey(pathB!) : unitAtLine(mB, msg.line).key;
-      const k = `${unitKey}|${groupOf(msg)}`;
-      countsB.set(k, (countsB.get(k) ?? 0) + 1);
-    }
-
     const groups = new Map<string, Attributed[]>();
     for (const msg of lintC.messages) {
       if (isAllowedSuppression(msg, allow)) continue;
@@ -154,37 +187,83 @@ export function evaluateLint(input: EvaluateLintInput): LintEvaluation {
       list.push(a);
       groups.set(k, list);
     }
+    work.push({
+      pathC,
+      pathB,
+      isTest: entry.isTest ?? matchesAny(pathC, policy.scope.test_globs),
+      isAdded: addedLines(pathB ? lineMapByC.get(pathC) : undefined),
+      groups,
+    });
+  }
 
-    for (const [k, list] of groups) {
-      const baseline = countsB.get(k) ?? 0;
-      const surplus = list.length - baseline;
+  // Hits in unmatched C units are new unless they replace hits whose B unit
+  // vanished (ruling D21c): first from the same file, then PR-wide for moves.
+  // Only vanished units give credit, so fixing a hit elsewhere never pays
+  // for a new one (spec 5.2, no offsetting).
+  const newCount = new Map<string, number>();
+  for (const pass of ["local", "global"] as const) {
+    for (const w of work) {
+      for (const [k, list] of w.groups) {
+        if (!k.startsWith("new:")) continue;
+        const group = groupOf(list[0]!.msg);
+        let remaining = newCount.get(`${w.pathC}\u0000${k}`) ?? list.length;
+        const sources = pass === "local" ? (w.pathB ? [w.pathB] : []) : [...credits.keys()];
+        for (const src of sources) {
+          if (remaining === 0) break;
+          const p = credits.get(src);
+          const take = Math.min(remaining, p?.get(group) ?? 0);
+          if (take > 0) {
+            p!.set(group, p!.get(group)! - take);
+            remaining -= take;
+          }
+        }
+        newCount.set(`${w.pathC}\u0000${k}`, remaining);
+      }
+    }
+  }
+
+  for (const w of work) {
+    const sink = { violations, triggers, observe };
+    for (const [k, list] of w.groups) {
+      const baseline = k.startsWith("new:") ? 0 : (countsB.get(k) ?? 0);
+      const surplus = k.startsWith("new:") ? newCount.get(`${w.pathC}\u0000${k}`)! : list.length - baseline;
       // Unit-level rules (S4, S10) look at the unit, not at the surplus.
-      for (const a of list) routeUnitLevel(a, pathC, triggers);
+      for (const a of list) routeUnitLevel(a, w, sink);
       if (surplus <= 0) continue;
       // Prefer reporting the hits sitting on added lines as the new ones.
       const ordered = [...list].sort(
-        (x, y) => Number(isAdded(y.msg.line)) - Number(isAdded(x.msg.line)) || x.msg.line - y.msg.line,
+        (x, y) => Number(w.isAdded(y.msg.line)) - Number(w.isAdded(x.msg.line)) || x.msg.line - y.msg.line,
       );
       for (const a of ordered.slice(0, surplus)) {
-        routeNew(a, pathC, { baseline, inC: list.length }, { violations, triggers, observe });
+        routeNew(a, w, { baseline: list.length - surplus, inC: list.length }, ctx, sink);
       }
     }
 
-    const bidi = newBidi(input.sourcesB.get(pathB ?? ""), input.sourcesC.get(pathC), isAdded, pathB !== null);
+    const bidi = newBidi(input.sourcesB.get(w.pathB ?? ""), input.sourcesC.get(w.pathC), w.isAdded, w.pathB !== null);
     for (const hit of bidi) {
       violations.push({
         gate: GATE,
         reason: "BIDI_CONTROL",
-        file: pathC,
+        file: w.pathC,
         line: hit.line,
         metric: "bidi",
-        message: `Bidirectional control character ${hit.codePoint} at ${pathC}:${hit.line}:${hit.column} can make code read differently than it runs (Trojan Source).`,
+        message: `Bidirectional control character ${hit.codePoint} at ${w.pathC}:${hit.line}:${hit.column} can make code read differently than it runs (Trojan Source).`,
         details: { column: hit.column, codePoint: hit.codePoint },
       });
     }
   }
 
   return { violations, triggers: dedupeTriggers(triggers), inconclusive, observe };
+}
+
+function bump(m: Map<string, number>, k: string): void {
+  m.set(k, (m.get(k) ?? 0) + 1);
+}
+
+function pool(credits: CreditPools, path: string): Map<string, number> {
+  let p = credits.get(path);
+  if (!p) credits.set(path, (p = new Map()));
+  return p;
 }
 
 function isAllowedSuppression(msg: LintMessage, allow: readonly string[]): boolean {
@@ -219,10 +298,24 @@ function attribute(
   return { msg, compareKey: match.bKey, cUnit, unitNew: false, matchStage: match.stage };
 }
 
-function routeUnitLevel(a: Attributed, file: string, triggers: TriggerHit[]): void {
+interface RouteContext {
+  isAiLoop: boolean;
+  dynamicAllowlist: readonly string[];
+}
+
+type Sink = Pick<LintEvaluation, "violations" | "triggers" | "observe">;
+
+function observeHit(sink: Sink, msg: LintMessage, file: string, unit: string | undefined, why: string): void {
+  sink.observe.new_observe_hits.push({ rule: msg.ruleId, file, line: msg.line, unit: unit ?? fileLevelKey(file), why });
+}
+
+function routeUnitLevel(a: Attributed, w: FileWork, sink: Sink): void {
   const unit = a.cUnit?.key;
+  const file = w.pathC;
   if (a.msg.category === "trigger:S4" && (a.unitNew || a.matchStage === 2)) {
-    triggers.push({
+    // Ruling D11: S4 is observe in test files.
+    if (w.isTest) return observeHit(sink, a.msg, file, unit, "S4 in a test file");
+    sink.triggers.push({
       id: "S4",
       gate: GATE,
       file,
@@ -234,7 +327,8 @@ function routeUnitLevel(a: Attributed, file: string, triggers: TriggerHit[]): vo
   // S10 targets helpers that mutate a shared context object; rebinding a
   // parameter (`n += 1`) is local and says nothing about splitting.
   if (a.msg.category === "trigger:S10" && a.unitNew && a.msg.messageId !== "assignmentToFunctionParam") {
-    triggers.push({
+    if (w.isTest) return observeHit(sink, a.msg, file, unit, "S10 in a test file");
+    sink.triggers.push({
       id: "S10",
       gate: GATE,
       file,
@@ -245,19 +339,67 @@ function routeUnitLevel(a: Attributed, file: string, triggers: TriggerHit[]): vo
   }
 }
 
+type SuppressionVerdict = "block" | "waivable" | "observe";
+
+/** Rule names an eslint directive mentions: `eslint-disable a,b` / `eslint a: off, b: 2`. */
+function directiveRules(normalized: string): string[] {
+  if (normalized.startsWith("eslint-disable")) {
+    const list = normalized.split(" ")[1];
+    return list ? list.split(",") : [];
+  }
+  return [...normalized.slice("eslint ".length).matchAll(/([@\w/-]+)\s*:/g)].map((m) => m[1]!);
+}
+
+/**
+ * Rulings D9 + D14. Non-waivable: anything that switches off a rule the gate
+ * runs, `@ts-nocheck`, coverage and mutation ignore hints. `@ts-ignore` is a
+ * waivable FAIL. `@ts-expect-error` and directives naming only rules the gate
+ * does not run are observe. The AI loop may add none of them (spec 12.2).
+ */
+export function suppressionVerdict(msg: LintMessage, isAiLoop: boolean): SuppressionVerdict {
+  if (isAiLoop) return "block";
+  switch (msg.messageId as DirectiveKind | undefined) {
+    case "eslint-disable":
+    case "eslint-config": {
+      const rules = directiveRules(msg.message);
+      if (rules.length === 0) return "block";
+      return rules.some((r) => r in RULE_CATEGORY) ? "block" : "observe";
+    }
+    case "ts-ignore":
+      return "waivable";
+    case "ts-expect-error":
+      return "observe";
+    default:
+      return "block";
+  }
+}
+
 function routeNew(
   a: Attributed,
-  file: string,
+  w: FileWork,
   counts: { baseline: number; inC: number },
-  sink: Pick<LintEvaluation, "violations" | "triggers" | "observe">,
+  ctx: RouteContext,
+  sink: Sink,
 ): void {
   const { msg } = a;
   const unit = a.cUnit?.key;
+  const file = w.pathC;
   sink.observe.new_hits_by_category[msg.category] = (sink.observe.new_hits_by_category[msg.category] ?? 0) + 1;
   switch (msg.category) {
     case "block": {
-      const reason =
-        msg.ruleId === SUPPRESSION_RULE ? "SUPPRESSION_ADDED" : DYNAMIC_CODE_RULES.has(msg.ruleId) ? "DYNAMIC_CODE" : "LINT_NEW_VIOLATION";
+      let reason: Violation["reason"] = "LINT_NEW_VIOLATION";
+      let waivable = false;
+      if (msg.ruleId === SUPPRESSION_RULE) {
+        const verdict = suppressionVerdict(msg, ctx.isAiLoop);
+        if (verdict === "observe") return observeHit(sink, msg, file, unit, "suppression of a rule the gate does not run");
+        waivable = verdict === "waivable";
+        reason = waivable ? "SUPPRESSION_ADDED_WAIVABLE" : "SUPPRESSION_ADDED";
+      } else if (DYNAMIC_CODE_RULES.has(msg.ruleId)) {
+        if (matchesAny(file, ctx.dynamicAllowlist)) return observeHit(sink, msg, file, unit, "lint.dynamic_code_allowlist");
+        reason = "DYNAMIC_CODE";
+      } else if (w.isTest && OBSERVE_IN_TESTS.has(msg.ruleId)) {
+        return observeHit(sink, msg, file, unit, "observe in test files (D11)");
+      }
       const v: Violation = {
         gate: GATE,
         reason,
@@ -267,28 +409,29 @@ function routeNew(
         before: counts.baseline,
         after: counts.inC,
         message:
-          reason === "SUPPRESSION_ADDED"
-            ? `Added suppression directive \`${msg.message}\` at ${file}:${msg.line}. Suppressions are not honoured by the gate and may not be added.`
+          msg.ruleId === SUPPRESSION_RULE
+            ? `Added suppression directive \`${msg.message}\` at ${file}:${msg.line}. Suppressions are not honoured by the gate${waivable ? "; a waiver can accept this one" : " and may not be added"}.`
             : `${msg.ruleId} at ${file}:${msg.line}: ${msg.message}`,
-        details: { ruleId: msg.ruleId, column: msg.column, ...(msg.messageId ? { messageId: msg.messageId } : {}) },
+        details: {
+          ruleId: msg.ruleId,
+          column: msg.column,
+          waivable,
+          ...(msg.messageId ? { messageId: msg.messageId } : {}),
+        },
       };
       if (unit) v.unit = unit;
       sink.violations.push(v);
       return;
     }
     case "trigger:S9":
-      sink.triggers.push({
-        id: "S9",
-        gate: GATE,
-        file,
-        ...(unit ? { unit } : {}),
-        evidence: `${file}:${msg.line}: ${msg.message}`,
-        routing: true,
-      });
+      if (w.isTest) return observeHit(sink, msg, file, unit, "S9 in a test file");
+      sink.triggers.push({ id: "S9", gate: GATE, file, ...(unit ? { unit } : {}), evidence: `${file}:${msg.line}: ${msg.message}`, routing: true });
+      return;
+    case "trigger:S11":
+      sink.triggers.push({ id: "S11", gate: GATE, file, ...(unit ? { unit } : {}), evidence: `${file}:${msg.line}: ${msg.message}`, routing: true });
       return;
     case "observe":
-      sink.observe.new_observe_hits.push({ rule: msg.ruleId, file, line: msg.line, unit: unit ?? fileLevelKey(file) });
-      return;
+      return observeHit(sink, msg, file, unit, "observe rule");
     default:
       return; // S4/S10 are routed per unit
   }
@@ -309,14 +452,17 @@ function newBidi(
   return ordered.slice(0, surplus).sort((x, y) => x.line - y.line || x.column - y.column);
 }
 
+/** One trigger per (id, unit) for unit-level signals; their evidence is merged. */
 function dedupeTriggers(triggers: TriggerHit[]): TriggerHit[] {
-  const seen = new Set<string>();
-  return triggers.filter((t) => {
-    const k = `${t.id}|${t.file}|${t.unit ?? ""}|${t.evidence}`;
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  });
+  const byKey = new Map<string, TriggerHit>();
+  for (const t of triggers) {
+    const unitLevel = (t.id === "S4" || t.id === "S10") && t.unit !== undefined;
+    const k = unitLevel ? `${t.id}|${t.file}|${t.unit}` : `${t.id}|${t.file}|${t.unit ?? ""}|${t.evidence}`;
+    const seen = byKey.get(k);
+    if (!seen) byKey.set(k, { ...t });
+    else if (!seen.evidence.split("; ").includes(t.evidence)) seen.evidence += `; ${t.evidence}`;
+  }
+  return [...byKey.values()];
 }
 
 /** G2 state from the evaluation alone; waivers and mode are applied by the aggregator. */

@@ -182,11 +182,18 @@
       "branch_drop_ratio": 0.3,
       "max_line_drop_ratio": 0.3,
       "density_drop_ratio": 0.3,
-      "min_branch_drop": 3
+      "min_branch_drop": 3,
+      "min_branch_drop_lines": 2
     },
     "s10": {
       "min_density": 0.6,
-      "min_new_units": 5
+      "min_new_units": 5,
+      "min_visible_branches": 8
+    },
+    "s12": {
+      "min_residue": 8,
+      "min_rise": 5,
+      "pr_total_rise": 15
     },
     "s3": {
       "min_single_importer_modules": 2,
