@@ -66,9 +66,12 @@ function changedFilesOf(input: TestsGateInput): ChangedFile[] {
 }
 
 /** B path → C path for files git reports as renamed. */
-function renameMap(files: ChangedFile[]): Map<string, string> {
+/** B test path → C test path for git renames that stay inside the test set. */
+function renameMap(files: ChangedFile[], input: TestsGateInput): Map<string, string> {
   const m = new Map<string, string>();
-  for (const f of files) if (f.status === "R" && f.pathB && f.pathC) m.set(f.pathB, f.pathC);
+  for (const f of files) {
+    if (f.status === "R" && f.pathB && isTestPath(f.pathC, input.policy)) m.set(f.pathB, f.pathC);
+  }
   return m;
 }
 
@@ -105,6 +108,11 @@ interface Collector {
 
 const NON_WAIVABLE = { waivable: false, approvalKind: "gate-owners" } as const;
 
+/** Waiver-addressable unit key for a test: `path::ancestors › title` (the display name goes in details.name). */
+function testUnit(file: string, name: string): string {
+  return `${file}::${name}`;
+}
+
 function failedOnBase(reportB: NormalizedReport | null, renames: Map<string, string>) {
   const ids = new Set((reportB?.tests ?? []).filter((t) => t.status === "failed").map((t) => relocate(t.id, renames)));
   const files = new Set((reportB?.suiteFailures ?? []).map((f) => renames.get(f.file) ?? f.file));
@@ -138,12 +146,12 @@ function reportRun(c: Collector, report: NormalizedReport, reportB: NormalizedRe
         gate: GATE,
         reason: "TESTS_FAILED_ON_BASE",
         file: t.file,
-        unit: name,
+        unit: testUnit(t.file, name),
         message: `test failed (also failing on the base): ${name}`,
-        details: { test_id: t.id, base_broken: true, waivable: true },
+        details: { test_id: t.id, name, base_broken: true, waivable: true },
       });
     } else {
-      own.push({ gate: GATE, reason: "TESTS_FAILED", file: t.file, unit: name, message: `test failed: ${name}`, details: { test_id: t.id, waivable: false } });
+      own.push({ gate: GATE, reason: "TESTS_FAILED", file: t.file, unit: testUnit(t.file, name), message: `test failed: ${name}`, details: { test_id: t.id, name, waivable: false } });
     }
   }
   for (const s of report.suiteFailures) {
@@ -297,7 +305,7 @@ function weakeningSignals(
       if (!b) continue;
       const name = describeKey(c.key).name;
       if (c.assertionCount < b.assertionCount) {
-        out.push({ file: c.file, unit: name, kind: "assertions", evidence: `assertions ${b.assertionCount}→${c.assertionCount} in "${name}"` });
+        out.push({ file: c.file, unit: testUnit(c.file, name), kind: "assertions", evidence: `assertions ${b.assertionCount}→${c.assertionCount} in "${name}"` });
       }
       const strong = (t: StaticTestCase) => t.matchers.filter((m) => m.strength === "strong").length;
       if (strong(c) < strong(b) && c.assertionCount >= b.assertionCount) {
@@ -305,13 +313,13 @@ function weakeningSignals(
         const cw = c.matchers.filter((m) => m.strength !== "strong").map((m) => (m.negated ? `not.${m.name}` : m.name));
         out.push({
           file: c.file,
-          unit: name,
+          unit: testUnit(c.file, name),
           kind: "matcher",
           evidence: `strong matchers ${strong(b)}→${strong(c)} in "${name}" (weak/other now: ${cw.join(", ") || "-"}; before: ${bw.join(", ") || "-"})`,
         });
       }
       if (c.inlineSnapshots.join("\u0000") !== b.inlineSnapshots.join("\u0000") && b.inlineSnapshots.length > 0) {
-        out.push({ file: c.file, unit: name, kind: "snapshot", evidence: `inline snapshot changed in "${name}"` });
+        out.push({ file: c.file, unit: testUnit(c.file, name), kind: "snapshot", evidence: `inline snapshot changed in "${name}"` });
       }
     }
   }
@@ -331,24 +339,31 @@ function protectedChanges(files: ChangedFile[], policy: Policy, extra: string[])
   return [...set].sort();
 }
 
-function isTestPath(p: string, sources: Map<string, string>, policy: Policy): boolean {
-  return sources.has(p) || matchesAny(p, policy.scope.test_globs);
+/**
+ * Per side, by the policy globs only. The manifest's entry-level `isTest` is
+ * derived from one path of the same entry, so for a rename across the test
+ * boundary it would mark both sides and hide the removal.
+ */
+function isTestPath(p: string | null, policy: Policy): p is string {
+  return p !== null && matchesAny(p, policy.scope.test_globs);
 }
 
+/**
+ * An entry is a test change when EITHER side is a test path. A file renamed
+ * out of the test globs is scanned on the B side only: its tests left the
+ * suite, which is a removal, not a missing source.
+ */
 function changedTestFiles(files: ChangedFile[], input: TestsGateInput) {
   const pathsB = new Set<string>();
   const pathsC = new Set<string>();
   const missing: string[] = [];
   for (const f of files) {
-    const test =
-      (f.pathB !== null && isTestPath(f.pathB, input.testSourcesB, input.policy)) ||
-      (f.pathC !== null && isTestPath(f.pathC, input.testSourcesC, input.policy));
-    if (!test || !/\.(m|c)?(j|t)sx?$/.test(f.pathC ?? f.pathB ?? "")) continue;
-    if (f.pathB && f.status !== "A" && f.status !== "C") {
+    if (!/\.(m|c)?(j|t)sx?$/.test(f.pathC ?? f.pathB ?? "")) continue;
+    if (f.status !== "A" && f.status !== "C" && isTestPath(f.pathB, input.policy)) {
       if (input.testSourcesB.has(f.pathB)) pathsB.add(f.pathB);
       else missing.push(f.pathB);
     }
-    if (f.pathC && f.status !== "D") {
+    if (f.status !== "D" && isTestPath(f.pathC, input.policy)) {
       if (input.testSourcesC.has(f.pathC)) pathsC.add(f.pathC);
       else missing.push(f.pathC);
     }
@@ -367,7 +382,7 @@ function isConfigPath(p: string | null, policy: Policy): p is string {
 export function evaluateTests(input: TestsGateInput): GateEvaluation {
   const c: Collector = { violations: [], triggers: [], inconclusive: [] };
   const files = changedFilesOf(input);
-  const renames = renameMap(files);
+  const renames = renameMap(files, input);
 
   let reportC: NormalizedReport | null = null;
   if (!input.reportC) {
@@ -405,9 +420,9 @@ export function evaluateTests(input: TestsGateInput): GateEvaluation {
       gate: GATE,
       reason: "TEST_REMOVED",
       file,
-      unit: name,
+      unit: testUnit(file, name),
       message: to ? `AI fix loop renamed test ${name} → ${describeKey(to).name}` : `test removed: ${name}`,
-      details: { test_id: r.key, source: r.source, ...NON_WAIVABLE, rename: Boolean(to), rename_candidates: candidates.slice(0, 10) },
+      details: { test_id: r.key, name, source: r.source, ...NON_WAIVABLE, rename: Boolean(to), rename_candidates: candidates.slice(0, 10) },
     });
   }
 
@@ -415,11 +430,12 @@ export function evaluateTests(input: TestsGateInput): GateEvaluation {
   // skipIf/runIf is S7; todo/skip on an existing test and every other marker FAIL.
   const newTodos: string[] = [];
   for (const { c: t, marker } of newMarkers(scansB, scansC, renames)) {
-    const unit = describeKey(t.key).name;
+    const name = describeKey(t.key).name;
+    const unit = testUnit(t.file, name);
     const label = marker === "x" || marker === "f" ? `${marker}-prefixed` : `.${marker}`;
     const existed = bIndex.has(t.key);
     if (!input.isAiLoop && marker === "todo" && !existed) {
-      newTodos.push(unit);
+      newTodos.push(name);
       continue;
     }
     if (!input.isAiLoop && (marker === "skipIf" || marker === "runIf")) {
@@ -433,7 +449,7 @@ export function evaluateTests(input: TestsGateInput): GateEvaluation {
       line: t.line,
       unit,
       message: `new ${label} on ${existed ? "existing " : ""}${t.kind} "${t.title}"`,
-      details: { marker, waivable: false },
+      details: { marker, name, waivable: false },
     });
   }
   for (const s of scansC.values()) {
@@ -445,9 +461,9 @@ export function evaluateTests(input: TestsGateInput): GateEvaluation {
           reason: "TEST_FOCUS_OR_SKIP",
           file: t.file,
           line: t.line,
-          unit: describeKey(t.key).name,
+          unit: testUnit(t.file, describeKey(t.key).name),
           message: `new runtime skip() inside "${t.title}"`,
-          details: { marker: "runtime-skip", waivable: false },
+          details: { marker: "runtime-skip", name: describeKey(t.key).name, waivable: false },
         });
       }
     }
@@ -460,9 +476,9 @@ export function evaluateTests(input: TestsGateInput): GateEvaluation {
           gate: GATE,
           reason: "TEST_FOCUS_OR_SKIP",
           file: t.file,
-          unit: [...t.ancestors, t.title].join(" › "),
+          unit: testUnit(t.file, [...t.ancestors, t.title].join(" › ")),
           message: `test ran on the base but was ${t.status} on the candidate`,
-          details: { marker: "report", waivable: false },
+          details: { marker: "report", name: [...t.ancestors, t.title].join(" › "), waivable: false },
         });
       }
     }
@@ -472,9 +488,10 @@ export function evaluateTests(input: TestsGateInput): GateEvaluation {
   for (const list of added.values()) {
     for (const t of list) {
       if (renamedTo.has(t.key) || t.markers.includes("todo") || t.assertionCount > 0 || t.hasAssertionDeclaration) continue;
-      const unit = describeKey(t.key).name;
+      const name = describeKey(t.key).name;
+      const unit = testUnit(t.file, name);
       if (input.isAiLoop) {
-        c.violations.push({ gate: GATE, reason: "TEST_NO_ASSERTION", file: t.file, line: t.line, unit, message: `new test "${t.title}" makes no assertion` });
+        c.violations.push({ gate: GATE, reason: "TEST_NO_ASSERTION", file: t.file, line: t.line, unit, message: `new test "${t.title}" makes no assertion`, details: { name } });
       } else {
         c.triggers.push({ id: "S7", gate: GATE, file: t.file, unit, evidence: `new test "${t.title}" makes no assertion`, routing: true });
       }
@@ -551,6 +568,10 @@ export function evaluateTests(input: TestsGateInput): GateEvaluation {
     tests_executed: reportC?.numExecuted ?? null,
     tests_failed: reportC?.numFailed ?? null,
     base_report: input.reportB === undefined || input.reportB === null ? "absent" : input.reportB.ok ? "present" : "invalid",
+    // A broken B artifact silently disables the removal, rename and base-broken checks: keep it visible.
+    ...(input.reportB && !input.reportB.ok
+      ? { base_report_invalid: { reason: input.reportB.inconclusive.reason, detail: input.reportB.inconclusive.detail } }
+      : {}),
     protected_paths_changed: protectedPaths,
     renamed_tests: renamed.map((r) => ({ from: describeKey(r.from).name, to: describeKey(r.to).name, file: describeKey(r.to).file })),
     new_todos: newTodos,

@@ -60,7 +60,7 @@ describe("G4 tests gate", () => {
     const cSrc = B_SRC.replace(/ {2}it\("vip"[^\n]*\n/, "");
     const r = run(cSrc, {}, [ALL[0]!, ALL[2]!]);
     expect(reasons(r)).toEqual(["TEST_REMOVED"]);
-    expect(r.violations[0]).toMatchObject({ unit: "price › vip", details: { waivable: false, approvalKind: "gate-owners", source: "report" } });
+    expect(r.violations[0]).toMatchObject({ unit: `${FILE}::price › vip`, details: { name: "price › vip", waivable: false, approvalKind: "gate-owners", source: "report" } });
     // Without a base report the static scan still sees it.
     const s = run(cSrc, { reportB: null }, [ALL[0]!, ALL[2]!]);
     expect(s.violations).toMatchObject([{ reason: "TEST_REMOVED", details: { source: "static" } }]);
@@ -92,6 +92,33 @@ describe("G4 tests gate", () => {
     const tests = (t: string[]) => t.map((title) => ({ file: FILE, ancestors: ["d"], title }));
     const d = run(dupC, { testSourcesB: new Map([[FILE, dupB]]), reportB: parseTestReport(jestReport(tests(["a", "b"])), known) }, tests(["a2", "b2"]));
     expect(reasons(d)).toEqual(["TEST_REMOVED", "TEST_REMOVED"]);
+  });
+
+  it("round 4: a test file renamed out of the test globs is a removal, not a missing source", () => {
+    const moved = "scripts/a.js";
+    const r = evaluateTests({
+      manifest: manifest([entry("R", FILE, moved, { similarity: 100 })]),
+      reportB: parseTestReport(jestReport(ALL), known),
+      reportC: parseTestReport(jestReport([{ file: "src/other.test.ts", title: "x" }]), known),
+      testSourcesB: new Map([[FILE, B_SRC]]),
+      testSourcesC: new Map([[moved, B_SRC]]),
+      policy: policy(),
+      isAiLoop: false,
+    });
+    expect(r.inconclusive).toEqual([]);
+    expect(r.violations.map((v) => [v.reason, v.unit])).toEqual([
+      ["TEST_REMOVED", `${FILE}::price › zero`],
+      ["TEST_REMOVED", `${FILE}::price › vip`],
+      ["TEST_REMOVED", `${FILE}::price › snapshot`],
+    ]);
+  });
+
+  it("round 4: an invalid base report is recorded in observe, not silently treated as absent", () => {
+    const r = run(B_SRC, { reportB: parseTestReport("{nope", known) });
+    expect(r.state).toBe("PASS");
+    expect(r.observe.base_report).toBe("invalid");
+    expect(r.observe.base_report_invalid).toMatchObject({ reason: "SCHEMA", detail: expect.stringContaining("not JSON") });
+    expect(run(B_SRC, { reportB: null }).observe.base_report_invalid).toBeUndefined();
   });
 
   it("follows git file renames instead of reporting removals", () => {
@@ -129,10 +156,10 @@ describe("G4 tests gate", () => {
     const tests = [...ALL, { file: FILE, ancestors: ["price"], title: "new" }, { file: FILE, ancestors: ["price"], title: "planned", status: "todo" as const }];
     const r = run(src, {}, tests);
     expect(r.violations).toEqual([]);
-    expect(r.triggers.map((t) => [t.id, t.unit])).toEqual([["S7", "price › new"]]);
+    expect(r.triggers.map((t) => [t.id, t.unit])).toEqual([["S7", `${FILE}::price › new`]]);
     expect(r.observe.new_todos).toEqual(["price › planned"]);
     const ai = run(src, { isAiLoop: true }, tests);
-    expect(ai.violations.map((v) => [v.reason, v.unit])).toEqual([
+    expect(ai.violations.map((v) => [v.reason, v.details?.name])).toEqual([
       ["TEST_FOCUS_OR_SKIP", "price › planned"],
       ["TEST_NO_ASSERTION", "price › new"],
     ]);
@@ -143,7 +170,7 @@ describe("G4 tests gate", () => {
     expect(todo.violations).toMatchObject([{ reason: "TEST_FOCUS_OR_SKIP", details: { marker: "todo" } }]);
     const cond = run(B_SRC.replace('it("zero"', 'it.skipIf(process.env.CI)("zero"').replace('it("vip"', 'it.runIf(isLinux)("vip"'));
     expect(cond.violations).toEqual([]);
-    expect(cond.triggers.map((t) => [t.id, t.unit])).toEqual([["S7", "price › zero"], ["S7", "price › vip"]]);
+    expect(cond.triggers.map((t) => [t.id, t.unit])).toEqual([["S7", `${FILE}::price › zero`], ["S7", `${FILE}::price › vip`]]);
     expect(reasons(run(B_SRC.replace('it("zero"', 'it.skipIf(x)("zero"'), { isAiLoop: true }))).toEqual(["TEST_FOCUS_OR_SKIP"]);
   });
 
@@ -153,16 +180,18 @@ describe("G4 tests gate", () => {
       ...ALL,
       ...["api", "ui", "query only"].map((title) => ({ file: FILE, ancestors: ["price"], title })),
     ]);
-    expect(r.triggers.filter((t) => t.evidence.includes("no assertion")).map((t) => t.unit)).toEqual(["price › query only"]);
+    expect(r.triggers.filter((t) => t.evidence.includes("no assertion")).map((t) => t.unit)).toEqual([`${FILE.replace(".ts", ".tsx")}::price › query only`]);
   });
 
   it("D14: a failure that also fails on the base is a separate, waivable violation", () => {
     const failing = (title: string) => ({ ...ALL.find((t) => t.title === title)!, status: "failed" as const });
     const r = run(B_SRC, { reportB: parseTestReport(jestReport([failing("zero"), ALL[1]!, ALL[2]!]), known) }, [failing("zero"), failing("vip"), ALL[2]!]);
     expect(r.violations.map((v) => [v.reason, v.unit, v.details?.waivable, v.details?.base_broken])).toEqual([
-      ["TESTS_FAILED", "price › vip", false, undefined],
-      ["TESTS_FAILED_ON_BASE", "price › zero", true, true],
+      ["TESTS_FAILED", `${FILE}::price › vip`, false, undefined],
+      ["TESTS_FAILED_ON_BASE", `${FILE}::price › zero`, true, true],
     ]);
+    // Every G4 unit is `path::name`, the form `/gate-waive unit=` can address.
+    for (const v of r.violations) expect(v.unit).toBe(`${v.file}::${v.details?.name}`);
   });
 
   it("routes matcher weakening, assertion loss and snapshot updates to S7 for people", () => {
@@ -172,9 +201,9 @@ describe("G4 tests gate", () => {
     const r = run(cSrc);
     expect(r.state).toBe("PASS");
     expect(r.triggers.map((t) => [t.id, t.unit, t.routing])).toEqual([
-      ["S7", "price › zero", true],
-      ["S7", "price › vip", true],
-      ["S7", "price › snapshot", true],
+      ["S7", `${FILE}::price › zero`, true],
+      ["S7", `${FILE}::price › vip`, true],
+      ["S7", `${FILE}::price › snapshot`, true],
     ]);
     expect(r.triggers[1]!.evidence).toContain("strong matchers 2→1");
   });

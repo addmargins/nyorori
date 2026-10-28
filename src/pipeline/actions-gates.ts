@@ -52,8 +52,12 @@ export async function testsGate(ctx: RunContext): Promise<GateDraft> {
   if (art?.provenance) draft.provenance = art.provenance;
   const knownFiles = [...ctx.treeC.keys()];
   const pathOpts = { knownFiles, ...(art?.rootDir ? { rootDir: art.rootDir } : {}) };
+  // Either side a test path: a test file renamed out of the test globs is a removal G4 must see.
+  const testSide = (p: string | undefined) => p !== undefined && matchesAny(p, policy.scope.test_globs);
   const testPaths = (texts: Map<string, string>) =>
-    new Map([...texts].filter(([p]) => manifest.entries.some((e) => e.isTest && (e.b?.path === p || e.c?.path === p))));
+    new Map(
+      [...texts].filter(([p]) => manifest.entries.some((e) => (e.isTest || testSide(e.b?.path) || testSide(e.c?.path)) && (e.b?.path === p || e.c?.path === p))),
+    );
   const e = evaluateTests({
     manifest,
     reportB: art?.reportB ? parseTestReport(art.reportB, pathOpts) : null,

@@ -8,8 +8,9 @@ import { fileLineMaps } from "../git/linemap.js";
 import { buildManifest } from "../git/manifest.js";
 import { buildGateFeedback } from "../report/feedback.js";
 import { verdictToCheckRun } from "../report/checkrun.js";
-import { renderSummaryMarkdown } from "../report/markdown.js";
+import { renderSummaryMarkdown, renderWaiverApprovalHints } from "../report/markdown.js";
 import type { GateResult, MeasurementFingerprint } from "../types.js";
+import { withVerdictInconclusive } from "../aggregate/index.js";
 import { mergePreviousAttemptTriggers } from "../ailoop/index.js";
 import { coverageGate, isAiLoopRun, mutationGate, testsGate } from "./actions-gates.js";
 import { candidateTree, readChangedTexts, toolVersions, type RunContext } from "./context.js";
@@ -18,7 +19,9 @@ import { guard, type GateDraft } from "./draft.js";
 import { allSettledOrThrow } from "./settle.js";
 import { addMovingBaselineTriggers } from "./moving-baseline.js";
 import { complexityGate, depsGate, lintGate, measure, type MeasuredState } from "./service-gates.js";
-import type { AppliedWaiver, RunGatesOptions, RunGatesOutput } from "./types.js";
+import { artifactsFromZip } from "./artifacts.js";
+import { assertToolsOutsideRepo } from "./paths.js";
+import type { AppliedWaiver, Authority, RunGatesOptions, RunGatesOutput } from "./types.js";
 
 async function buildContext(opts: RunGatesOptions, workDir: string): Promise<RunContext> {
   const policy = { ...opts.policy, revision: opts.policyRevision };
@@ -50,7 +53,18 @@ async function buildContext(opts: RunGatesOptions, workDir: string): Promise<Run
   };
 }
 
-export async function runGates(opts: RunGatesOptions): Promise<RunGatesOutput> {
+export async function runGates(input: RunGatesOptions): Promise<RunGatesOutput> {
+  if (!input.allowRepoPaths) await assertToolsOutsideRepo(input.repoDir, [{ label: "cccc binary", path: input.ccccBinary }, { label: "work dir", path: input.workDir }]);
+  const authority: Authority = input.authority ?? "local";
+  let zipProblem: string | undefined;
+  let opts = input;
+  if (input.artifactZip) {
+    try {
+      opts = { ...input, artifacts: { ...input.artifacts, ...(await artifactsFromZip(input.artifactZip)) } };
+    } catch (e) {
+      zipProblem = `required-workflow artifact was rejected: ${e instanceof Error ? e.message : String(e)}`;
+    }
+  }
   await mkdir(opts.workDir, { recursive: true });
   const workDir = await mkdtemp(join(opts.workDir, "run-"));
   try {
@@ -77,16 +91,23 @@ export async function runGates(opts: RunGatesOptions): Promise<RunGatesOutput> {
     applyMeasurementOverrides(ctx, drafts);
     const waivers = await applyWaiverDecisions(ctx, drafts, measured);
     const results = drafts.map((d) => finalize(ctx, d));
-    const verdict = aggregate(ctx, drafts, results, waivers);
+    const aggregated = aggregate(ctx, drafts, results, waivers);
+    const verdict = {
+      ...(zipProblem ? withVerdictInconclusive(aggregated, { reason: "UNTRUSTED_ARTIFACT", detail: zipProblem, authorFixable: false }) : aggregated),
+      authority,
+    };
     const all = [...results, verdict.review];
+    const hints = renderWaiverApprovalHints(waivers.pending.flatMap((p) => (p.blob ? [{ id: p.id, unit: p.unit, blob: p.blob }] : [])));
     return {
+      authority,
       verdict,
       results: all,
       manifest: ctx.manifest,
       ccccRuns: measured?.meas.runs ?? [],
-      summaryMarkdown: renderSummaryMarkdown(all, verdict),
+      summaryMarkdown: [authorityLine(authority), renderSummaryMarkdown(all, verdict), hints].filter(Boolean).join("\n"),
       checkRun: verdictToCheckRun(verdict, all),
       appliedWaivers: appliedWaivers(waivers, results),
+      pendingWaivers: waivers.pending,
       feedback: buildGateFeedback(all, {
         attempt: opts.attempt ?? 1,
         preserve: ["Every test that passes on the base must still pass on the candidate."],
@@ -95,6 +116,13 @@ export async function runGates(opts: RunGatesOptions): Promise<RunGatesOutput> {
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }
+}
+
+/** Spec 10.1: only the gate service's own check carries merge authority. */
+export function authorityLine(a: Authority): string {
+  return a === "github-app"
+    ? "_authority: github-app — 게이트 서비스의 공식 판정_"
+    : "_authority: local — 로컬 실행 결과는 병합 승인이 아니다. 공식 판정은 게이트 서비스의 `quality-gate` 체크다._";
 }
 
 /** G1 alone for another (B, C) pair of the same repository and policy. */

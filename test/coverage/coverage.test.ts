@@ -125,6 +125,29 @@ describe("G5 coverage gate", () => {
     expect(retry.inconclusive.map((i) => i.reason)).toEqual(["NONDETERMINISM"]);
   });
 
+  it("round 4: an unpinned provider version is INCONCLUSIVE once G5 blocks, allowed while observing", () => {
+    const enforce = evaluateCoverage(input({ ...modified(4, 1), policy: policy({ coverage: { mode: "enforce" } }) }));
+    expect(enforce.inconclusive.map((i) => [i.reason, i.detail])).toEqual([
+      ["FINGERPRINT_MISMATCH", expect.stringContaining("coverage.provider_version is not pinned while coverage.mode is enforce")],
+    ]);
+    expect(evaluateCoverage(input({ ...modified(4, 1), policy: policy({ coverage: { mode: "degraded" } }) })).state).toBe("INCONCLUSIVE");
+    expect(evaluateCoverage(input({ ...modified(4, 1), policy: policy({ coverage: { mode: "enforce", provider_version: "4.1.12" } }) })).state).toBe("PASS");
+    expect(evaluateCoverage(input(modified(4, 1))).state).toBe("PASS"); // default policy: observe, no pin
+  });
+
+  it("round 4: records changed named functions with 0 executions for calibration, without failing on them", () => {
+    const src = SRC.replace("export function unused", "function unused");
+    const r = evaluateCoverage(input({ sourcesC: new Map([[P, src]]), policy: policy({ coverage: { max_unexecuted_branches_abs: 10 } }) }));
+    expect(r.state).toBe("PASS");
+    expect(r.observe.unexecuted_changed_named_functions).toEqual([{ file: P, name: "unused", line: 7 }]);
+    expect(r.observe.provider).toMatchObject({ provider: "v8", provider_version: "4.1.12", runner: "" });
+    // Anonymous entries are not named.
+    const raw = JSON.parse(COV);
+    raw[Object.keys(raw)[0]!].fnMap["1"].name = "(anonymous_1)";
+    const anon = evaluateCoverage(input({ coverage: JSON.stringify(raw), sourcesC: new Map([[P, src]]), policy: policy({ coverage: { max_unexecuted_branches_abs: 10 } }) }));
+    expect(anon.observe.unexecuted_changed_named_functions).toEqual([]);
+  });
+
   it("is INCONCLUSIVE when a modified file has no line map", () => {
     const r = evaluateCoverage(input({ manifest: manifest([entry("M", P, P)]) }));
     expect(r.inconclusive.map((i) => i.reason)).toEqual(["REPORT_MISSING"]);

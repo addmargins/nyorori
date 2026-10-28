@@ -8,7 +8,7 @@ import { NON_ROUTING_TRIGGERS } from "../types.js";
 import { finalizeGateResult } from "../report/result.js";
 import { CommandError, findCommands } from "../waivers/command.js";
 import { EDITED_COMMAND_NOTE, screenComments, type IssueComment } from "../waivers/index.js";
-import { independenceProblem, inRoster, requiredApprovers, unresolvedIdentities, type PrIdentityContext, type TeamRosters } from "./independence.js";
+import { independenceProblem, inRoster, requiredApprovers, secondApproverReason, type PrIdentityContext, type TeamRosters } from "./independence.js";
 
 export type ReviewVerdict = "NO_SIMPLIFICATION_NEEDED" | "SUGGESTED" | "REQUIRED";
 
@@ -244,7 +244,7 @@ export function evaluateSimplificationReview(input: SimplificationReviewInput): 
         file: "",
         message:
           approvedBy.length > 0
-            ? `simplification review needs a second independent approver (unlinked commit identities: ${unresolvedIdentities(input.identity).join(", ")}): ${ids}`
+            ? `simplification review needs a second independent approver (${secondApproverReason(input.identity)}): ${ids}`
             : `simplification review required: ${ids}`,
         details: { stale_reviews: stale.map((r) => ({ reviewer: r.reviewer, sha: r.sha })), rejected_reviews: problems },
       });

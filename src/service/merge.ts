@@ -2,12 +2,14 @@
 // 90-day complexity-debt issues (spec 11.1). Idempotent per waiver id, so a
 // redelivered `closed` event records nothing twice.
 
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { Policy } from "../policy/schema.js";
 import { debtIssue, ledgerLine, type LedgerEntry } from "../waivers/index.js";
 import type { GitHubClient, RepoRef } from "./client.js";
 import type { LedgerStore } from "./ledger.js";
+import { withFileLock } from "./lock.js";
 import type { VerdictStore } from "./verdicts.js";
 
 /** Waiver ids whose debt issue was opened, persisted so a retry opens no duplicate. */
@@ -24,12 +26,30 @@ export class IssuedDebtStore {
   }
 
   async add(key: string, issue: number): Promise<void> {
-    const all = await this.load();
-    all[key] = issue;
-    await mkdir(dirname(this.file), { recursive: true });
-    const tmp = `${this.file}.${process.pid}.tmp`;
-    await writeFile(tmp, JSON.stringify(all));
-    await rename(tmp, this.file);
+    await withFileLock(this.file, async () => {
+      const all = await this.load();
+      all[key] = issue;
+      await mkdir(dirname(this.file), { recursive: true });
+      const tmp = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
+      await writeFile(tmp, JSON.stringify(all));
+      await rename(tmp, this.file);
+    });
+  }
+
+  /** Records the issue unless one is already recorded; returns the recorded number. */
+  async claim(key: string, open: () => Promise<number>): Promise<{ issue: number; created: boolean }> {
+    return withFileLock(this.file, async () => {
+      const all = await this.load();
+      const existing = all[key];
+      if (existing !== undefined) return { issue: existing, created: false };
+      const issue = await open();
+      all[key] = issue;
+      await mkdir(dirname(this.file), { recursive: true });
+      const tmp = `${this.file}.${process.pid}.${randomUUID()}.tmp`;
+      await writeFile(tmp, JSON.stringify(all));
+      await rename(tmp, this.file);
+      return { issue, created: true };
+    });
   }
 }
 
@@ -72,7 +92,6 @@ export async function recordMergedPullRequest(deps: MergeRecorderDeps, m: Merged
     return out;
   }
   const recorded = await deps.ledger.recordedWaiverIds(repository);
-  const issued = await deps.issued.load();
   const recordedAt = (deps.now?.() ?? new Date()).toISOString();
   for (const { waiver, value } of stored.appliedWaivers) {
     const line = ledgerLine(waiver, { repository, pr: m.pr, mergeCommit: m.mergeCommit, value, recordedAt });
@@ -82,12 +101,12 @@ export async function recordMergedPullRequest(deps: MergeRecorderDeps, m: Merged
       out.appended.push(waiver.id);
     }
     const key = `${repository}#${waiver.id}`;
-    if (issued[key] === undefined) {
+    // Check-and-open under the store's lock: two redeliveries cannot both open an issue.
+    const claimed = await deps.issued.claim(key, async () => {
       const issue = debtIssue(JSON.parse(line) as LedgerEntry, deps.policy.waivers.max_days);
-      const number = await deps.client.createIssue(m.repo, { title: issue.title, body: issue.body, labels: issue.labels });
-      await deps.issued.add(key, number);
-      out.issues.push(number);
-    }
+      return deps.client.createIssue(m.repo, { title: issue.title, body: issue.body, labels: issue.labels });
+    });
+    if (claimed.created) out.issues.push(claimed.issue);
   }
   return out;
 }

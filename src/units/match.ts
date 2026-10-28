@@ -50,6 +50,20 @@ export function bRangeTouched(hunks: readonly Hunk[], start: number, end: number
   );
 }
 
+/**
+ * Residue-gap semantics for S5: the gap [start, end] between two units (it may
+ * be empty, start = end + 1) is touched by a modification overlapping it or by
+ * an insertion after any line in [start − 1, end], i.e. anywhere between the
+ * previous unit's last line and the next unit's first line.
+ */
+export function bGapTouched(hunks: readonly Hunk[], start: number, end: number): boolean {
+  return hunks.some((h) =>
+    h.bCount > 0
+      ? h.bStart <= end && h.bStart + h.bCount - 1 >= start
+      : h.bStart >= start - 1 && h.bStart <= end,
+  );
+}
+
 export function findLineMap(
   lineMaps: readonly FileLineMap[],
   pathB: string,
@@ -101,6 +115,16 @@ export interface ScopeChange {
 
 export function scopeOf(path: string, testGlobs: readonly string[] | undefined): ScopeClass {
   return testGlobs && matchesAny(path, testGlobs) ? "test" : "product";
+}
+
+/**
+ * Records a refused verbatim move unless its file pair was already refused
+ * as a whole (the units of a refused rename are left unmatched, so stage 4
+ * finds them again; one S11 per file is enough).
+ */
+function refuseMove(refused: ScopeChange[], b: Unit, c: Unit, from: ScopeClass, to: ScopeClass): void {
+  if (refused.some((r) => r.bKey === undefined && r.bPath === b.path && r.cPath === c.path)) return;
+  refused.push({ bPath: b.path, cPath: c.path, from, to, bKey: b.key, cKey: c.key });
 }
 
 export interface MatchResult {
@@ -344,7 +368,7 @@ class Matcher {
       const from = scopeOf(b.path, input.testGlobs);
       const to = scopeOf(c.path, input.testGlobs);
       if (from !== to) {
-        refused.push({ bPath: b.path, cPath: c.path, from, to, bKey: b.key, cKey: c.key });
+        refuseMove(refused, b, c, from, to);
         continue;
       }
       // Equal scores are not equal logic (audit F4): without proof, S5 reviews it.
@@ -448,12 +472,16 @@ export function scopeChangesOf(input: PairInput, matches: readonly UnitMatch[]):
   const refused: ScopeChange[] = [];
   filePairs(input, refused);
   const m = new Matcher(new Set(), new Set(), 15);
-  for (const x of matches) m.matches.push(x), m.byB.set(x.bKey, x), m.byC.set(x.cKey, x);
+  for (const x of matches) {
+    m.matches.push(x);
+    m.byB.set(x.bKey, x);
+    m.byC.set(x.cKey, x);
+  }
   const { bUnits, cUnits } = prUnits(input);
   for (const [b, c] of m.verbatimCandidates(bUnits, cUnits)) {
     const from = scopeOf(b.path, input.testGlobs);
     const to = scopeOf(c.path, input.testGlobs);
-    if (from !== to) refused.push({ bPath: b.path, cPath: c.path, from, to, bKey: b.key, cKey: c.key });
+    if (from !== to) refuseMove(refused, b, c, from, to);
   }
   return refused;
 }

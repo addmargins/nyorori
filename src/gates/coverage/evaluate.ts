@@ -36,7 +36,14 @@ export interface FileCoverageResult {
   unexecutedLines: number[];
   addedIgnoreComments: Array<{ line: number; directive: string }>;
   unexecutedExports: Array<{ name: string; line: number }>;
+  /** Observe only (P3 calibration): changed functions with a provider-reported name that ran 0 times. */
+  unexecutedNamedFunctions: Array<{ name: string; line: number }>;
   missingFromReport: boolean;
+}
+
+/** Providers name anonymous functions `(anonymous_N)`; such entries are not "named". */
+export function isNamedFunction(name: string): boolean {
+  return name !== "" && !/^\(anonymous/.test(name) && !/^\(empty-report\)$/.test(name);
 }
 
 const GATE = "coverage" as const;
@@ -76,6 +83,7 @@ function analyzeFile(
     unexecutedLines: [],
     addedIgnoreComments,
     unexecutedExports: [],
+    unexecutedNamedFunctions: [],
     missingFromReport: !fc,
   };
   if (!fc) return result;
@@ -90,6 +98,11 @@ function analyzeFile(
     for (let l = s.range.start; l <= s.range.end; l++) if (changed.has(l)) unexecuted.add(l);
   }
   result.unexecutedLines = [...unexecuted].sort((a, b) => a - b);
+  for (const fn of fc.functions) {
+    if (fn.count === 0 && isNamedFunction(fn.name) && overlaps(fn.range, changed)) {
+      result.unexecutedNamedFunctions.push({ name: fn.name, line: fn.declLine });
+    }
+  }
   for (const ex of exportedFunctions(path, source)) {
     if (!overlaps({ start: ex.startLine, end: ex.endLine }, changed)) continue;
     const fn = fc.functions.find(
@@ -165,6 +178,14 @@ function fingerprintProblems(input: CoverageGateInput): Inconclusive[] {
     });
   }
   const pinned = input.policy.coverage.provider_version;
+  if (!pinned && input.policy.coverage.mode !== "observe") {
+    // Same rule as the measurer pin (spec 6.1): a blocking gate never trusts an unpinned tool.
+    out.push({
+      reason: "FINGERPRINT_MISMATCH",
+      detail: `coverage.provider_version is not pinned while coverage.mode is ${input.policy.coverage.mode}; pin the provider version in the policy`,
+      authorFixable: false,
+    });
+  }
   if (pinned && meta.provider_version !== pinned) {
     out.push({
       reason: "FINGERPRINT_MISMATCH",
@@ -241,6 +262,8 @@ export function evaluateCoverage(input: CoverageGateInput): GateEvaluation {
     unexecuted_changed_branch_outcomes: unexecuted,
     allowed_unexecuted: allowed,
     unexecuted_changed_lines: a.files.reduce((s, f) => s + f.unexecutedLines.length, 0),
+    unexecuted_changed_named_functions: a.files.flatMap((f) => f.unexecutedNamedFunctions.map((x) => ({ file: f.path, ...x }))),
+    provider: parseCoverageMeta(input.meta),
     files_missing_from_report: a.files.filter((f) => f.missingFromReport).map((f) => f.path),
     unmapped_report_paths: a.unmapped.slice(0, 20),
     files: a.files,

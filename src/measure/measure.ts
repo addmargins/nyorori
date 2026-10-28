@@ -93,13 +93,14 @@ function stdoutOf(runs: CcccRun[]): Buffer {
 export async function measureSides(opts: MeasureSidesOptions): Promise<SideMeasurements> {
   const { repoDir, manifest, policy } = opts;
   await mkdir(opts.workDir, { recursive: true });
-  const root = await mkdtemp(join(opts.workDir, "trees-"));
-  const roots = { B: join(root, "B"), C: join(root, "C") };
-  const id = await pinMeasurer(opts.binary, root);
+  // The configured binary is read once; its bytes are hashed and executed from
+  // a private read-only copy, so nothing swapped in at the configured path after
+  // hashing can run (TOCTOU). The copy is removed with the trees.
+  const id = await pinMeasurer(opts.binary, opts.workDir);
   const binary = id.path;
+  const dropCopy = () => rm(binary, { force: true });
   const fingerprint = buildFingerprint(id, policy, opts.runnerCommit ?? "unknown");
   const inconclusive: Inconclusive[] = [...checkMeasurer(id, policy), ...manifestInconclusive(manifest)];
-  const reuse = reuseFromC(manifest);
   const result: SideMeasurements = {
     b: new Map(),
     c: new Map(),
@@ -110,13 +111,16 @@ export async function measureSides(opts: MeasureSidesOptions): Promise<SideMeasu
     fingerprint,
     runs: [],
     determinismChecked: false,
-    ...(opts.keepTrees ? { treeRoots: roots } : {}),
   };
   // A mismatched measurer produces numbers nobody may compare: stop here.
   if (inconclusive.some((i) => i.reason === "MEASURER_MISMATCH")) {
-    await rm(root, { recursive: true, force: true });
+    await dropCopy();
     return result;
   }
+  const root = await mkdtemp(join(opts.workDir, "trees-"));
+  const roots = { B: join(root, "B"), C: join(root, "C") };
+  if (opts.keepTrees) result.treeRoots = roots;
+  const reuse = reuseFromC(manifest);
 
   try {
     const sideB = await materializeSideChecked(repoDir, manifest, "B", roots.B);
@@ -166,11 +170,13 @@ export async function measureSides(opts: MeasureSidesOptions): Promise<SideMeasu
 
     inconclusive.push(...unitsVanished(manifest, result, matB, matC, policy));
 
+    // Spec 6.4: a sampled run measures every C chunk again single-threaded and
+    // compares the bytes. The official merge_group verdict samples at its own
+    // (default 1.0) rate; the pull_request pre-check keeps the cheaper 5%.
     const rng = opts.rng ?? Math.random;
     const rate = opts.official ? policy.measurer.determinism_sample_rate_official : policy.measurer.determinism_sample_rate;
     if (matC.length > 0 && rng() < rate) {
       result.determinismChecked = true;
-      // Every C chunk is measured again, single-threaded, and compared byte for byte.
       const again = await runCccc({ binary, treeRoot: roots.C, files: matC.map((f) => f.measuredPath), policy, side: "C", jobs: 1 });
       if (!stdoutOf(again).equals(stdoutOf(runsC))) {
         inconclusive.push({
@@ -182,6 +188,7 @@ export async function measureSides(opts: MeasureSidesOptions): Promise<SideMeasu
     }
     return result;
   } finally {
+    await dropCopy();
     if (!opts.keepTrees) await rm(root, { recursive: true, force: true });
   }
 }

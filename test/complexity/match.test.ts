@@ -143,15 +143,19 @@ describe("matchUnits", () => {
     expect(r.outcome.violations).toEqual([]);
   });
 
-  it("same-line anonymous functions: line ordinal when untouched, k-to-k when the line is edited", () => {
+  it("same-line anonymous functions: line ordinal when untouched, never k-to-k when the line is edited (D21b reversed)", () => {
     const body = ifChain("x", 17).split("\n").slice(2, -3).join("\n");
     const b = `export const pair = [(x) => x, (x) => {\n  let y = 0;\n${body}\n  return y;\n}];\n`;
     const r = runScenario({ b: { [F]: b }, c: { [F]: "// moved down\n" + b } });
     expect(r.outcome.violations).toEqual([]);
     expect(r.outcome.triggers.filter((t) => t.id === "S5")).toEqual([]);
+    // Spec 5.4 step 3 excludes anonymous units from name-based matching: once the
+    // declaration line is edited, the legacy callback is ambiguous and the 17 is
+    // unmatched (differential test m16b: a new 18 inherited a legacy 18 via k-to-k).
     const edited = runScenario({ b: { [F]: b }, c: { [F]: b.replace("(x) => x,", "(x) => x + 0,") } });
-    expect(edited.outcome.violations).toEqual([]);
-    expect(edited.outcome.triggers.some((t) => t.id === "S5" && /identity-changed/.test(t.evidence))).toBe(true);
+    expect(edited.match.matches.filter((m) => !m.cKey.endsWith("<module>"))).toEqual([]);
+    expect(violationReasons(edited)).toEqual([`${F}::<anonymous>#arrow[1]:UNMATCHED_OVER_BUDGET`]);
+    expect(edited.outcome.violations[0]!.details!.b_candidates).toEqual([{ unit: `${F}::<anonymous>#arrow[1]`, line: 1, cognitive: 17 }]);
     const grown = runScenario({ b: { [F]: b }, c: { [F]: b.replace("(x) => x,", "(x) => x + 0,").replace("y += 0;", "y += 0; if (x) y++;") } });
     expect(violationReasons(grown)).toEqual([`${F}::<anonymous>#arrow[1]:UNMATCHED_OVER_BUDGET`]);
   });

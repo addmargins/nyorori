@@ -187,7 +187,7 @@ export function validateCcccRun(run: Omit<CcccRun, "args">, timeoutMs: number, o
           parserLag
             ? `${f.path}: cccc does not support this syntax yet (${errs.slice(0, 3).join("; ")}); a gate owner may override`
             : ambient
-              ? `${f.path} is a declaration file but contains an implementation (${errs.slice(0, 3).join("; ")}); move the code to a .ts file`
+              ? `${f.path} has an implementation in an ambient (declare) context (${errs.slice(0, 3).join("; ")}); a declaration file or \`declare\` block may not contain code, move it to a .ts file`
               : `${f.path}: cccc could not parse the file (${errs.slice(0, 3).join("; ")}); fix the syntax error`,
           !parserLag,
           f.path,

@@ -66,7 +66,7 @@ AI가 만든 코드(와 사람이 만든 코드)의 PR 병합을 판정하는 **
 ## Quick start
 
 ```bash
-scripts/fetch-cccc.sh            # 릴리스 자산 + attestation 검증, 실패 시 소스 빌드. sha256 출력
+scripts/fetch-cccc.sh            # 릴리스 자산을 sha256 pin·.sha256·attestation·verify-asset로 검증(불일치 시 중단). sha256 출력. 소스 빌드는 CCCC_FROM_SOURCE=1(pin 금지)
 ```
 
 ```bash

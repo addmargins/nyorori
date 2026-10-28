@@ -5,10 +5,20 @@
 import ts from "typescript";
 import { classifyDirectiveComment, isAllowlisted, type Directive } from "../gates/lint/text.js";
 import type { Policy } from "../policy/schema.js";
-import { ALWAYS_ROUTING_TRIGGERS, NON_ROUTING_TRIGGERS, type ChangeStatus, type TriggerHit, type Violation } from "../types.js";
+import { ALWAYS_ROUTING_TRIGGERS, NON_ROUTING_TRIGGERS, type ChangeStatus, type Inconclusive, type TriggerHit, type Violation } from "../types.js";
 import { matchesGlob } from "../util/glob.js";
 
 const matchAny = (path: string, patterns: readonly string[]): string | null => patterns.find((p) => matchesGlob(path, p)) ?? null;
+
+/** Spec 12.2, machine-readable, for gate-feedback.json (`forbidden_changes`). */
+export const FORBIDDEN_CHANGES = [
+  { id: "gate_tool_config", description: "gate and tool configuration: cccc.toml, ESLint, dependency-cruiser, vitest/jest configs, tsconfig strict*, .gitignore, .ignore, .gitattributes, package.json test scripts, CI workflows, the waiver ledger" },
+  { id: "test_removed", description: "deleting a test that existed in B" },
+  { id: "test_focus_or_skip", description: "adding .only, .skip, xit, todo, fails" },
+  { id: "assertions_weakened", description: "fewer assertions, weaker matchers, snapshot updates (-u)" },
+  { id: "suppression_added", description: "eslint-disable*, istanbul/v8/c8 ignore, Stryker disable, @ts-ignore, @ts-nocheck, @ts-expect-error outside the policy allowlist" },
+  { id: "moved_out_of_measurement", description: "renaming measured files to unmeasured extensions, moving code into excluded or generated paths" },
+] as const;
 
 /** Spec 12.2 paths on top of policy.tests.protected_paths. */
 export const AI_LOOP_FORBIDDEN_PATHS: readonly string[] = [
@@ -135,6 +145,14 @@ export function detectForbiddenChanges(
   return out;
 }
 
+/** What identifies "the same measurement" across attempts (spec 12.3 "같은 B"). */
+export interface AttemptBinding {
+  base: string;
+  policyRevision: string;
+  /** cccc sha256 + runner commit, or any stable fingerprint string the caller derives. */
+  fingerprint: string;
+}
+
 export interface RetryState {
   /** Fix attempts already made by the loop (0 = the original PR was just measured). */
   attempt: number;
@@ -144,12 +162,37 @@ export interface RetryState {
   /** Triggers that fired on this attempt but not on the original PR. */
   newTriggers: readonly TriggerHit[];
   forbidden: readonly Violation[];
+  /** INCONCLUSIVE entries of this attempt; any of them ends the loop (a human must look). */
+  inconclusive?: readonly Inconclusive[];
+  /** Binding of the first attempt and of this one; drift between them ends the loop. */
+  first?: AttemptBinding;
+  current?: AttemptBinding;
 }
 
-export type RetryDecision =
+export type RetryDecision = { attemptsRemaining: number } & (
   | { action: "done"; reason: string }
   | { action: "retry"; reason: string }
-  | { action: "handoff"; reason: string };
+  | { action: "handoff"; reason: string }
+);
+
+/** Machine-readable stop conditions, mirrored into gate-feedback.json. */
+export const STOP_IF = [
+  { id: "forbidden_change", description: "the diff touched a protected path, test, config or suppression (spec 12.2)" },
+  { id: "inconclusive", description: "any gate is INCONCLUSIVE; measurement problems are for a human" },
+  { id: "measurement_drift", description: "base, policy revision or measurer fingerprint differ from the first attempt" },
+  { id: "new_routing_trigger", description: "the fix fired a review trigger the original PR did not" },
+  { id: "no_progress", description: "the violation set is unchanged since the previous attempt" },
+  { id: "retry_limit", description: "ai_loop.max_retries attempts were used" },
+] as const;
+
+export type StopReason = (typeof STOP_IF)[number]["id"];
+
+function bindingDrift(a: AttemptBinding, b: AttemptBinding): string | null {
+  if (a.base !== b.base) return `base ${a.base} → ${b.base}`;
+  if (a.policyRevision !== b.policyRevision) return `policy ${a.policyRevision} → ${b.policyRevision}`;
+  if (a.fingerprint !== b.fingerprint) return `measurer fingerprint ${a.fingerprint} → ${b.fingerprint}`;
+  return null;
+}
 
 /**
  * Library decision for an AI fix-loop runner (spec 12.3); nyorori does not
@@ -157,24 +200,31 @@ export type RetryDecision =
  * trigger, on no progress, and at the retry limit.
  */
 export function decideRetry(state: RetryState, policy: Policy): RetryDecision {
-  if (state.forbidden.length > 0) return { action: "handoff", reason: "forbidden change (spec 12.2)" };
+  const attemptsRemaining = Math.max(0, policy.ai_loop.max_retries - state.attempt);
+  const handoff = (id: StopReason, detail: string): RetryDecision => ({ action: "handoff", reason: `${id}: ${detail}`, attemptsRemaining });
+  if (state.forbidden.length > 0) return handoff("forbidden_change", "forbidden change (spec 12.2)");
+  if (state.inconclusive && state.inconclusive.length > 0) {
+    return handoff("inconclusive", [...new Set(state.inconclusive.map((i) => i.reason))].join(", "));
+  }
+  if (state.first && state.current) {
+    const drift = bindingDrift(state.first, state.current);
+    if (drift) return handoff("measurement_drift", drift);
+  }
   // Any new routing trigger means the fix needs a human (S1/S9: redistributing or hiding branches).
   const fresh = state.newTriggers.filter(
     (t) => (t.routing || ALWAYS_ROUTING_TRIGGERS.has(t.id)) && !NON_ROUTING_TRIGGERS.has(t.id),
   );
   if (fresh.length > 0) {
-    return { action: "handoff", reason: `the fix fired new review triggers (${[...new Set(fresh.map((t) => t.id))].join(", ")})` };
+    return handoff("new_routing_trigger", `the fix fired new review triggers (${[...new Set(fresh.map((t) => t.id))].join(", ")})`);
   }
-  if (state.currentViolations.length === 0) return { action: "done", reason: "no violations left" };
+  if (state.currentViolations.length === 0) return { action: "done", reason: "no violations left", attemptsRemaining };
   if (state.attempt > 0 && state.previousViolations.length > 0) {
     const prev = new Set(state.previousViolations);
     const same = state.currentViolations.length === prev.size && state.currentViolations.every((k) => prev.has(k));
-    if (same) return { action: "handoff", reason: "no progress: violation set unchanged" };
+    if (same) return handoff("no_progress", "violation set unchanged");
   }
-  if (state.attempt >= policy.ai_loop.max_retries) {
-    return { action: "handoff", reason: `retry limit ${policy.ai_loop.max_retries} reached` };
-  }
-  return { action: "retry", reason: `fix attempt ${state.attempt + 1} of ${policy.ai_loop.max_retries}` };
+  if (attemptsRemaining === 0) return handoff("retry_limit", `retry limit ${policy.ai_loop.max_retries} reached`);
+  return { action: "retry", reason: `fix attempt ${state.attempt + 1} of ${policy.ai_loop.max_retries}`, attemptsRemaining };
 }
 
 /** Shape triggers that are also computed against the previous attempt C_{n-1} (ruling D17). */

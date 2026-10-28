@@ -6,7 +6,7 @@
 import { createHash } from "node:crypto";
 import type { Policy } from "../policy/schema.js";
 import type { ReasonCode, Violation, WaiverApplied } from "../types.js";
-import { independenceProblem, inRoster, requiredApprovers, unresolvedIdentities, type PrIdentityContext, type TeamRosters } from "../review/independence.js";
+import { independenceProblem, inRoster, requiredApprovers, secondApproverReason, type PrIdentityContext, type TeamRosters } from "../review/independence.js";
 import type { ReviewComment } from "../review/simplification.js";
 import { findCommands, requireArgs } from "./command.js";
 import { EDITED_COMMAND_NOTE, screenComments } from "./index.js";
@@ -101,7 +101,7 @@ export function applyTestApprovals(
       continue;
     }
     if (list.length < needed) {
-      reject(`needs ${needed} independent gate owners (unlinked commit identities: ${unresolvedIdentities(ctx.identity).join(", ")})`);
+      reject(`needs ${needed} independent gate owners (${secondApproverReason(ctx.identity)})`);
       continue;
     }
     const id = testApprovalId(list[0]!.commentId, key);

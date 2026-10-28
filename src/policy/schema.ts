@@ -37,7 +37,7 @@ export const policySchema = z
         extensions: z
           .array(z.string())
           .default([".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"]),
-        /** Declaration files are excluded (spec 2.3). */
+        /** Declaration files: measured when declaration_impl_check, excluded DECLARATION_FILE otherwise (spec 2.3). */
         declaration_suffixes: z.array(z.string()).default([".d.ts", ".d.mts", ".d.cts"]),
         /** Code formats cccc cannot measure: recorded as unmeasured and routed to S11. */
         unmeasured_code_extensions: z
@@ -104,7 +104,11 @@ export const policySchema = z
         jsx_in_js: z.array(glob).default([]),
         max_file_bytes: z.number().int().positive().default(2 * 1024 * 1024),
         rename_similarity: z.number().int().min(1).max(100).default(70),
-        /** Measure `.d.ts` on C anyway: an implementation there is a parse error (PARSE_ERROR_CANDIDATE). */
+        /**
+         * Measure declaration files like any other source: a clean one is a
+         * measured PASS (spec 9.1), an implementation inside is cccc's "ambient
+         * context" parse error, i.e. an author-fixable PARSE_ERROR_CANDIDATE.
+         */
         declaration_impl_check: z.boolean().default(true),
         /** Paths whose change is routed to S11 and requires CODEOWNERS review. */
         sensitive_paths: z
@@ -192,6 +196,8 @@ export const policySchema = z
             lookback_merges: z.number().int().positive().default(5),
             lookback_days: z.number().int().positive().default(30),
             route: z.boolean().default(false),
+            /** While observe-only (route=false), PRs changing more tracked files than this skip the pass. */
+            max_files: z.number().int().positive().default(200),
           })
           .strict()
           .default({}),
@@ -251,6 +257,7 @@ export const policySchema = z
         max_unexecuted_branches_abs: z.number().int().nonnegative().default(2),
         max_unexecuted_branches_ratio: z.number().min(0).max(1).default(0.1),
         provider: z.string().default("v8"),
+        /** Exact provider version (coverage-meta.json). Empty is allowed only while `mode` is observe; a blocking G5 with no pin is INCONCLUSIVE (spec 6.1). */
         provider_version: z.string().default(""),
         ignore_comment_allowlist: z.array(z.string()).default([]),
       })

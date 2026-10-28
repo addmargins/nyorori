@@ -2,7 +2,9 @@
 // what the measurer actually reports; cccc gives no per-construct breakdown,
 // so the feedback never pretends to attribute points to specific lines.
 
-import type { GateResult, TriggerHit, Violation } from "../types.js";
+import { FORBIDDEN_CHANGES, STOP_IF } from "../ailoop/index.js";
+import type { QualityGateVerdict } from "../aggregate/types.js";
+import type { GateResult, GateState, TriggerHit, Violation } from "../types.js";
 
 export const AI_LOOP_INSTRUCTIONS = [
   "지정된 단위의 복잡도를 줄이되 early return, 이름 있는 조건 함수, 데이터 표를 우선하라.",
@@ -48,7 +50,17 @@ export interface GateFeedback {
   schema_version: 1;
   base_sha: string;
   candidate_sha: string;
+  /** Verdict state of this attempt, when the caller supplies the verdict. */
+  state?: GateState;
   attempt: number;
+  max_retries?: number;
+  /** Conditions under which the loop must stop and hand off (spec 12.3). */
+  stop_if: ReadonlyArray<{ id: string; description: string }>;
+  /** Changes the loop may never make (spec 12.2), machine-readable. */
+  forbidden_changes: ReadonlyArray<{ id: string; description: string }>;
+  /** The shadow verdict and whether it would block (spec 13.1). */
+  would_block?: boolean;
+  shadow?: QualityGateVerdict["shadow"];
   instructions: string;
   forbidden_patterns: readonly string[];
   violations: FeedbackItem[];
@@ -72,14 +84,19 @@ function item(v: Violation): FeedbackItem {
 
 export function buildGateFeedback(
   results: GateResult[],
-  opts: { attempt: number; preserve: string[] },
+  opts: { attempt: number; preserve: string[]; maxRetries?: number; verdict?: QualityGateVerdict },
 ): GateFeedback {
   const first = results[0];
+  const v = opts.verdict;
   return {
     schema_version: 1,
-    base_sha: first?.base_sha ?? "",
-    candidate_sha: first?.candidate_sha ?? "",
+    base_sha: first?.base_sha ?? v?.base_sha ?? "",
+    candidate_sha: first?.candidate_sha ?? v?.candidate_sha ?? "",
+    ...(v ? { state: v.state, would_block: v.would_block, shadow: v.shadow } : {}),
     attempt: opts.attempt,
+    ...(opts.maxRetries !== undefined ? { max_retries: opts.maxRetries } : {}),
+    stop_if: STOP_IF,
+    forbidden_changes: FORBIDDEN_CHANGES,
     instructions: AI_LOOP_INSTRUCTIONS,
     forbidden_patterns: FORBIDDEN_PATTERNS,
     violations: results.flatMap((r) => r.violations.filter((v) => !v.waivedBy).map(item)),

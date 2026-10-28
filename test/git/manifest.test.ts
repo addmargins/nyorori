@@ -31,8 +31,13 @@ describe("pure helpers", () => {
     const p = defaultPolicy({ scope: { exclude: ["generated/**"] } });
     expect(classifyPath("src/a.ts", p)).toEqual({ kind: "measure" });
     expect(classifyPath("src/A.TSX", p)).toEqual({ kind: "measure" });
-    expect(classifyPath("src/a.d.ts", p)).toEqual({ kind: "excluded", reason: "DECLARATION_FILE" });
+    // Declaration files are measured (an implementation inside is a parse error), unless the policy turns that off.
+    expect(classifyPath("src/a.d.ts", p)).toEqual({ kind: "measure" });
+    expect(classifyPath("src/a.d.mts", p)).toEqual({ kind: "measure" });
+    const noDecl = defaultPolicy({ scope: { exclude: ["generated/**"], declaration_impl_check: false } });
+    expect(classifyPath("src/a.d.ts", noDecl)).toEqual({ kind: "excluded", reason: "DECLARATION_FILE" });
     expect(classifyPath("generated/a.ts", p)).toEqual({ kind: "excluded", reason: "POLICY_EXCLUDE" });
+    expect(classifyPath("generated/a.d.ts", p)).toEqual({ kind: "excluded", reason: "POLICY_EXCLUDE" });
     expect(classifyPath("src/a.vue", p)).toEqual({ kind: "unmeasured", reason: "UNSUPPORTED_FORMAT" });
     expect(classifyPath("README.md", p)).toEqual({ kind: "excluded", reason: "NOT_CODE" });
     expect(classifyPath("LICENSE", p)).toEqual({ kind: "extensionless" });
@@ -102,11 +107,51 @@ describe("buildManifest on real repositories", () => {
     const e = byPath(m);
     expect(e.get("src/App.vue")).toMatchObject({ unmeasured: "UNSUPPORTED_FORMAT" });
     expect(e.get("generated/api.ts")).toMatchObject({ excluded: "POLICY_EXCLUDE", newInExcludedPath: true });
-    expect(e.get("src/types.d.ts")).toMatchObject({ excluded: "DECLARATION_FILE" });
+    expect(e.get("src/types.d.ts")).toMatchObject({ measure: { B: false, C: true } });
+    expect(e.get("src/types.d.ts")!.excluded).toBeUndefined();
     expect(e.get("scripts/run.py")).toMatchObject({ unmeasured: "FOREIGN_LANGUAGE", measure: { B: false, C: false } });
     expect(e.get("data/blob.xyz")).toMatchObject({ unmeasured: "UNSUPPORTED_FORMAT" });
     expect(m.problems).toEqual([]);
     expect(m.sensitivePathsChanged).toEqual([".gitattributes"]);
+  });
+
+  it("declaration files are excluded only when declaration_impl_check is off; codegen .d.ts under an excluded path never routes S11", async () => {
+    repo = new TestRepo();
+    const b = repo.commit({ "src/types.d.ts": "export declare const x: number;\n" });
+    const c = repo.commit({ "src/types.d.ts": "export declare const x: string;\n", "generated/api.d.ts": "export declare const y: 1;\n" });
+    const on = byPath(await buildManifest(repo.dir, b, c, defaultPolicy({ scope: { exclude: ["generated/**"] } })));
+    expect(on.get("src/types.d.ts")).toMatchObject({ status: "M", measure: { B: true, C: true } });
+    expect(on.get("generated/api.d.ts")).toMatchObject({ excluded: "POLICY_EXCLUDE", measure: { B: false, C: false } });
+    expect(on.get("generated/api.d.ts")!.newInExcludedPath).toBeUndefined();
+    const off = byPath(await buildManifest(repo.dir, b, c, defaultPolicy({ scope: { exclude: ["generated/**"], declaration_impl_check: false } })));
+    expect(off.get("src/types.d.ts")).toMatchObject({ excluded: "DECLARATION_FILE", measure: { B: false, C: false } });
+  });
+
+  it("isTest is true when either side is a test file, with isTestB / isTestC telling them apart", async () => {
+    repo = new TestRepo();
+    const bodyA = Array.from({ length: 30 }, (_, i) => `export const a${i} = ${i};`).join("\n") + "\n";
+    const bodyL = Array.from({ length: 30 }, (_, i) => `export const l${i} = ${i};`).join("\n") + "\n";
+    const b = repo.commit({ "src/a.test.ts": bodyA, "src/lib.ts": bodyL, "src/keep.test.ts": fn("k"), "src/prod.ts": fn("p"), "src/gone.test.ts": fn("g") });
+    const c = repo.commit({
+      "src/a.test.ts": null,
+      "src/a.ts": bodyA.replace("a0 = 0", "a0 = 1"), // test → product
+      "src/lib.ts": null,
+      "test/lib.test.ts": bodyL.replace("l0 = 0", "l0 = 1"), // product → test
+      "src/keep.test.ts": fn("k", "return 2;"),
+      "src/prod.ts": fn("p", "return 2;"),
+      "src/gone.test.ts": null,
+      "src/new.test.ts": fn("n"),
+    });
+    const e = byPath(await buildManifest(repo.dir, b, c, defaultPolicy()));
+    expect(e.get("src/a.ts")).toMatchObject({ status: "R", isTest: true, isTestB: true, isTestC: false });
+    expect(e.get("test/lib.test.ts")).toMatchObject({ status: "R", isTest: true, isTestB: false, isTestC: true });
+    expect(e.get("src/keep.test.ts")).toMatchObject({ isTest: true, isTestB: true, isTestC: true });
+    expect(e.get("src/prod.ts")).toMatchObject({ isTestB: false, isTestC: false });
+    expect(e.get("src/prod.ts")!.isTest).toBeUndefined();
+    expect(e.get("src/gone.test.ts")).toMatchObject({ status: "D", isTest: true, isTestB: true });
+    expect(e.get("src/gone.test.ts")!.isTestC).toBeUndefined();
+    expect(e.get("src/new.test.ts")).toMatchObject({ status: "A", isTest: true, isTestC: true });
+    expect(e.get("src/new.test.ts")!.isTestB).toBeUndefined();
   });
 
   it("detects LFS pointers, oversize blobs and case collisions", async () => {

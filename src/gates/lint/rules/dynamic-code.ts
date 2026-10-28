@@ -20,6 +20,7 @@ import {
   type AstNode,
   type Scope,
   type SourceCode,
+  type Variable,
 } from "./ast.js";
 
 const GLOBAL_OBJECTS = new Set(["globalThis", "window", "self", "global", "frames"]);
@@ -116,11 +117,13 @@ const INVOKERS = new Set(["call", "apply", "bind"]);
  * one of its own properties (`.name`), comparing it, `typeof`, `delete`, a
  * statement test, a string interpolation or a property key stay clean.
  */
-function constructorValueEscapes(member: AstNode, sc: SourceCode): boolean {
+function constructorValueEscapes(member: AstNode, sc: SourceCode, depth = 0): boolean {
   const outer = outermostWrapper(member);
   const p = outer.parent;
-  if (!p) return false;
+  if (!p || depth > 4) return !!p;
   switch (p.type) {
+    case "VariableDeclarator":
+      return p.init === outer && bindingEscapes(p, sc, depth);
     case "MemberExpression": {
       if (p.object !== outer) return false; // `a[x.constructor]`: the value is stringified into a key
       // `x.constructor.call/apply/bind(...)` invokes it; `.name`, `.length`,
@@ -151,18 +154,36 @@ function constructorValueEscapes(member: AstNode, sc: SourceCode): boolean {
     case "TemplateLiteral":
       return p.parent?.type === "TaggedTemplateExpression"; // `${x.constructor}` only stringifies
     case "ConditionalExpression":
-      return p.test !== outer && constructorValueEscapes(p, sc);
+      return p.test !== outer && constructorValueEscapes(p, sc, depth);
     case "LogicalExpression":
-      return constructorValueEscapes(p, sc);
+      return constructorValueEscapes(p, sc, depth);
     case "SequenceExpression":
-      return p.expressions[p.expressions.length - 1] === outer && constructorValueEscapes(p, sc);
+      return p.expressions[p.expressions.length - 1] === outer && constructorValueEscapes(p, sc, depth);
     case "ChainExpression":
-      return constructorValueEscapes(p, sc);
+      return constructorValueEscapes(p, sc, depth);
     default:
       // Call/new (callee or argument), VariableDeclarator, Return/Throw,
       // Yield/Await, Array/Spread, arrow body, export default, class heritage...
       return true;
   }
+}
+
+/**
+ * `const ctor = x.constructor`: the binding escapes when it is exported,
+ * reassigned, destructured, or any read of it escapes by the same rules.
+ * `const ctor = o.constructor; if (ctor === undefined) ...; ctor.prototype`
+ * (the plain-object idiom) stays clean.
+ */
+function bindingEscapes(declarator: AstNode, sc: SourceCode, depth: number): boolean {
+  if (declarator.id.type !== "Identifier") return true;
+  if (declarator.parent?.parent?.type === "ExportNamedDeclaration") return true;
+  const v = (sc.getDeclaredVariables(declarator as never) as Variable[]).find((d) => d.name === declarator.id.name);
+  if (!v) return true;
+  return v.references.some((r) => {
+    const id = r.identifier as unknown as AstNode;
+    if (id === declarator.id) return false;
+    return r.isWrite() || constructorValueEscapes(id, sc, depth + 1);
+  });
 }
 
 const VALUE_WRAPPER_TS = new Set(["TSAsExpression", "TSNonNullExpression", "TSSatisfiesExpression", "TSTypeAssertion"]);

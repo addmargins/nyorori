@@ -31,6 +31,9 @@ export const coverageMetaSchema = z
     provider: z.string().min(1),
     provider_version: z.string().default(""),
     vitest_version: z.string().default(""),
+    /** Which runner produced the report ("vitest" | "jest"); Jest's v8 provider does not remap (spec 8.4). */
+    runner: z.string().default(""),
+    runner_version: z.string().default(""),
   })
   .passthrough();
 export type CoverageMeta = z.infer<typeof coverageMetaSchema>;

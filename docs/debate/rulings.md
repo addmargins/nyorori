@@ -50,7 +50,7 @@ New contract items (owner: orchestrator):
 | C | S10 param-mutation fires on 2–6% of files (bar: 0.25%) | **Accepted:** fire only when a file has ≥ 2 such helpers (fixture 7.2(b) has 6–11). |
 | C | `Math.min(1, o.b) * 2` used as a branch is not detected | Accepted as a documented gap. |
 | B | F3 makes every new helper or fixture under a test dir require review | **Accepted:** new policy `scope.test_support_globs` (fixtures, helpers, `__mocks__`, testutils) is exempt. |
-| B | k-to-k matching includes anonymous units (bounded by the max B in the group) | Accepted; this is the intent of D21b. |
+| B | k-to-k matching includes anonymous units (bounded by the max B in the group) | ~~Accepted; this is the intent of D21b.~~ **Reversed (round 4)** by the differential test (`docs/review/branch-comparison.md`, scenario m16b): a new anonymous CogC-18 callback inherited a legacy 18's allowance through k-to-k. D21b is narrowed to named units, as spec 5.4 step 3 already requires; anonymous leftovers of an ambiguous group stay unmatched (`UNMATCHED_OVER_BUDGET` when over T). |
 | D | S7 and S11 both fire for a setup/alias change | Accepted (evidence vs file); costs one disposition line. |
 | D | The rename rule makes a B-side test run mandatory | Accepted; the untrusted workflow template always runs B. A P0 check goes in docs/operations.md. |
 | E | A `pull_request` evidence artifact must carry the test-merge SHA, always (not only "when available") | **Accepted.** |

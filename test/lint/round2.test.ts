@@ -91,6 +91,9 @@ describe("audit F7: dynamic-code gaps", () => {
     ["folded .call key", `function g() {}\nexport const price = g.constructor["ca" + "ll"](null, "o", "return 1");`],
     ["arrow body", `declare const g: any;\nexport const F = () => g.constructor;`],
     ["logical fallback", `declare const g: any; declare const Y: any;\nexport const F = g.constructor || Y;`],
+    ["alias of alias then call", `function g() {}\nexport function mk() { const a = g.constructor; const b = a; return b("o", "return 1"); }`],
+    ["let alias reassigned", `function g() {}\nexport function mk() { let a = g.constructor; a = a; return a; }`],
+    ["alias passed on", `declare const g: any; declare const run: any;\nexport function mk() { const a = g.constructor; run(a); }`],
   ])("constructor value escape: %s", async (_name, code) => {
     expect(await idsOf(code)).toContain(`${DYN}:constructor`);
   });
@@ -117,6 +120,7 @@ describe("audit F7: dynamic-code gaps", () => {
     ["prototype of named class", `class Foo {}\nexport const F = Foo.prototype.constructor;`],
     ["Reflect.get compared", `declare const g: any; declare const Y: any;\nexport const same = Reflect.get(g, "constructor") === Y;`],
     ["if-test logical", `export const f = (x: any, y: any) => { if (x.constructor && y) return 1; return 0; }`],
+    ["isPlainObject idiom", `export function isPlain(o: any) { const ctor = o.constructor; if (ctor === undefined) return true; const prot = ctor.prototype; return typeof prot === "object" && ctor.name !== "X"; }`],
   ])("constructor stays clean: %s", async (_name, code) => {
     expect((await idsOf(code)).filter((h) => h.startsWith(DYN))).toEqual([]);
   });

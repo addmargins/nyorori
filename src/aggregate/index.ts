@@ -26,10 +26,10 @@ import {
 } from "../review/simplification.js";
 import { isWaivable } from "../waivers/index.js";
 import { TEST_APPROVABLE_REASONS, TEST_APPROVAL_METRIC } from "../waivers/test-approval.js";
-import { QUALITY_GATE_CHECK, type GateVerdictRow, type QualityGateVerdict } from "./types.js";
+import { QUALITY_GATE_CHECK, type GateVerdictRow, type QualityGateVerdict, type ShadowVerdict } from "./types.js";
 
 export { QUALITY_GATE_CHECK } from "./types.js";
-export type { QualityGateVerdict, GateVerdictRow } from "./types.js";
+export type { QualityGateVerdict, GateVerdictRow, ShadowVerdict } from "./types.js";
 
 /** Gates computed by the gate service from git blobs, never by PR-executing jobs. */
 export const SERVICE_GATES: ReadonlySet<GateId> = new Set(["complexity", "lint-structure", "deps"]);
@@ -219,7 +219,56 @@ function effectiveState(r: GateResult): GateState {
 
 const GATE_ORDER: GateId[] = ["complexity", "lint-structure", "deps", "tests", "coverage", "mutation"];
 
+/** Every gate enforced: the shadow policy (spec 13.1). */
+function enforceAll(policy: Policy): Policy {
+  return {
+    ...policy,
+    complexity: { ...policy.complexity, mode: "enforce" },
+    lint: { ...policy.lint, mode: "enforce" },
+    deps: { ...policy.deps, mode: "enforce" },
+    tests: { ...policy.tests, mode: "enforce" },
+    coverage: { ...policy.coverage, mode: "enforce" },
+    review: { ...policy.review, mode: "enforce" },
+    mutation: { ...policy.mutation, mode: "enforce" },
+  };
+}
+
 export function aggregateQualityGate(input: AggregateInput): QualityGateVerdict {
+  const real = aggregateCore(input, null);
+  const needsShadow = GATE_ORDER.some((g) => policyMode(input.policy, g) !== "enforce") || policyMode(input.policy, "simplification-review") !== "enforce";
+  if (!needsShadow) {
+    const shadow: ShadowVerdict = {
+      state: real.state,
+      mergeAllowed: real.mergeAllowed,
+      reasons: real.reasons,
+      blocking: real.blocking.map((v) => ({ gate: v.gate, reason: v.reason, ...(v.unit ? { unit: v.unit } : {}), ...(v.file ? { file: v.file } : {}) })),
+      triggers: real.triggers.map((t) => ({ id: t.id, gate: t.gate, ...(t.file ? { file: t.file } : {}), ...(t.unit ? { unit: t.unit } : {}) })),
+      promoted: [],
+      summary: real.summary,
+    };
+    return { ...real, would_block: !real.mergeAllowed, shadow };
+  }
+  const sh = aggregateCore({ ...input, policy: enforceAll(input.policy) }, input.policy);
+  const shadow: ShadowVerdict = {
+    state: sh.state,
+    mergeAllowed: sh.mergeAllowed,
+    reasons: sh.reasons,
+    blocking: sh.blocking.map((v) => ({ gate: v.gate, reason: v.reason, ...(v.unit ? { unit: v.unit } : {}), ...(v.file ? { file: v.file } : {}) })),
+    triggers: sh.triggers.map((t) => ({ id: t.id, gate: t.gate, ...(t.file ? { file: t.file } : {}), ...(t.unit ? { unit: t.unit } : {}) })),
+    promoted: sh.gates
+      .filter((g): g is GateVerdictRow & { gate: GateId } => g.gate !== "policy-integrity" && policyMode(input.policy, g.gate) !== "enforce")
+      .map((g) => ({ gate: g.gate, mode: policyMode(input.policy, g.gate), state: g.state })),
+    summary: sh.summary,
+  };
+  return { ...real, would_block: !sh.mergeAllowed, shadow };
+}
+
+/**
+ * `realPolicy` is set for the shadow pass: gates that are not enforced for
+ * real and did not report are then simply absent, not REPORT_MISSING (an
+ * observe gate that never ran is not a hypothetical failure).
+ */
+function aggregateCore(input: AggregateInput, realPolicy: Policy | null): Omit<QualityGateVerdict, "would_block" | "shadow"> {
   const { policy, expected } = input;
   const rows: GateVerdictRow[] = [];
   const aggInconclusive: Inconclusive[] = [];
@@ -250,10 +299,13 @@ export function aggregateQualityGate(input: AggregateInput): QualityGateVerdict 
       if (!p && s.provenance?.runConclusion !== undefined && s.provenance.runConclusion !== "success" && PASSING.has(state)) {
         p = `run concluded ${s.provenance.runConclusion}; its artifacts cannot be passing evidence`;
       }
-      if (p) {
+      if (p && PASSING.has(state)) {
         reject(p);
         continue;
       }
+      // A service-computed FAIL (e.g. a static TEST_REMOVED) stands on its own
+      // evidence; the provenance problem is still recorded for the operator.
+      if (p) aggInconclusive.push({ reason: "UNTRUSTED_ARTIFACT", detail: `${gate}: ${p} (its FAIL is kept)`, authorFixable: false });
     }
     const fp = fingerprintProblem(s.result, s, expected);
     if (fp) {
@@ -274,7 +326,8 @@ export function aggregateQualityGate(input: AggregateInput): QualityGateVerdict 
     }
     if (!chosen) {
       if (mode === "degraded") extraTriggers.push(...degradedTriggers(gate, undefined));
-      if (mode === "enforce") {
+      const shadowOfUnenforced = realPolicy !== null && policyMode(realPolicy, gate) !== "enforce";
+      if (mode === "enforce" && !shadowOfUnenforced) {
         missing.push(gate);
         if (!problem) {
           aggInconclusive.push({ reason: "REPORT_MISSING", detail: `${gate} did not report`, authorFixable: false });
@@ -394,6 +447,24 @@ function verdictHeadline(
  * Adds an aggregate-level INCONCLUSIVE found after aggregation (e.g. a hostile
  * artifact the service refused to read). The verdict can only get stricter.
  */
+/** "shadow: would block — G1 FAIL OVER_LIMIT_NEW" for summaries; empty when nothing is hidden. */
+export function shadowNote(verdict: Pick<QualityGateVerdict, "would_block" | "mergeAllowed" | "shadow">): string {
+  if (!verdict.would_block || !verdict.mergeAllowed) return "";
+  const first = verdict.shadow.blocking[0];
+  const what = first ? `${GATE_LABEL[first.gate] ?? first.gate} FAIL ${first.reason}` : verdict.shadow.reasons.join(", ") || verdict.shadow.state;
+  return `shadow: would block — ${what}`;
+}
+
+const GATE_LABEL: Record<string, string> = {
+  complexity: "G1",
+  "lint-structure": "G2",
+  deps: "G3",
+  tests: "G4",
+  coverage: "G5",
+  "simplification-review": "G6",
+  mutation: "G7",
+};
+
 export function withVerdictInconclusive(verdict: QualityGateVerdict, item: Inconclusive): QualityGateVerdict {
   const state = worstState([verdict.state, "INCONCLUSIVE"]);
   const reasons = verdict.reasons.includes(item.reason) ? verdict.reasons : [...verdict.reasons, item.reason];

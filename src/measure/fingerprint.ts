@@ -4,7 +4,7 @@
 
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Policy } from "../policy/schema.js";
 import type { Inconclusive, MeasurementFingerprint } from "../types.js";
@@ -44,10 +44,11 @@ export interface PinnedMeasurer extends MeasurerIdentity {
 
 /**
  * Reads the configured binary once, hashes those bytes and writes them to a
- * fresh read-only file under `dir`. Every later execution (the `--version`
- * probe included) uses that copy, so the hash in the fingerprint is the hash of
- * the bytes that actually ran: nothing can swap the configured path between
- * hashing and running. The copy lives and dies with the work directory.
+ * fresh `<dir>/cccc-<random>` (mode 0o500, created exclusively). Every later
+ * execution, the `--version` probe included, uses that copy and the configured
+ * path is never spawned, so the hash in the fingerprint is the hash of the
+ * bytes that actually ran: swapping the configured path after hashing changes
+ * nothing. The caller removes the copy with its work directory.
  */
 export async function pinMeasurer(binary: string, dir: string): Promise<PinnedMeasurer> {
   const bytes = await readFile(binary);
@@ -55,8 +56,13 @@ export async function pinMeasurer(binary: string, dir: string): Promise<PinnedMe
   await mkdir(dir, { recursive: true });
   const path = join(dir, `cccc-${randomBytes(8).toString("hex")}`);
   await writeFile(path, bytes, { mode: 0o500, flag: "wx" });
-  const version = await probeVersion(path);
-  return { path, sha256, version };
+  try {
+    const version = await probeVersion(path);
+    return { path, sha256, version };
+  } catch (e) {
+    await rm(path, { force: true });
+    throw e;
+  }
 }
 
 /** Policy sections whose mode is not plain observation. */

@@ -38,6 +38,9 @@ export interface PullRequestInfo {
   headSha: string;
   author: string;
   state: "open" | "closed";
+  /** For AI-loop PRs: assignees and the body name the human invoker (spec 2.4). */
+  assignees?: string[];
+  body?: string | null;
 }
 
 export interface GitHubClient {
@@ -50,6 +53,8 @@ export interface GitHubClient {
   updateCheckRun(repo: RepoRef, id: number, req: CheckRunRequest): Promise<void>;
   /** Opens an issue (the 90-day complexity-debt issue of a merged waiver); returns its number. */
   createIssue(repo: RepoRef, issue: IssueRequest): Promise<number>;
+  /** Author of an issue (for `closes #N` invoker discovery); null when unknown. */
+  getIssueAuthor?(repo: RepoRef, number: number): Promise<string | null>;
 }
 
 export interface IssueRequest {

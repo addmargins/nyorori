@@ -11,7 +11,7 @@ import type {
   TriggerHit,
   UnmeasuredRecord,
 } from "../types.js";
-import { independenceProblem, inRoster, requiredApprovers, type PrIdentityContext, type TeamRosters } from "../review/independence.js";
+import { independenceProblem, inRoster, requiredApprovers, secondApproverReason, type PrIdentityContext, type TeamRosters } from "../review/independence.js";
 import { CommandError, findCommands, requireArgs } from "../waivers/command.js";
 import { EDITED_COMMAND_NOTE, screenComments, type IssueComment } from "../waivers/index.js";
 
@@ -182,7 +182,7 @@ export function applyOverrides(
     for (let i = valid.length - 1; i >= 0; i--) {
       const r = valid[i]!;
       if (owners.get(`${r.file ?? "*"}\u0000${r.reason}`)!.size < needed) {
-        rejected.push({ commentId: r.commentId, problem: `needs ${needed} independent gate owners (unlinked commit identities)` });
+        rejected.push({ commentId: r.commentId, problem: `needs ${needed} independent gate owners (${secondApproverReason(ctx.identity)})` });
         valid.splice(i, 1);
       }
     }

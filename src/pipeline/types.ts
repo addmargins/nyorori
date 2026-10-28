@@ -57,6 +57,19 @@ export interface Artifacts {
   mutation?: MutationArtifacts;
 }
 
+/**
+ * A required-workflow artifact still zipped. The parent process only downloads
+ * the capped bytes; the isolated worker parses them (spec 10.1: no PR-derived
+ * content is parsed next to the App key).
+ */
+export interface ArtifactZip {
+  path: string;
+  provenance: ArtifactProvenance;
+}
+
+/** Who produced a verdict. Only the gate service's verdicts carry merge authority. */
+export type Authority = "local" | "github-app";
+
 export interface RunGatesOptions {
   repoDir: string;
   base: string;
@@ -70,9 +83,19 @@ export interface RunGatesOptions {
   runnerCommit: string;
   pr?: PullRequestContext;
   artifacts?: Artifacts;
+  /** Zipped artifact parsed inside the run (preferred by the service); merged over `artifacts`. */
+  artifactZip?: ArtifactZip;
   /** Injectable for the determinism sample. */
   rng?: () => number;
+  /** Fixed value for the determinism sample draw; survives the worker boundary (tests). */
+  rngValue?: number;
   now?: Date;
+  /** The official merge_group evaluation (spec 6.2): full determinism re-run rate. */
+  official?: boolean;
+  /** Recorded in the verdict; the service passes "github-app". Default "local". */
+  authority?: Authority;
+  /** Skip the "tools and outputs live outside the measured repository" check (fixtures only). */
+  allowRepoPaths?: boolean;
   /** AI fix-loop attempt number, for gate-feedback.json. */
   attempt?: number;
   /**
@@ -83,7 +106,8 @@ export interface RunGatesOptions {
 }
 
 export interface RunGatesOutput {
-  verdict: QualityGateVerdict;
+  authority: Authority;
+  verdict: QualityGateVerdict & { authority: Authority };
   /** Sub-gate results, G6 included. */
   results: GateResult[];
   manifest: Manifest;
@@ -93,6 +117,18 @@ export interface RunGatesOutput {
   feedback: GateFeedback;
   /** Waivers applied in this verdict, with the waived value; the ledger records them at merge. */
   appliedWaivers: AppliedWaiver[];
+  /** Requested waivers with no valid approval yet, with the copyable approval command's inputs. */
+  pendingWaivers: PendingWaiver[];
+}
+
+export interface PendingWaiver {
+  id: string;
+  unit: string;
+  metric: string;
+  ceiling: number;
+  /** Candidate blob of the unit's file: what the approver must bind to. Null when the file is gone. */
+  blob: string | null;
+  requester: string;
 }
 
 export interface AppliedWaiver {

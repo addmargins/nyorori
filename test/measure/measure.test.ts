@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,6 +8,7 @@ import { fileLineMaps, hunkOfC, mapLine } from "../../src/git/linemap.js";
 import { buildManifest } from "../../src/git/manifest.js";
 import { assertSafeRelativePath, countLines, materializeFullTree, materializeSideChecked } from "../../src/git/tree.js";
 import { runCccc, validateRuns } from "../../src/measure/cccc.js";
+import { pinMeasurer } from "../../src/measure/fingerprint.js";
 import { measureSides } from "../../src/measure/measure.js";
 import { defaultPolicy } from "../../src/policy/schema.js";
 import { flattenUnits } from "../../src/units/model.js";
@@ -219,5 +221,168 @@ describe("measureSides end to end", () => {
     expect(r.inconclusive).toEqual([]);
     expect([...r.c.keys()].sort()).toEqual(["src/foo.js", "src/foo.jsx"]);
     expect(r.c.get("src/foo.js")!.units[0]!.key).toBe("src/foo.js::A#arrow[0]");
+  });
+});
+
+/**
+ * A stand-in measurer: a POSIX sh script that answers `--version`, logs every
+ * invocation and reports one function of cognitive `score` per file. When
+ * `swapTo` is given, its first invocation (the `--version` probe, which runs
+ * after hashing) overwrites `configuredPath` with the swapped script.
+ */
+function fakeCccc(opts: { score: number; version?: string; log: string; swapTo?: string; configuredPath?: string }): string {
+  const swap = opts.swapTo && opts.configuredPath ? `cp "${opts.swapTo}" "${opts.configuredPath}"` : ":";
+  return `#!/bin/sh
+printf '%s\\n' "$*" >> "${opts.log}"
+if [ "$1" = "--version" ]; then ${swap}; echo "${opts.version ?? "cccc 1.8.5"}"; exit 0; fi
+while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do shift; done
+shift
+n=0; files=""
+for f in "$@"; do
+  n=$((n+1))
+  [ -n "$files" ] && files="$files,"
+  files="$files{\\"path\\":\\"$f\\",\\"cognitive\\":${opts.score},\\"cyclomatic\\":${opts.score},\\"functions\\":[{\\"name\\":\\"f\\",\\"kind\\":\\"function\\",\\"line\\":1,\\"cognitive\\":${opts.score},\\"cyclomatic\\":${opts.score}}]}"
+done
+printf '{"files":[%s],"summary":{"file_count":%d}}' "$files" "$n"
+`;
+}
+
+describe("measurer pinning (TOCTOU) and the determinism sample", () => {
+  const policy = defaultPolicy({ measurer: { determinism_sample_rate: 1, allow_unpinned: true } });
+
+  it("pinMeasurer writes a 0o500 copy under the given directory and reports the hash of those bytes", async () => {
+    const w = newWork();
+    const configured = join(w, "cccc");
+    const log = join(w, "log");
+    writeFileSync(configured, fakeCccc({ score: 1, log }), { mode: 0o755 });
+    const pinned = await pinMeasurer(configured, join(w, "work"));
+    expect(pinned.path).toMatch(/\/work\/cccc-[0-9a-f]{16}$/);
+    expect(statSync(pinned.path).mode & 0o777).toBe(0o500);
+    expect(pinned.sha256).toBe(createHash("sha256").update(readFileSync(configured)).digest("hex"));
+    expect(pinned.version).toBe("cccc 1.8.5");
+    expect(readFileSync(log, "utf8")).toBe("--version\n");
+  });
+
+  it("executes the private copy only: a binary swapped on disk after hashing never runs, and the copy is removed", async () => {
+    const w = newWork();
+    const binDir = join(w, "bin");
+    mkdirSync(binDir);
+    const configured = join(binDir, "cccc");
+    const evil = join(binDir, "evil");
+    const log = join(w, "log");
+    writeFileSync(evil, fakeCccc({ score: 42, version: "cccc 9.9.9", log }), { mode: 0o755 });
+    writeFileSync(configured, fakeCccc({ score: 3, log, swapTo: evil, configuredPath: configured }), { mode: 0o755 });
+    const original = readFileSync(configured);
+    repo = new TestRepo();
+    const b = repo.commit({ "src/a.ts": complex("a") });
+    const c = repo.commit({ "src/a.ts": complex("a").replace("a > 1", "a > 2"), "src/b.ts": complex("b") });
+    const m = await buildManifest(repo.dir, b, c, policy);
+    const workDir = join(w, "work");
+    const r = await measureSides({ repoDir: repo.dir, manifest: m, policy, binary: configured, workDir, rng: () => 0 });
+    // The swap really happened at the configured path ...
+    expect(readFileSync(configured).equals(original)).toBe(false);
+    expect(readFileSync(configured).equals(readFileSync(evil))).toBe(true);
+    // ... but every run used the copy of the hashed bytes.
+    expect(r.inconclusive).toEqual([]);
+    expect(r.fingerprint.cccc_version).toBe("cccc 1.8.5");
+    expect(r.fingerprint.cccc_sha256).toBe(createHash("sha256").update(original).digest("hex"));
+    expect(r.c.get("src/a.ts")!.units[0]!.cognitive).toBe(3);
+    expect(r.c.get("src/b.ts")!.units[0]!.cognitive).toBe(3);
+    expect(r.b.get("src/a.ts")!.units[0]!.cognitive).toBe(3);
+    expect(r.determinismChecked).toBe(true);
+    // The configured path was never spawned: the swapped script would have logged "cccc 9.9.9"-style runs too.
+    const runs = r.runs.map((x) => x.args.join(" "));
+    expect(runs.every((a) => a.startsWith("--no-config --no-cache --lang es -j 4 --"))).toBe(true);
+    expect(readdirSync(workDir).filter((n) => n.startsWith("cccc-"))).toEqual([]);
+    expect(readdirSync(workDir).filter((n) => n.startsWith("trees-"))).toEqual([]);
+  });
+
+  it("the private copy is also removed when the pin mismatches the policy or trees are kept", async () => {
+    const w = newWork();
+    const configured = join(w, "cccc");
+    writeFileSync(configured, fakeCccc({ score: 3, log: join(w, "log") }), { mode: 0o755 });
+    repo = new TestRepo();
+    const b = repo.commit({ "src/a.ts": complex("a") });
+    const c = repo.commit({ "src/a.ts": complex("a2") });
+    const pinned = defaultPolicy({ measurer: { cccc_sha256: "0".repeat(64) } });
+    const m = await buildManifest(repo.dir, b, c, pinned);
+    const workDir = join(w, "work");
+    const r = await measureSides({ repoDir: repo.dir, manifest: m, policy: pinned, binary: configured, workDir });
+    expect(r.inconclusive.map((i) => i.reason)).toEqual(["MEASURER_MISMATCH"]);
+    expect(readdirSync(workDir)).toEqual([]);
+    const kept = await measureSides({ repoDir: repo.dir, manifest: m, policy, binary: configured, workDir, keepTrees: true });
+    expect(kept.treeRoots).toBeDefined();
+    expect(readdirSync(workDir).filter((n) => n.startsWith("cccc-"))).toEqual([]);
+    expect(readdirSync(workDir).filter((n) => n.startsWith("trees-"))).toHaveLength(1);
+  });
+
+  it("official runs sample the -j1 re-run at determinism_sample_rate_official and re-run every C chunk", async () => {
+    const w = newWork();
+    const configured = join(w, "cccc");
+    const log = join(w, "log");
+    writeFileSync(configured, fakeCccc({ score: 3, log }), { mode: 0o755 });
+    const p = defaultPolicy({
+      measurer: { determinism_sample_rate: 0, determinism_sample_rate_official: 1, allow_unpinned: true, chunk_size: 1 },
+    });
+    repo = new TestRepo();
+    const b = repo.commit({ "x.txt": "x\n" });
+    const c = repo.commit({ "src/a.ts": complex("a"), "src/b.ts": complex("b"), "src/c.ts": complex("c") });
+    const m = await buildManifest(repo.dir, b, c, p);
+    const rng = () => 0.5;
+    const pre = await measureSides({ repoDir: repo.dir, manifest: m, policy: p, binary: configured, workDir: join(w, "w1"), rng });
+    expect(pre.determinismChecked).toBe(false);
+    expect(readFileSync(log, "utf8").split("\n").filter((l) => l.includes("-j 1"))).toEqual([]);
+    const official = await measureSides({ repoDir: repo.dir, manifest: m, policy: p, binary: configured, workDir: join(w, "w2"), rng, official: true });
+    expect(official.determinismChecked).toBe(true);
+    expect(official.inconclusive).toEqual([]);
+    const j1 = readFileSync(log, "utf8").split("\n").filter((l) => l.includes("-j 1"));
+    expect(j1).toEqual(["--no-config --no-cache --lang es -j 1 -- src/a.ts", "--no-config --no-cache --lang es -j 1 -- src/b.ts", "--no-config --no-cache --lang es -j 1 -- src/c.ts"]);
+    // The pre-check rate still applies when the run is not official.
+    const pr = defaultPolicy({ measurer: { determinism_sample_rate: 1, determinism_sample_rate_official: 0, allow_unpinned: true } });
+    const m2 = await buildManifest(repo.dir, b, c, pr);
+    expect((await measureSides({ repoDir: repo.dir, manifest: m2, policy: pr, binary: configured, workDir: join(w, "w3"), rng, official: true })).determinismChecked).toBe(false);
+    expect((await measureSides({ repoDir: repo.dir, manifest: m2, policy: pr, binary: configured, workDir: join(w, "w4"), rng })).determinismChecked).toBe(true);
+  });
+});
+
+describe("declaration files and byte-order marks with the real binary", () => {
+  const policy = defaultPolicy({ measurer: { allow_unpinned: true } });
+
+  it("a clean .d.ts is measured with no error; an implementation inside is an author-fixable PARSE_ERROR_CANDIDATE", async () => {
+    repo = new TestRepo();
+    const b = repo.commit({ "src/types.d.ts": "export declare const x: number;\n" });
+    const c = repo.commit({
+      "src/types.d.ts": "export declare const x: string;\nexport interface I { a: string }\nexport declare function g(a: number): void;\n",
+      "src/global.d.ts": "declare global { interface Window { x: number } }\nexport {};\n",
+      "src/impl.d.ts": "export declare const y: number;\nexport function h(a: boolean) { if (a) { return 1; } return 0; }\n",
+    });
+    const m = await buildManifest(repo.dir, b, c, policy);
+    expect(m.entries.map((e) => [e.c!.path, e.measure.C, e.excluded])).toEqual([
+      ["src/global.d.ts", true, undefined],
+      ["src/impl.d.ts", true, undefined],
+      ["src/types.d.ts", true, undefined],
+    ]);
+    const r = await measureSides({ repoDir: repo.dir, manifest: m, policy, binary: requireCccc(), workDir: newWork() });
+    expect(r.inconclusive.map((i) => [i.reason, i.file, i.authorFixable])).toEqual([["PARSE_ERROR_CANDIDATE", "src/impl.d.ts", true]]);
+    expect(r.inconclusive[0]!.detail).toMatch(/ambient/);
+    // Zero functions, or declared signatures scored 0: a measured PASS, not a failure for having no units (spec 9.1).
+    expect(r.c.get("src/global.d.ts")!.units).toEqual([]);
+    expect(flattenUnits(r.c.get("src/types.d.ts")!.units).map((u) => [u.name, u.cognitive])).toEqual([["g", 0]]);
+    expect(r.b.get("src/types.d.ts")!.units).toEqual([]);
+  });
+
+  it("a UTF-8 BOM changes neither scores nor line numbers and is no parse error", async () => {
+    repo = new TestRepo();
+    const b = repo.commit({ "src/a.ts": complex("a") });
+    const c = repo.commit({ "src/a.ts": Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(complex("a").replace("a > 1", "a > 2"))]) });
+    const m = await buildManifest(repo.dir, b, c, policy);
+    const r = await measureSides({ repoDir: repo.dir, manifest: m, policy, binary: requireCccc(), workDir: newWork() });
+    expect(r.inconclusive).toEqual([]);
+    const unitsB = flattenUnits(r.b.get("src/a.ts")!.units).map((u) => [u.name, u.cognitive, u.cyclomatic, u.line]);
+    const unitsC = flattenUnits(r.c.get("src/a.ts")!.units).map((u) => [u.name, u.cognitive, u.cyclomatic, u.line]);
+    expect(unitsC).toEqual(unitsB);
+    expect(unitsC).toEqual([["a", 3, 3, 1]]);
+    // The bytes are handed over untouched (blob fidelity); the BOM survives into the source text.
+    expect(r.sourcesC.get("src/a.ts")!.charCodeAt(0)).toBe(0xfeff);
   });
 });

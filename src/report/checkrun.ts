@@ -2,6 +2,7 @@
 // for required checks, so this module can only ever emit success or failure.
 
 import type { GateResult, GateState } from "../types.js";
+import { shadowNote } from "../aggregate/index.js";
 import { QUALITY_GATE_CHECK, type QualityGateVerdict } from "../aggregate/types.js";
 import { renderGateSection, renderSummaryMarkdown } from "./markdown.js";
 
@@ -61,7 +62,7 @@ export function verdictToCheckRun(verdict: QualityGateVerdict, results: GateResu
   return {
     name: QUALITY_GATE_CHECK,
     conclusion: verdict.mergeAllowed ? "success" : "failure",
-    title: clip(titleFor(verdict.state, verdict.summary, verdict.reasons), MAX_TITLE),
+    title: clip([titleFor(verdict.state, verdict.summary, verdict.reasons), shadowNote(verdict)].filter(Boolean).join(" · "), MAX_TITLE),
     summary: clip(renderSummaryMarkdown(results, verdict), MAX_BODY),
   };
 }

@@ -175,6 +175,7 @@ export function runScenario(s: Scenario): ScenarioResult {
     lineMaps,
     baselineMissing,
     limit: policy.complexity.cognitive_limit,
+    testGlobs: policy.scope.test_globs,
     ...(s.noSourcesForMatch ? {} : { sourcesB: new Map(Object.entries(s.b)), sourcesC: new Map(Object.entries(s.c)) }),
     ...(s.normalizedIdentical ? { normalizedIdentical: new Set(s.normalizedIdentical) } : {}),
   });
@@ -186,6 +187,7 @@ export function runScenario(s: Scenario): ScenarioResult {
     matches: match.matches,
     policy,
     sourcesC: new Map(Object.entries(s.c)),
+    ...(s.noSourcesForMatch ? {} : { sourcesB: new Map(Object.entries(s.b)) }),
     baselineMissing,
     ...(s.isAiLoop !== undefined ? { isAiLoop: s.isAiLoop } : {}),
     ...(s.normalizedIdentical ? { normalizedIdentical: new Set(s.normalizedIdentical) } : {}),

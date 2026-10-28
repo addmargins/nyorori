@@ -25,6 +25,7 @@ import { candidateBlobLookup, type RunContext } from "./context.js";
 import type { GateDraft } from "./draft.js";
 import { isAiLoopRun } from "./actions-gates.js";
 import type { MeasuredState } from "./service-gates.js";
+import type { PendingWaiver } from "./types.js";
 
 const NO_IDENTITY: PrIdentityContext = { prAuthor: "", commits: [], agentInvokers: [] };
 
@@ -57,6 +58,28 @@ export function applyMeasurementOverrides(ctx: RunContext, drafts: GateDraft[]):
 export interface WaiverOutcome {
   applied: WaiverApplied[];
   valid: ValidWaiver[];
+  /** Parsed requests with no valid approval: the summary prints their approve commands. */
+  pending: PendingWaiver[];
+}
+
+/**
+ * A waiver id is sha256(commentId|gate|unit|metric|ceiling): nobody can type
+ * it by hand, so every unapproved request is echoed with the exact command
+ * (and the blob the approver binds to) the approver must post.
+ */
+function pendingWaivers(ctx: RunContext, valid: readonly ValidWaiver[]): PendingWaiver[] {
+  const approved = new Set(valid.map((w) => w.id));
+  const blob = candidateBlobLookup(ctx.treeC);
+  const out: PendingWaiver[] = [];
+  for (const c of ctx.opts.pr?.comments ?? []) {
+    const reqs = parseWaiverRequest(c, ctx.policy);
+    if (!Array.isArray(reqs)) continue;
+    for (const r of reqs) {
+      if (approved.has(r.id) || out.some((p) => p.id === r.id)) continue;
+      out.push({ id: r.id, unit: r.unit, metric: r.metric, ceiling: r.ceiling, blob: blob(r.file), requester: r.requester });
+    }
+  }
+  return out;
 }
 
 /** The quarterly budget caps the per-PR budget by what is left this quarter (spec 11.1). */
@@ -132,16 +155,17 @@ export async function applyWaiverDecisions(
   for (const t of waiverTriggers(result.applied, valid)) {
     drafts.find((d) => d.gate === t.gate)?.triggers.push(t);
   }
+  const pending = pendingWaivers(ctx, valid);
   const first = drafts.find((d) => d.gate === "complexity");
-  if (first && (rejected.length || result.unused.length)) {
-    first.observe = { ...first.observe, waivers_rejected: rejected, waivers_unused: result.unused };
+  if (first && (rejected.length || result.unused.length || pending.length)) {
+    first.observe = { ...first.observe, waivers_rejected: rejected, waivers_unused: result.unused, pending_waivers: pending };
   }
   for (const d of waivable) {
     const ids = new Set(d.violations.flatMap((v) => (v.waivedBy ? [v.waivedBy] : [])));
     d.waivers = result.applied.filter((a) => ids.has(a.id));
   }
   applyGateOwnerTestApprovals(ctx, drafts);
-  return { applied: result.applied, valid };
+  return { applied: result.applied, valid, pending };
 }
 
 /** TEST_REMOVED / TEST_CONFIG_WEAKENED are cleared by a gate owner's approval, not a waiver (spec 8.3). */

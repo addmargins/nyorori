@@ -1,16 +1,14 @@
 // G1–G3: gates the service computes from git blobs without executing PR code.
 
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { basename, dirname, join } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { evaluateComplexity } from "../gates/complexity/evaluate.js";
 import { CODE_EXTENSIONS } from "../gates/deps/graph.js";
 import { evaluateDeps } from "../gates/deps/evaluate.js";
 import { evaluateLint } from "../gates/lint/evaluate.js";
 import { lintFiles } from "../gates/lint/run.js";
 import type { FileLintResult } from "../gates/lint/types.js";
-import { readBlobs } from "../git/manifest.js";
-import { materializeFullTree, materializeSideChecked, treePath } from "../git/tree.js";
-import { runCccc, validateRuns } from "../measure/cccc.js";
+import { materializeFullTree, materializeSideChecked } from "../git/tree.js";
 import { measureSides, unmeasuredRecords, type SideMeasurements } from "../measure/measure.js";
 import { normalizedCodeLines, normalizeSource } from "../measure/normalize.js";
 import type { Inconclusive, Manifest, Side, TriggerHit, Violation } from "../types.js";
@@ -63,6 +61,13 @@ export async function normalizeSides(
   return { lines, identical };
 }
 
+/** The determinism-sample draw: a function in process, a fixed value across the worker boundary. */
+function rngOf(opts: RunContext["opts"]): (() => number) | undefined {
+  if (opts.rng) return opts.rng;
+  if (opts.rngValue !== undefined) return () => opts.rngValue!;
+  return undefined;
+}
+
 export async function measure(ctx: RunContext): Promise<MeasuredState> {
   const { opts, policy, manifest, lineMaps } = ctx;
   const meas = await measureSides({
@@ -72,7 +77,8 @@ export async function measure(ctx: RunContext): Promise<MeasuredState> {
     binary: opts.ccccBinary,
     workDir: opts.workDir,
     runnerCommit: opts.runnerCommit,
-    ...(opts.rng ? { rng: opts.rng } : {}),
+    ...(rngOf(opts) ? { rng: rngOf(opts)! } : {}),
+    ...(opts.official !== undefined ? { official: opts.official } : {}),
   });
   meas.fingerprint.tools = ctx.tools;
   const normalization = await normalizeSides(manifest, meas);
@@ -86,6 +92,7 @@ export async function measure(ctx: RunContext): Promise<MeasuredState> {
     sourcesC: meas.sourcesC,
     normalizedIdentical: normalization.identical,
     limit: policy.complexity.cognitive_limit,
+    testGlobs: policy.scope.test_globs,
   });
   return { meas, match, normalization };
 }
@@ -104,6 +111,7 @@ export async function complexityGate(ctx: RunContext, state: MeasuredState): Pro
     normalizedLines: normalization.lines,
     normalizedIdentical: normalization.identical,
     sourcesC: meas.sourcesC,
+    sourcesB: meas.sourcesB,
     baselineMissing: meas.baselineMissing,
     isAiLoop: isAiLoopRun(ctx),
   });
@@ -117,56 +125,10 @@ export async function complexityGate(ctx: RunContext, state: MeasuredState): Pro
   );
   draft.violations = evaluation.violations;
   draft.triggers = evaluation.triggers;
-  draft.inconclusive = dedupeInconclusive([
-    ...meas.inconclusive,
-    ...evaluation.inconclusive,
-    ...(await declarationImplementations(ctx)),
-  ]);
+  draft.inconclusive = dedupeInconclusive([...meas.inconclusive, ...evaluation.inconclusive]);
   draft.unmeasured = unmeasured;
   draft.observe = { ...evaluation.observe, determinism_checked: meas.determinismChecked };
   return draft;
-}
-
-const AMBIENT_IMPL = /implementation cannot be declared in ambient contexts/i;
-
-/**
- * `.d.ts` files are out of scope, but an implementation hidden in one would be
- * unmeasured code. cccc reports it as a parse error (spec 2.3).
- */
-async function declarationImplementations(ctx: RunContext): Promise<Inconclusive[]> {
-  const { opts, policy, manifest } = ctx;
-  if (!policy.scope.declaration_impl_check) return [];
-  const decl = manifest.entries.flatMap((e) =>
-    e.excluded === "DECLARATION_FILE" && e.c && (e.c.mode === "100644" || e.c.mode === "100755") ? [e.c] : [],
-  );
-  if (decl.length === 0) return [];
-  const root = await mkdtemp(join(opts.workDir, "decl-"));
-  try {
-    const blobs = await readBlobs(opts.repoDir, decl.map((d) => d.blob));
-    for (const d of decl) {
-      const target = treePath(root, d.path);
-      await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, blobs.get(d.blob)!);
-    }
-    const runs = await runCccc({ binary: opts.ccccBinary, treeRoot: root, files: decl.map((d) => d.path), policy, side: "C" });
-    const validated = validateRuns(runs, policy);
-    // Ordinary parse errors in declaration files are not this check's business.
-    const out = validated.inconclusive.filter((i) => i.reason !== "PARSE_ERROR_CANDIDATE");
-    for (const f of validated.files) {
-      const hit = (f.parse_errors ?? []).find((e) => AMBIENT_IMPL.test(e));
-      if (hit) {
-        out.push({
-          reason: "PARSE_ERROR_CANDIDATE",
-          file: f.path,
-          detail: `${f.path} is a declaration file but contains an implementation (${hit}); move the code to a .ts file`,
-          authorFixable: true,
-        });
-      }
-    }
-    return out;
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
 }
 
 async function lintSide(
@@ -235,13 +197,13 @@ function isGraphFile(path: string): boolean {
 }
 
 /**
- * Resolution data G3 reads (never executes): every tsconfig (`extends` chains and
+ * Resolution data G3 reads (never executes): every tsconfig/jsconfig (`extends` chains and
  * nested aliases) and every package.json outside node_modules (`imports`, `exports`,
  * self-reference by name).
  */
 function isResolutionConfig(path: string): boolean {
   const name = basename(path);
-  if (/^tsconfig.*\.json$/.test(name)) return true;
+  if (/^(ts|js)config.*\.json$/.test(name)) return true;
   return name === "package.json" && !path.split("/").includes("node_modules");
 }
 

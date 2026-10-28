@@ -23,6 +23,8 @@ export interface PrIdentityContext {
   additionalAuthors?: string[];
   /** True when the commit list may be incomplete (GitHub lists at most 250 PR commits). */
   commitsTruncated?: boolean;
+  /** True when the PR author is a registered AI-loop bot; its invokers are then the real authors. */
+  authorIsAiLoop?: boolean;
 }
 
 /** GitHub's "list commits on a pull request" stops at 250 commits. */
@@ -146,12 +148,19 @@ export function unresolvedIdentities(ctx: PrIdentityContext): string[] {
 }
 
 /**
- * Fail-closed rule for unresolved identities: when any participant is known
- * only by an unmapped email, one approval could come from that person, so
- * two independent approvers are required.
+ * Why a second independent approver is needed, or null. Fail-closed rules:
+ * a participant known only by an unmapped email could be the approver, and an
+ * AI-loop PR whose invokers are unknown could have been invoked by them.
  */
+export function secondApproverReason(ctx: PrIdentityContext): string | null {
+  const unresolved = unresolvedIdentities(ctx);
+  if (unresolved.length > 0) return `unlinked commit identities: ${unresolved.join(", ")}`;
+  if (ctx.authorIsAiLoop && ctx.agentInvokers.length === 0) return "AI-loop PR with unknown invokers";
+  return null;
+}
+
 export function requiredApprovers(ctx: PrIdentityContext): 1 | 2 {
-  return unresolvedIdentities(ctx).length > 0 ? 2 : 1;
+  return secondApproverReason(ctx) ? 2 : 1;
 }
 
 /**

@@ -143,6 +143,7 @@ async function triggersAgainst(
     sourcesC: measured.meas.sourcesC,
     normalizedIdentical: normalization.identical,
     limit: policy.complexity.cognitive_limit,
+    testGlobs: policy.scope.test_globs,
   });
   const evaluation = evaluateComplexity({
     manifest,
@@ -154,6 +155,7 @@ async function triggersAgainst(
     normalizedLines: normalization.lines,
     normalizedIdentical: normalization.identical,
     sourcesC: measured.meas.sourcesC,
+    sourcesB,
     baselineMissing,
     isAiLoop: isAiLoopRun(ctx),
   });

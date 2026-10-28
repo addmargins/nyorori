@@ -35,6 +35,21 @@ export function appJwt(appId: number, privateKeyPem: string, nowMs = Date.now())
   return `${header}.${payload}.${b64url(signer.sign(privateKeyPem))}`;
 }
 
+/**
+ * Installation tokens are narrowed to one repository and to the permissions
+ * the service uses: checks (publish), contents (git fetch, commits), pull
+ * requests (PR, commits, comments), issues (comments, linked issues, debt
+ * issues), actions (runs, artifacts), members (team rosters). Requesting a
+ * permission the App was not granted makes GitHub refuse the token, which is
+ * the right failure: the service must not run half-authorized.
+ */
+export function tokenScope(repo: RepoRef): { repositories: string[]; permissions: Record<string, string> } {
+  return {
+    repositories: [repo.repo],
+    permissions: { checks: "write", contents: "read", pull_requests: "read", issues: "write", actions: "read", members: "read" },
+  };
+}
+
 export class GitHubApiError extends Error {
   constructor(
     readonly status: number,
@@ -56,12 +71,17 @@ export interface WorkflowRun {
   path: string;
   /** Required (org ruleset) workflows referenced by the run: `owner/repo/path@sha`. */
   referencedWorkflows: Array<{ path: string; sha: string }>;
+  /** ISO time the (latest attempt of the) run started; artifacts must be newer. */
+  runStartedAt?: string;
 }
 
 export interface ArtifactRef {
   id: number;
   name: string;
   expired: boolean;
+  createdAt?: string;
+  /** head_sha of the run that produced it, from the API's `workflow_run` block. */
+  workflowRunHeadSha?: string;
 }
 
 interface CachedToken {
@@ -117,7 +137,7 @@ export class GitHubApi implements GitHubClient {
       this.installations.set(key, id);
     }
     const path = `/app/installations/${id}/access_tokens`;
-    const t = await this.json<{ token: string; expires_at: string }>(await this.call(jwt, "POST", path, {}), path);
+    const t = await this.json<{ token: string; expires_at: string }>(await this.call(jwt, "POST", path, tokenScope(repo)), path);
     const entry = { token: t.token, expiresAt: Date.parse(t.expires_at) };
     this.tokens.set(key, entry);
     return entry.token;
@@ -144,12 +164,30 @@ export class GitHubApi implements GitHubClient {
   // --- GitHubClient --------------------------------------------------------
 
   async getPullRequest(repo: RepoRef, number: number): Promise<PullRequestInfo> {
-    const pr = await this.req<{ number: number; head: { sha: string }; user: { login: string }; state: "open" | "closed" }>(
-      repo,
-      "GET",
-      `/repos/${repoKey(repo)}/pulls/${number}`,
-    );
-    return { number: pr.number, headSha: pr.head.sha, author: pr.user.login, state: pr.state };
+    const pr = await this.req<{
+      number: number;
+      head: { sha: string };
+      user: { login: string };
+      state: "open" | "closed";
+      body: string | null;
+      assignees?: Array<{ login: string }>;
+    }>(repo, "GET", `/repos/${repoKey(repo)}/pulls/${number}`);
+    return {
+      number: pr.number,
+      headSha: pr.head.sha,
+      author: pr.user.login,
+      state: pr.state,
+      body: pr.body,
+      assignees: (pr.assignees ?? []).map((a) => a.login),
+    };
+  }
+
+  async getIssueAuthor(repo: RepoRef, number: number): Promise<string | null> {
+    const path = `/repos/${repoKey(repo)}/issues/${number}`;
+    const token = await this.installationToken(repo);
+    const res = await this.call(`token ${token}`, "GET", path);
+    if (res.status === 404 || res.status === 410) return null;
+    return (await this.json<{ user: { login: string } | null }>(res, path)).user?.login ?? null;
   }
 
   async resolveRef(repo: RepoRef, ref: string): Promise<string | null> {
@@ -251,6 +289,7 @@ export class GitHubApi implements GitHubClient {
       path: string;
       repository: { full_name: string };
       referenced_workflows?: Array<{ path: string; sha: string }>;
+      run_started_at?: string;
     };
     const raw = await this.paginate<Raw, { workflow_runs: Raw[] }>(
       repo,
@@ -268,12 +307,20 @@ export class GitHubApi implements GitHubClient {
       repository: r.repository.full_name,
       path: r.path,
       referencedWorkflows: r.referenced_workflows ?? [],
+      ...(r.run_started_at ? { runStartedAt: r.run_started_at } : {}),
     }));
   }
 
   async listRunArtifacts(repo: RepoRef, runId: number): Promise<ArtifactRef[]> {
-    type Raw = { id: number; name: string; expired: boolean };
-    return this.paginate<Raw, { artifacts: Raw[] }>(repo, `/repos/${repoKey(repo)}/actions/runs/${runId}/artifacts`, (r) => r.artifacts);
+    type Raw = { id: number; name: string; expired: boolean; created_at?: string; workflow_run?: { head_sha?: string } | null };
+    const raw = await this.paginate<Raw, { artifacts: Raw[] }>(repo, `/repos/${repoKey(repo)}/actions/runs/${runId}/artifacts`, (r) => r.artifacts);
+    return raw.map((a) => ({
+      id: a.id,
+      name: a.name,
+      expired: a.expired,
+      ...(a.created_at ? { createdAt: a.created_at } : {}),
+      ...(a.workflow_run?.head_sha ? { workflowRunHeadSha: a.workflow_run.head_sha } : {}),
+    }));
   }
 
   /** Open PRs, for mapping merge-group commits back to the PRs they contain. */
@@ -289,6 +336,17 @@ export class GitHubApi implements GitHubClient {
    * memory before the zip limits apply. fetch drops the Authorization header
    * on the cross-origin redirect.
    */
+  /** The capped archive bytes, unparsed: the isolated worker inflates them (spec 10.1). */
+  async downloadArtifactArchive(repo: RepoRef, artifactId: number, cap = DEFAULT_ZIP_LIMITS.maxArchiveBytes): Promise<Buffer> {
+    const token = await this.installationToken(repo);
+    const path = `/repos/${repoKey(repo)}/actions/artifacts/${artifactId}/zip`;
+    const res = await this.call(`token ${token}`, "GET", path);
+    if (!res.ok) throw new GitHubApiError(res.status, path, await res.text());
+    const declared = Number(res.headers.get("content-length"));
+    if (Number.isFinite(declared) && declared > cap) throw new ZipError(`artifact archive exceeds ${cap} bytes`);
+    return readCapped(res, cap);
+  }
+
   async downloadArtifact(
     repo: RepoRef,
     artifactId: number,
@@ -331,6 +389,8 @@ async function readCapped(res: Response, cap: number): Promise<Buffer> {
  */
 export function provenanceOf(run: WorkflowRun, workflow: { repository: string; path: string }): ArtifactProvenance | null {
   const base = { runId: run.id, runAttempt: run.runAttempt, headSha: run.headSha, event: run.event, runConclusion: run.conclusion ?? "unknown" };
+  // The run itself must be the trusted workflow file, not merely reference it.
+  if (run.path !== workflow.path) return null;
   for (const ref of run.referencedWorkflows) {
     const m = /^([^/]+\/[^/]+)\/(.+?)(?:@.*)?$/.exec(ref.path);
     if (m && m[1] === workflow.repository && m[2] === workflow.path) {

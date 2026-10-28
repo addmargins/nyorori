@@ -10,7 +10,7 @@ import {
   inRoster,
   isAiLoopBot,
   requiredApprovers,
-  unresolvedIdentities,
+  secondApproverReason,
   type Actor,
   type PrIdentityContext,
   type TeamRosters,
@@ -344,7 +344,7 @@ export function evaluateWaivers(
   const out: ValidWaiver[] = [];
   for (const w of valid.values()) {
     if (w.approvers!.length >= needed) out.push(w);
-    else rejected.push({ commentId: w.commentId, waiverId: w.id, problem: `needs ${needed} independent approvers (unlinked commit identities: ${unresolvedIdentities(ctx.identity).join(", ")})` });
+    else rejected.push({ commentId: w.commentId, waiverId: w.id, problem: `needs ${needed} independent approvers (${secondApproverReason(ctx.identity)})` });
   }
   return { valid: out, rejected };
 }
@@ -363,9 +363,9 @@ export function applyWaivers(violations: readonly Violation[], waivers: readonly
   const unused: Array<{ id: string; problem: string }> = [];
   const ordered = [...waivers].sort((a, b) => a.approvedAt.localeCompare(b.approvedAt) || a.id.localeCompare(b.id));
   for (const w of ordered) {
-    const targets = out.filter(
-      (v) => !v.waivedBy && v.gate === w.gate && v.unit === w.unit && violationMetric(v) === w.metric,
-    );
+    // G4 emits `${file}::${name}` for test units; an older form carries the bare name.
+    const sameUnit = (v: Violation) => v.unit === w.unit || (!!v.unit && !v.unit.includes("::") && `${v.file}::${v.unit}` === w.unit);
+    const targets = out.filter((v) => !v.waivedBy && v.gate === w.gate && sameUnit(v) && violationMetric(v) === w.metric);
     if (targets.length === 0) {
       unused.push({ id: w.id, problem: "no matching violation" });
       continue;

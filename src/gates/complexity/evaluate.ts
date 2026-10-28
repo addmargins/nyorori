@@ -16,11 +16,16 @@ import type {
   Violation,
 } from "../../types.js";
 import { countableUnits, flattenUnits, isOverloadSignature, visibleBranches } from "../../units/model.js";
+import { unitLastLine } from "../../units/body.js";
 import {
+  bGapTouched,
   bRangeTouched,
   cRangeTouched,
   filePairs,
+  scopeChangesOf,
+  scopeOf,
   type FilePair,
+  type ScopeChange,
 } from "../../units/match.js";
 import { checkName, normalizeName } from "../../units/names.js";
 import { matchesAny } from "../../util/glob.js";
@@ -40,6 +45,8 @@ export interface ComplexityInput {
   normalizedLines?: ReadonlyMap<string, { B?: number; C?: number }>;
   /** C sources, for the S11 "name survives as a binding" check. */
   sourcesC?: ReadonlyMap<string, string>;
+  /** B sources, for the residue gaps of S5 (a unit's real last line); without them only the file head counts. */
+  sourcesB?: ReadonlyMap<string, string>;
   /** C paths whose B side failed to parse. */
   baselineMissing?: ReadonlySet<string>;
   /** The PR was authored by the AI fix loop (ruling D5: foreign-language files always route). */
@@ -81,8 +88,12 @@ interface Ctx {
   cUnits: Map<string, Unit>;
   byC: Map<string, UnitMatch>;
   byB: Map<string, UnitMatch>;
+  /** Matches kept: a pair crossing the test/product boundary is dropped even if a caller matched it. */
+  matches: UnitMatch[];
   pairs: FilePair[];
   pairByC: Map<string, FilePair>;
+  /** File pairs and verbatim moves refused for crossing the test/product boundary (S11). */
+  scopeChanges: ScopeChange[];
   /** B paths of files whose baseline failed to parse. */
   noBaselineB: Set<string>;
   /** B and C paths of test files while tests are observe-only: no triggers. */
@@ -110,14 +121,30 @@ function buildCtx(input: ComplexityInput): Ctx {
   for (const m of input.b.values()) for (const u of allUnits(m)) bUnits.set(u.key, u);
   const cUnits = new Map<string, Unit>();
   for (const m of input.c.values()) for (const u of allUnits(m)) cUnits.set(u.key, u);
+  const testGlobs = input.policy.scope.test_globs;
   const byC = new Map<string, UnitMatch>();
   const byB = new Map<string, UnitMatch>();
+  const matches: UnitMatch[] = [];
   for (const m of input.matches) {
+    // A test unit's allowance never travels into product code (or back), whatever the matcher did.
+    const bp = bUnits.get(m.bKey)?.path;
+    const cp = cUnits.get(m.cKey)?.path;
+    if (bp !== undefined && cp !== undefined && scopeOf(bp, testGlobs) !== scopeOf(cp, testGlobs)) continue;
+    matches.push(m);
     byC.set(m.cKey, m);
     byB.set(m.bKey, m);
   }
+  const pairInput = {
+    manifest: input.manifest,
+    b: input.b,
+    c: input.c,
+    lineMaps: input.lineMaps,
+    testGlobs,
+    ...(input.baselineMissing ? { baselineMissing: input.baselineMissing } : {}),
+  };
+  const scopeChanges = scopeChangesOf(pairInput, matches);
   // A pure reformat whose units all matched is no edit at all: no range touches (D21a).
-  const pairs = filePairs(input).map((p) =>
+  const pairs = filePairs(pairInput).map((p) =>
     input.normalizedIdentical?.has(p.c.path) && flattenUnits(p.c.units).every((u) => byC.has(u.key))
       ? { ...p, hunks: [] }
       : p,
@@ -141,8 +168,10 @@ function buildCtx(input: ComplexityInput): Ctx {
     cUnits,
     byC,
     byB,
+    matches,
     pairs,
     pairByC: new Map(pairs.map((p) => [p.c.path, p])),
+    scopeChanges,
   };
 }
 
@@ -361,19 +390,20 @@ function s5Triggers(ctx: Ctx): TriggerHit[] {
         push(bu, p.c.path, `부채 단위 ${bu.name} (B CogC ${bu.cognitive} → C ${cu?.cognitive ?? "?"}) 범위 ${bu.line}-${bu.endLine} 수정`);
       }
     }
-    // The residue has no line range of its own: code before the first unit
-    // is residue-only, and any change in residue scores means it was edited.
+    // The residue's range is every gap between units (spec 7.5 S5): any
+    // change in its scores means it was edited, and so does a hunk in a gap.
     const br = p.b.residue;
     const cr = p.c.residue;
     if (br.cognitive > ctx.T) {
-      const firstUnit = p.b.units[0]?.line ?? p.b.lineCount + 1;
-      const headTouched = bRangeTouched(p.hunks, 1, Math.max(1, firstUnit - 1));
-      if (headTouched || br.cognitive !== cr.cognitive || br.cyclomatic !== cr.cyclomatic) {
-        push(br, p.c.path, `부채 <module> residue (B CogC ${br.cognitive} → C ${cr.cognitive}) 수정`);
+      const scoreChanged = br.cognitive !== cr.cognitive || br.cyclomatic !== cr.cyclomatic;
+      const gap = residueGaps(ctx, p.b).find(([s, e]) => bGapTouched(p.hunks, s, e));
+      if (scoreChanged || gap) {
+        const where = gap ? `범위 ${gap[0]}-${Math.max(gap[0], gap[1])} 수정` : "점수 변화";
+        push(br, p.c.path, `부채 <module> residue (B CogC ${br.cognitive} → C ${cr.cognitive}) ${where}`);
       }
     }
   }
-  for (const m of ctx.input.matches) {
+  for (const m of ctx.matches) {
     if (!m.identityChanged) continue;
     const bu = ctx.bUnits.get(m.bKey);
     if (!bu || bu.cognitive <= ctx.T || ctx.observedOnly.has(bu.path)) continue;
@@ -386,6 +416,26 @@ function s5Triggers(ctx: Ctx): TriggerHit[] {
     }
   }
   return hits;
+}
+
+/**
+ * B-side line ranges that belong to the `<module>` residue: the file head up
+ * to the first top-level unit, the gap after each unit's closing brace up to
+ * the next unit, and the tail after the last one. cccc gives no end line, so
+ * the closing brace comes from the token scan of the B source; without the
+ * source only the head is known (the old, conservative behaviour).
+ */
+function residueGaps(ctx: Ctx, b: FileMeasurement): Array<[number, number]> {
+  const src = ctx.input.sourcesB?.get(b.path);
+  const gaps: Array<[number, number]> = [];
+  let from = 1;
+  for (const u of b.units) {
+    gaps.push([from, u.line - 1]);
+    if (src === undefined) return gaps;
+    from = unitLastLine(src, u) + 1;
+  }
+  gaps.push([from, Math.max(b.lineCount, from - 1)]);
+  return gaps;
 }
 
 function lines(ctx: Ctx, p: FilePair): { b: number; c: number; normalized: boolean } {
@@ -463,14 +513,13 @@ const TEST_FILE_NAME = /\.(test|spec)\.[^/]+$/;
  * Audit F3: a file that lands under a test glob without being named as a
  * test is production-shaped code hiding from enforcement. Test support
  * paths (fixtures, helpers, mocks: policy.scope.test_support_globs) are exempt. New files and
- * copies count, and so does a rename whose B path was outside the test globs.
+ * copies count; a rename out of product code is a scope change (S11 below,
+ * whatever the C file is named).
  */
 function isNewUnderTestGlob(ctx: Ctx, e: ManifestEntry): boolean {
   const scope = ctx.input.policy.scope;
   if (e.c && matchesAny(e.c.path, scope.test_support_globs)) return false;
-  if (e.status === "A" || e.status === "C") return true;
-  if (e.status === "R" && e.b) return !matchesAny(e.b.path, scope.test_globs);
-  return false;
+  return e.status === "A" || e.status === "C";
 }
 
 /** Σ C − Σ B of file CogC over the PR's measured files. */
@@ -551,15 +600,29 @@ function s11Triggers(ctx: Ctx): TriggerHit[] {
   for (const p of m.sensitivePathsChanged) {
     hits.push({ id: "S11", gate: "complexity", file: p, evidence: `민감 경로 변경: ${p}`, routing: true });
   }
+  // A unit that crossed the test/product boundary keeps no allowance and is reviewed.
+  for (const s of ctx.scopeChanges) {
+    const what = s.bKey && s.cKey ? `${s.bKey} → ${s.cKey}` : `${s.bPath} → ${s.cPath}`;
+    hits.push({
+      id: "S11",
+      gate: "complexity",
+      file: s.cPath,
+      ...(s.cKey ? { unit: s.cKey } : {}),
+      evidence: `scope changed: ${s.from} → ${s.to} (${what})`,
+      routing: true,
+    });
+  }
+  // Unit vanish (spec 6.4): a named B unit with no counterpart whose name is
+  // still bound in C. Another C unit of the same name is not a counterpart
+  // (it did not match), so it does not clear the check. Signature-only rows
+  // (overloads, `declare`, abstract) carry no logic and are skipped.
   for (const p of ctx.pairs) {
     const source = ctx.input.sourcesC?.get(p.c.path);
     if (source === undefined) continue;
-    const cNames = new Set(flattenUnits(p.c.units).map((u) => normalizeName(u.name)));
     let identifiers: Set<string> | undefined;
     for (const bu of flattenUnits(p.b.units)) {
-      if (bu.name === ANONYMOUS || ctx.byB.has(bu.key)) continue;
+      if (bu.name === ANONYMOUS || bu.signatureOnly || ctx.byB.has(bu.key)) continue;
       const name = normalizeName(bu.name);
-      if (cNames.has(name)) continue;
       identifiers ??= identifierSet(source);
       if (identifiers.has(name)) {
         hits.push({

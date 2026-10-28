@@ -2,6 +2,7 @@
 // improved elsewhere is allowed to hide a violation (spec 9.2).
 
 import type { GateResult, Inconclusive, TriggerHit, Violation } from "../types.js";
+import { shadowNote } from "../aggregate/index.js";
 import type { QualityGateVerdict } from "../aggregate/types.js";
 
 const METRIC_LABEL: Record<string, string> = { cognitive: "CogC", cyclomatic: "CC" };
@@ -108,6 +109,15 @@ export function renderSummaryMarkdown(results: GateResult[], verdict?: QualityGa
   if (verdict) {
     out.push(`## quality-gate: ${verdict.state} — ${verdict.mergeAllowed ? "병합 허용" : "병합 차단"}`, "");
     out.push(`base \`${verdict.base_sha}\` · candidate \`${verdict.candidate_sha}\` · policy \`${verdict.policy_revision}\``, "");
+    if (verdict.shadow.promoted.length) {
+      const note = shadowNote(verdict);
+      out.push(
+        `**Shadow 판정** (모든 게이트를 enforce로 본 가상 판정): ${verdict.shadow.state}${note ? ` — ${note}` : ""}`,
+        ...verdict.shadow.promoted.map((p) => `- ${p.gate} (${p.mode}) → ${p.state}`),
+        ...(verdict.shadow.blocking.length ? ["", "shadow 차단 사유:", ...verdict.shadow.blocking.map((b) => `- ${b.gate} ${b.reason}${b.unit ? ` \`${b.unit}\`` : ""}`)] : []),
+        "",
+      );
+    }
     if (verdict.blocking.length) out.push("**차단 원인**", ...verdict.blocking.map(violationLine), "");
     if (verdict.inconclusive.length) out.push("**측정 불가**", ...verdict.inconclusive.map(inconclusiveLine), "");
     out.push(...commandNotes(verdict));

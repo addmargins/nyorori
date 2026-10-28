@@ -2,17 +2,20 @@
 
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { withVerdictInconclusive, type ArtifactProvenance } from "../aggregate/index.js";
-import { runGates } from "../pipeline/run.js";
-import type { Artifacts, PullRequestContext } from "../pipeline/types.js";
+import { runGatesIsolated } from "../pipeline/isolated.js";
+import type { ArtifactZip, Artifacts, PullRequestContext } from "../pipeline/types.js";
 import type { Policy } from "../policy/schema.js";
-import { inRoster, MAX_ENUMERABLE_COMMITS, type CommitIdentity, type TeamRosters } from "../review/independence.js";
+import { inRoster, isAiLoopBot, MAX_ENUMERABLE_COMMITS, type CommitIdentity, type TeamRosters } from "../review/independence.js";
+import { collectAgentInvokers, linkedIssueNumbers } from "../review/invokers.js";
 import { parseReview, type CarryOverInfo, type ReviewComment } from "../review/simplification.js";
 import { screenComments, type IssueComment } from "../waivers/index.js";
+import { bindArtifact } from "./evidence.js";
 import { ensureMirror, provenanceOf, type GitHubApi, type WorkflowRun } from "./github.js";
+import { withFileLock } from "./lock.js";
 import type { Evaluation, EvaluationContext } from "./handlers.js";
 import type { LedgerStore } from "./ledger.js";
 import type { VerdictStore } from "./verdicts.js";
@@ -33,16 +36,6 @@ export interface ServiceConfig {
 }
 
 type Timeline = Array<{ sha: string; observedAt: string }>;
-
-const fileLocks = new Map<string, Promise<unknown>>();
-
-/** Serializes read-modify-write cycles on one file within this process. */
-async function withFileLock<T>(file: string, fn: () => Promise<T>): Promise<T> {
-  const prev = fileLocks.get(file) ?? Promise.resolve();
-  const next = prev.then(fn, fn);
-  fileLocks.set(file, next.catch(() => undefined));
-  return next;
-}
 
 /**
  * Issue comments carry no head SHA, so the service keeps a timeline of the PR
@@ -171,9 +164,12 @@ async function carryOverFor(
 interface PrData {
   number: number;
   author: string;
+  authorIsAiLoop: boolean;
   headSha: string;
   comments: IssueComment[];
   commits: CommitIdentity[];
+  /** Humans who invoked the AI-loop bot (empty for human PRs). */
+  invokers: string[];
 }
 
 async function loadPr(cfg: ServiceConfig, ctx: EvaluationContext, number: number): Promise<PrData> {
@@ -182,7 +178,29 @@ async function loadPr(cfg: ServiceConfig, ctx: EvaluationContext, number: number
     cfg.api.listIssueComments(ctx.repo, number),
     cfg.api.listPullCommits(ctx.repo, number),
   ]);
-  return { number, author: pr.author, headSha: pr.headSha, comments, commits };
+  const authorIsAiLoop = isAiLoopBot(pr.author, cfg.policy);
+  let invokers: string[] = [];
+  if (authorIsAiLoop) {
+    const repository = `${ctx.repo.owner}/${ctx.repo.repo}`;
+    const linkedIssueAuthors: string[] = [];
+    if (cfg.api.getIssueAuthor) {
+      for (const n of linkedIssueNumbers(pr.body, repository)) {
+        const a = await cfg.api.getIssueAuthor(ctx.repo, n).catch(() => null);
+        if (a) linkedIssueAuthors.push(a);
+      }
+    }
+    invokers = collectAgentInvokers(
+      {
+        botLogin: pr.author,
+        assignees: pr.assignees ?? [],
+        body: pr.body,
+        comments: comments.map((c) => ({ author: c.author.login, body: c.body })),
+        linkedIssueAuthors,
+      },
+      cfg.policy,
+    );
+  }
+  return { number, author: pr.author, authorIsAiLoop, headSha: pr.headSha, comments, commits, invokers };
 }
 
 /**
@@ -260,7 +278,8 @@ async function pullRequestContext(
         commits: prs.flatMap((p) => p.commits),
         // GitHub lists at most 250 commits per PR; a full page means the rest is unknown.
         commitsTruncated: prs.some((p) => p.commits.length >= MAX_ENUMERABLE_COMMITS),
-        agentInvokers: [],
+        agentInvokers: [...new Set(prs.flatMap((p) => p.invokers))],
+        authorIsAiLoop: prs.some((p) => p.authorIsAiLoop),
       },
       teams,
       headSha: head,
@@ -294,7 +313,7 @@ async function findArtifacts(
   cfg: ServiceConfig,
   ctx: EvaluationContext,
   prHead: string | undefined,
-): Promise<{ artifacts: Artifacts; problem?: string }> {
+): Promise<{ artifacts: Artifacts; artifactZip?: ArtifactZip; problem?: string }> {
   const lookupSha = ctx.kind === "merge_group" ? ctx.candidate : prHead;
   if (!lookupSha) return { artifacts: {} };
   const runs = await cfg.api.listWorkflowRuns(ctx.repo, lookupSha);
@@ -308,42 +327,26 @@ async function findArtifacts(
     }
   }
   if (!best) return { artifacts: {} };
-  const artifact = (await cfg.api.listRunArtifacts(ctx.repo, best.run.id)).find(
-    (a) => a.name === `nyorori-gate-${ctx.candidate}` && !a.expired,
-  );
+  const bound = bindArtifact(best.run, await cfg.api.listRunArtifacts(ctx.repo, best.run.id), lookupSha, ctx.candidate);
+  if (bound.problem) {
+    cfg.log?.("artifact not bound to its run", { run: best.run.id, problem: bound.problem });
+    return { artifacts: {}, problem: `artifact of run ${best.run.id} is not bound to the attempt: ${bound.problem}` };
+  }
+  const artifact = bound.artifact;
   if (!artifact) return { artifacts: {} };
-  let files: Map<string, Buffer>;
+  // Only the capped bytes are fetched here; the detached worker parses them.
+  let archive: Buffer;
   try {
-    files = await cfg.api.downloadArtifact(ctx.repo, artifact.id, (n) => ARTIFACT_ENTRIES.has(n));
+    archive = await cfg.api.downloadArtifactArchive(ctx.repo, artifact.id);
   } catch (e) {
     cfg.log?.("artifact rejected", { artifact: artifact.id, error: String(e) });
     return { artifacts: {}, problem: `artifact ${artifact.id} of run ${best.run.id} was rejected: ${(e as Error).message}` };
   }
-  let rootDir: string | undefined;
-  let testMerge: string | undefined;
-  try {
-    const meta = JSON.parse(text(files, "metadata.json") ?? "{}") as { root_dir?: string; candidate_sha?: string };
-    rootDir = typeof meta.root_dir === "string" ? meta.root_dir : undefined;
-    testMerge = typeof meta.candidate_sha === "string" ? meta.candidate_sha : undefined;
-  } catch {
-    rootDir = undefined;
-  }
-  // A pull_request run reports the PR head as head_sha; the commit it tested
-  // (refs/pull/N/merge) is only in its metadata, and must equal C (spec 6.2).
-  const prov: ArtifactProvenance =
-    best.prov.event === "pull_request" && testMerge ? { ...best.prov, testMergeSha: testMerge } : best.prov;
-  const root = rootDir ? { rootDir } : {};
-  const out: Artifacts = {};
-  const testsC = text(files, "tests.C.json");
-  if (testsC !== undefined) {
-    const testsB = text(files, "tests.B.json");
-    out.tests = { reportC: testsC, ...(testsB !== undefined ? { reportB: testsB } : {}), provenance: prov, ...root };
-  }
-  const cov = text(files, "coverage/coverage-final.json");
-  if (cov !== undefined) out.coverage = { coverageFinal: cov, meta: text(files, "coverage-meta.json") ?? "", provenance: prov, ...root };
-  const mut = text(files, "mutation.json");
-  if (mut !== undefined) out.mutation = { report: mut, provenance: prov, ...root };
-  return { artifacts: out };
+  const zipDir = join(cfg.workDir, "artifacts");
+  await mkdir(zipDir, { recursive: true });
+  const path = join(zipDir, `${randomUUID()}.zip`);
+  await writeFile(path, archive);
+  return { artifacts: {}, artifactZip: { path, provenance: best.prov } };
 }
 
 export function createServiceEvaluator(cfg: ServiceConfig): (ctx: EvaluationContext) => Promise<Evaluation> {
@@ -358,7 +361,7 @@ export function createServiceEvaluator(cfg: ServiceConfig): (ctx: EvaluationCont
     const prc = await pullRequestContext(cfg, ctx, store, mirror, fetchSha);
     if (prc && prc.head !== ctx.candidate) await fetchSha(prc.head);
     const found = await findArtifacts(cfg, ctx, prc?.head);
-    const out = await runGates({
+    const out = await runGatesIsolated({
       repoDir: mirror,
       base: ctx.base,
       candidate: ctx.candidate,
@@ -368,16 +371,22 @@ export function createServiceEvaluator(cfg: ServiceConfig): (ctx: EvaluationCont
       workDir: join(cfg.workDir, "runs"),
       runnerCommit: cfg.runnerCommit,
       artifacts: found.artifacts,
+      ...(found.artifactZip ? { artifactZip: found.artifactZip } : {}),
+      official: ctx.kind === "merge_group",
+      authority: "github-app",
       ...(prc ? { pr: prc.pr } : {}),
-    });
+    }).finally(() => (found.artifactZip ? rm(found.artifactZip.path, { force: true }) : undefined));
     let verdict = out.verdict;
     if (found.problem) {
-      verdict = withVerdictInconclusive(verdict, { reason: "UNTRUSTED_ARTIFACT", detail: found.problem, authorFixable: false });
+      verdict = { ...withVerdictInconclusive(verdict, { reason: "UNTRUSTED_ARTIFACT", detail: found.problem, authorFixable: false }), authority: out.authority };
     }
     if (prc?.ignoredEdited.length) {
       verdict = { ...verdict, review: { ...verdict.review, observe: { ...verdict.review.observe, ignored_edited_commands: prc.ignoredEdited } } };
     }
-    if (cfg.verdicts && prc && ctx.prNumber !== undefined) {
+    // The verdict is stored only once the handler has published it (a merge
+    // must never record waivers from an evaluation nobody saw).
+    const onPublished = async () => {
+      if (!cfg.verdicts || !prc || ctx.prNumber === undefined) return;
       await cfg.verdicts.save(ctx.repo, {
         repository: `${ctx.repo.owner}/${ctx.repo.repo}`,
         pr: ctx.prNumber,
@@ -389,8 +398,8 @@ export function createServiceEvaluator(cfg: ServiceConfig): (ctx: EvaluationCont
         appliedWaivers: out.appliedWaivers,
         storedAt: new Date().toISOString(),
       });
-    }
+    };
     cfg.log?.("evaluated", { repo: ctx.repo, kind: ctx.kind, base: ctx.base, candidate: ctx.candidate, state: verdict.state });
-    return { verdict, results: out.results.filter((r) => r.gate !== "simplification-review") };
+    return { verdict, results: out.results.filter((r) => r.gate !== "simplification-review"), onPublished };
   };
 }

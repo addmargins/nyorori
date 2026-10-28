@@ -86,20 +86,27 @@ jobs:
           npm ci
           mkdir -p "$RUNNER_TEMP/out"
           set +e
-          include_args=()
-          while IFS= read -r f; do [ -n "$f" ] && include_args+=("--coverage.include=$f"); done < "$RUNNER_TEMP/changed.txt"
+          # include = changed files (coverage.include / collectCoverageFrom), otherwise files no
+          # test imports vanish from the report; reportOnFailure so a red run still yields coverage.
+          # The provider is the repository's own configuration (recorded below), never forced here.
+          vitest_args=()
+          jest_args=()
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            vitest_args+=("--coverage.include=$f")
+            jest_args+=("--collectCoverageFrom=$f")
+          done < "$RUNNER_TEMP/changed.txt"
           case "${{ steps.runner.outputs.kind }}" in
             vitest)
-              # include = changed files, otherwise files no test imports vanish from the report;
-              # reportOnFailure so a red run still yields coverage.
               npx vitest run --reporter=json --outputFile="$RUNNER_TEMP/out/tests.C.json" \
-                --coverage.enabled --coverage.provider=v8 --coverage.reporter=json \
+                --coverage.enabled --coverage.reporter=json \
                 --coverage.reportsDirectory="$RUNNER_TEMP/out/coverage" --coverage.reportOnFailure \
-                "${include_args[@]}"
+                "${vitest_args[@]}"
               ;;
             jest)
               npx jest --ci --json --outputFile="$RUNNER_TEMP/out/tests.C.json" --coverage \
-                --coverageReporters=json --coverageDirectory="$RUNNER_TEMP/out/coverage"
+                --coverageReporters=json --coverageDirectory="$RUNNER_TEMP/out/coverage" \
+                "${jest_args[@]}"
               ;;
           esac
           # The runner's exit code is evidence for G4, not this step's outcome.
@@ -123,14 +130,32 @@ jobs:
             "root_dir": "${{ github.workspace }}/candidate"
           }
           JSON
-          # G5 refuses coverage whose provider does not match the policy pin.
-          cat > "$RUNNER_TEMP/out/coverage-meta.json" <<JSON
-          {
-            "provider": "v8",
-            "provider_version": "$(cd candidate && node -p "require('@vitest/coverage-v8/package.json').version" 2>/dev/null || echo unknown)",
-            "vitest_version": "$(cd candidate && node -p "require('vitest/package.json').version" 2>/dev/null || echo unknown)"
-          }
-          JSON
+          # G5 refuses coverage whose provider (and pinned version) does not match the policy.
+          # The provider is read from the repository's resolved runner configuration, so the
+          # metadata describes what actually produced coverage-final.json.
+          (cd candidate && node --input-type=module -e '
+            import { writeFileSync } from "node:fs";
+            import { createRequire } from "node:module";
+            import { execFileSync } from "node:child_process";
+            const require = createRequire(process.cwd() + "/");
+            const version = (pkg) => { try { return require(pkg + "/package.json").version; } catch { return "unknown"; } };
+            const kind = process.argv[1];
+            let meta;
+            if (kind === "vitest") {
+              const { resolveConfig } = await import("vitest/node");
+              const { vitestConfig } = await resolveConfig({}, { root: process.cwd() });
+              const provider = vitestConfig.coverage?.provider ?? "v8";
+              meta = { provider, provider_version: version("@vitest/coverage-" + provider), runner: "vitest", runner_version: version("vitest"), vitest_version: version("vitest") };
+            } else if (kind === "jest") {
+              const cfg = JSON.parse(execFileSync("npx", ["jest", "--showConfig"], { encoding: "utf8", maxBuffer: 64 << 20 }));
+              const provider = cfg.globalConfig?.coverageProvider ?? "babel";
+              meta = { provider, provider_version: version(provider === "v8" ? "jest" : "babel-plugin-istanbul"), runner: "jest", runner_version: version("jest"), vitest_version: "" };
+            } else {
+              meta = { provider: "none", provider_version: "", runner: kind, runner_version: "", vitest_version: "" };
+            }
+            meta.candidate_sha = process.env.C_SHA;
+            writeFileSync(process.env.RUNNER_TEMP + "/out/coverage-meta.json", JSON.stringify(meta, null, 2) + "\n");
+          ' "${{ steps.runner.outputs.kind }}")
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

@@ -121,6 +121,7 @@ function isExtensionless(path: string): boolean {
  */
 export function classifyPath(path: string, policy: Policy): PathClass {
   const s = policy.scope;
+  if (matchesAny(path, s.exclude)) return { kind: "excluded", reason: "POLICY_EXCLUDE" };
   // Declaration files carry no logic, but cccc still parses them: an
   // implementation inside is an "ambient context" parse error, so measuring
   // them (declaration_impl_check) turns a hidden implementation into
@@ -128,7 +129,6 @@ export function classifyPath(path: string, policy: Policy): PathClass {
   if (hasSuffixIn(path, s.declaration_suffixes)) {
     return s.declaration_impl_check ? { kind: "measure" } : { kind: "excluded", reason: "DECLARATION_FILE" };
   }
-  if (matchesAny(path, s.exclude)) return { kind: "excluded", reason: "POLICY_EXCLUDE" };
   if (hasSuffixIn(path, s.unmeasured_code_extensions)) return { kind: "unmeasured", reason: "UNSUPPORTED_FORMAT" };
   if (hasSuffixIn(path, s.extensions)) return { kind: "measure" };
   if (hasSuffixIn(path, s.foreign_code_extensions)) return { kind: "unmeasured", reason: "FOREIGN_LANGUAGE" };
@@ -195,7 +195,11 @@ export function foldPathForCollision(path: string): string {
   return path.normalize("NFC").toUpperCase().toLowerCase();
 }
 
-/** Would this path be code (measured or a known unmeasured format) if it were not excluded? */
+/**
+ * Would this path be code (measured or a known unmeasured format) if it were
+ * not excluded? Declaration files are not: a new `.d.ts` under an excluded
+ * (generated) path is routine codegen output, not a reason for S11.
+ */
 export function isCodePath(path: string, policy: Policy): boolean {
   const s = policy.scope;
   if (hasSuffixIn(path, s.declaration_suffixes)) return false;
@@ -427,7 +431,6 @@ async function assembleManifest(
       measure: { B: Boolean(vb?.measure), C: Boolean(vc?.measure) },
     };
     const primary = vc ?? vb!;
-    const primaryPath = (c ?? b)!.path;
 
     // A type change (file ⇄ symlink/submodule) is always routed to a human
     // (S11). Regular sides are still measured: that is strictly more evidence.
@@ -443,7 +446,11 @@ async function assembleManifest(
     ) {
       entry.newInExcludedPath = true;
     }
-    if (matchesAny(primaryPath, policy.scope.test_globs)) entry.isTest = true;
+    // A test file is a test file on whichever side it lives: a move across the
+    // test/product boundary must be visible to G1 (scope change) and G4 (moved test).
+    if (b) entry.isTestB = matchesAny(b.path, policy.scope.test_globs);
+    if (c) entry.isTestC = matchesAny(c.path, policy.scope.test_globs);
+    if (entry.isTestB || entry.isTestC) entry.isTest = true;
 
     // A measurable file whose path the work dir cannot hold (ENAMETOOLONG).
     if (c && jc?.tooLong) {

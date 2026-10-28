@@ -207,7 +207,12 @@ export interface ManifestEntry {
   excluded?: ExcludedReason;
   /** True when the C side lives under an excluded path and is newly added (S11). */
   newInExcludedPath?: boolean;
+  /** True when either side's path matches policy.scope.test_globs (see isTestB / isTestC). */
   isTest?: boolean;
+  /** Whether the B path matches policy.scope.test_globs (absent when there is no B side). */
+  isTestB?: boolean;
+  /** Whether the C path matches policy.scope.test_globs (absent when there is no C side). */
+  isTestC?: boolean;
 }
 
 export interface Manifest {
