@@ -35,3 +35,24 @@ AI-loop mechanical 12.2 checks, comment commands, incident runbook with `degrade
 Adopt from theirs: `nyorori replay` (spec 6.1/13.4), fail-closed installer, `would_block`, demo script,
 deployment doc sections (OS isolation, secrets, retention, health, validation boundary), `decideRetry`
 hand-off on INCONCLUSIVE and B/P/M drift, pinned `coverage.provider_version`.
+
+## Differential testing (89 scenarios, both CLIs on the same repos)
+
+Both implementations are deterministic. Agreement on all spec-14 policy rows, bypass rows and most
+manipulation variants. Disagreements and verdicts:
+
+| Scenario | Ours | Theirs | Right |
+|---|---|---|---|
+| Two anonymous units on one line swapped / new anonymous 18 next to legacy 18 | PASS via k-to-k (ruling D21b included anonymous) | UNMATCHED_OVER_BUDGET | **theirs** — spec 5.4 step 3 excludes anonymous; D21b narrowed to named units |
+| New zero-function `.d.ts` | N/A (not measured) | G6 FAIL (S11 DECLARATION_ONLY) | both wrong; spec: measured, PASS |
+| Vanished named B unit still bound in C (`run` across classes) | no S11 | S11 | theirs (spec 6.4) |
+| New CogC-15 function that reassigns its own parameter | PASS | G6 FAIL (S10 on any param reassignment) | ours |
+| B-side syntax error | FAIL/PASS by C | G3 INCONCLUSIVE | ours (spec 6.3) |
+| Non-UTF-8 file | INCONCLUSIVE author-fixable | S11 → aggregate FAIL | ours (spec 11.2) |
+| Unrelated PR whose 5-commits-back tree has a Latin-1 file | PASS | INCONCLUSIVE ROLLING_BASELINE_INCOMPLETE | ours (rolling comparison must never change G1 state) |
+| Deletion-only PR | N/A | PASS | ours (spec 9.1) |
+| Cyrillic-е rename | FAIL + mixed-script warning | FAIL, no warning | ours |
+| `.ts` → symlink with body in vendor/ | stage-4 move PASS + S11 | OVER_LIMIT_NEW + S11 | both block |
+| Variant (c) as new code | S9 only (S10 needs V ≥ 8, ruling D17) | S9 + S10 | deliberate deviation, kept |
+| Variant (f) as new code | S4 also fires via `max-statements` 38 > 30 (ruling D12) | S9 only | deliberate deviation, kept; calibrate in shadow |
+| 2,000-file PR | 52 s | 127 s | — |
