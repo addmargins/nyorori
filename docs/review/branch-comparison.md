@@ -56,3 +56,39 @@ manipulation variants. Disagreements and verdicts:
 | Variant (c) as new code | S9 only (S10 needs V ≥ 8, ruling D17) | S9 + S10 | deliberate deviation, kept |
 | Variant (f) as new code | S4 also fires via `max-statements` 38 > 30 (ruling D12) | S9 only | deliberate deviation, kept; calibrate in shadow |
 | 2,000-file PR | 52 s | 127 s | — |
+
+## Fresh correctness review of our branch (code after 2d4d452, at 040125f)
+
+No false PASS found; the service flow was verified end to end (real git + cccc + pipeline behind
+`dispatchEvent` with a fake GitHub API: FAIL published, waiver request → approval → ACCEPTED_WITH_WAIVER,
+edited review ignored, concurrent events publish once, merge → ledger + one debt issue, redelivery idempotent).
+Defects (all assigned): G4 violation unit keys carry no path so ruling D14's waivable on-base failures could
+never be waived (the test fabricated the key); pending waiver requests never surface their id/blob; a test file
+renamed out of the test globs becomes an un-overridable INCONCLUSIVE instead of TEST_REMOVED; no retry when
+GitHub's test merge is not ready yet; moving baseline is O(files × history) and sequential; a provenance
+problem discards a service-computed FAIL; verdict stored before publication; IssuedDebtStore unlocked;
+a generation race in runAndPublish.
+
+## Rulings (round 4)
+
+Adopt from `feat/production-quality-gate`: worker-process isolation with a job journal; private copy of the
+hashed measurer and a full `-j1` rerun for official runs; refusal of policy/binary/out paths inside the
+target repo and an `authority` marker; `run.path` binding and attempt-bound artifacts; scoped tokens;
+`would_block`; `nyorori replay`; fail-closed installer; demo script; deployment-doc sections; retry hand-off on
+INCONCLUSIVE and B/P/M drift; scope-classification-aware unit matching; blanket `.constructor` value-escape
+rule (keeping the `.name` exemption); `jsconfig.json` aliases; measured `.d.ts`.
+Reversed: round-2 "k-to-k includes anonymous units" (differential test m16b).
+Kept against the other implementation: D7 SCC-partition cycles, D9/D10/D11 suppression and import rulings,
+D17/D20 trigger thresholds, D21a/b named matching, per-file moving baseline, content-sniffed markup,
+dependency-cruiser resolver with S3/S11 routing instead of INCONCLUSIVE-by-presence.
+
+## Findings for feat/production-quality-gate (not changed here; for its author)
+
+- S10 fires on any new function that reassigns its own parameter → a spec-PASS PR needs G6 (9 of 89 scenarios).
+- Rolling baseline turns an unrelated PR INCONCLUSIVE when a historical tree has a measurement issue; a routing input must never change G1 state.
+- B-side syntax error makes G3 INCONCLUSIVE (spec 6.3 says B parse errors are never INCONCLUSIVE).
+- A new declaration-only `.d.ts` blocks the merge via S11; a non-UTF-8 file becomes a review FAIL instead of an author-fixable INCONCLUSIVE; deletion-only PR aggregates PASS instead of N/A.
+- No confusable-identifier warning on a Cyrillic-е rename; computed-constructor folding is one level deep (`"constr"+"uctor"` via a const passes).
+- G4: `it.each` / template titles make the whole PR INCONCLUSIVE; test IDs are bare titles so deleting one of two same-titled tests is PASS; new `todo` FAILs. G5: Istanbul implicit-else locations throw; every changed function including anonymous callbacks is a hard FAIL. G7: no survivor list.
+- G3 INCONCLUSIVE by presence of any bundler/tsconfig feature or any unknown extension anywhere in the tree; per-edge cycle FAIL including type-only and lazy edges; `max-params` and non-waivable suppressions in test files; `x.constructor.name` FAIL; dispatch-table S9 on any object with one arrow property.
+- No approval ingestion (authority file trusted verbatim), `merge_group` only (no pre-check), AI-loop rules keyed on an evidence actor that defaults to unknown, no measurement override, no `degraded` mode, attestation manual and voided by any service upgrade.

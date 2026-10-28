@@ -81,6 +81,16 @@ describe("audit F7: dynamic-code gaps", () => {
     ["computed const key, escaping", `function g() {}\nconst k = "constr" + "uctor";\nconst F = g[k];\nexport const price = F("o", "return 1");`],
     ["optional chain", `declare const g: any;\nexport const F = g?.constructor;`],
     ["conditional", `declare const g: any; declare const h: any;\nexport const F = (g ? g.constructor : h.constructor);`],
+    ["new", `function g() {}\nexport const price = new g.constructor("o", "return 1");`],
+    ["Reflect.construct", `function g() {}\nexport const price = Reflect.construct(g.constructor, ["o", "return 1"]);`],
+    ["Reflect.get then call", `declare const g: any;\nexport const price = Reflect.get(g, "constructor")("o", "return 1");`],
+    ["yield", `declare const g: any;\nexport function* it() { yield g.constructor; }`],
+    ["await", `declare const g: any;\nexport async function f() { return await g.constructor; }`],
+    ["tagged template", `declare const g: any; declare const tag: any;\nexport const price = tag\`\${g.constructor}\`;`],
+    ["spread into call", `declare const g: any; declare const run: any;\nexport const price = run(...[g.constructor]);`],
+    ["folded .call key", `function g() {}\nexport const price = g.constructor["ca" + "ll"](null, "o", "return 1");`],
+    ["arrow body", `declare const g: any;\nexport const F = () => g.constructor;`],
+    ["logical fallback", `declare const g: any; declare const Y: any;\nexport const F = g.constructor || Y;`],
   ])("constructor value escape: %s", async (_name, code) => {
     expect(await idsOf(code)).toContain(`${DYN}:constructor`);
   });
@@ -95,6 +105,18 @@ describe("audit F7: dynamic-code gaps", () => {
     ["this.constructor clone", `export class A { clone() { return new (this as any).constructor(); } }`],
     ["property key string", `export const keys = { constructor: 1 };\nexport const has = (o: object) => "constructor" in o;`],
     ["negation", `export const none = (x: any) => !x.constructor;`],
+    ["reversed equality", `export const same = (x: object, Y: unknown) => Y === x.constructor;`],
+    ["delete", `export const drop = (x: any) => { delete x.constructor; };`],
+    ["string interpolation", `export const label = (x: object) => \`\${x.constructor}\`;`],
+    ["computed key", `export const byCtor = (x: object, m: Record<string, number>) => m[x.constructor as any];`],
+    ["object literal key", `export const byCtor = (x: object) => ({ [x.constructor as any]: 1 });`],
+    ["for-in", `export const keys = (x: object) => { const out = []; for (const k in x.constructor) out.push(k); return out; };`],
+    ["this alias in class", `export class A { clone() { const self = this; return new (self as any).constructor(); } }`],
+    ["self alias passed", `export class A { make() { const self = this as any; return Reflect.construct(self.constructor, []); } }`],
+    ["array literal object", `export const A = [].constructor;\nexport const O = ({}).constructor;\nexport const S = "".constructor;`],
+    ["prototype of named class", `class Foo {}\nexport const F = Foo.prototype.constructor;`],
+    ["Reflect.get compared", `declare const g: any; declare const Y: any;\nexport const same = Reflect.get(g, "constructor") === Y;`],
+    ["if-test logical", `export const f = (x: any, y: any) => { if (x.constructor && y) return 1; return 0; }`],
   ])("constructor stays clean: %s", async (_name, code) => {
     expect((await idsOf(code)).filter((h) => h.startsWith(DYN))).toEqual([]);
   });

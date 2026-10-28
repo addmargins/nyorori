@@ -71,6 +71,18 @@ function isGlobalObject(node: AstNode, sc: SourceCode, depth = 0): boolean {
   return !!init && isGlobalObject(init, sc, depth + 1);
 }
 
+/** Literals whose `.constructor` is a known built-in (Array, Object, String...), never Function. */
+const LITERAL_OBJECTS = new Set(["ArrayExpression", "ObjectExpression", "Literal", "TemplateLiteral"]);
+
+/** `this`, `super`, or a never-reassigned local alias of `this` (`const self = this`). */
+function isThisLike(node: AstNode, sc: SourceCode, depth = 0): boolean {
+  const n = unwrap(node);
+  if (n.type === "ThisExpression" || n.type === "Super") return true;
+  if (n.type !== "Identifier" || depth > 4) return false;
+  const init = constInit(findVariable(sc.getScope(n as never) as Scope, n.name));
+  return !!init && isThisLike(init, sc, depth + 1);
+}
+
 /** The object whose `.constructor` is (or may be) the Function constructor. */
 function constructorOfIsFunction(obj: AstNode, member: AstNode | null, sc: SourceCode): boolean {
   const o = unwrap(obj);
@@ -82,58 +94,73 @@ function constructorOfIsFunction(obj: AstNode, member: AstNode | null, sc: Sourc
     const holder = unwrap(o.object);
     return holder.type === "Identifier" && holder.name === "Function";
   }
-  if (o.type === "ThisExpression" || o.type === "Super") return false;
+  // `this.constructor` / `self.constructor` in a class body is the class;
+  // `[].constructor` is Array. Neither is Function unless `.constructor` is
+  // taken again, which the first line catches.
+  if (isThisLike(o, sc) || LITERAL_OBJECTS.has(o.type)) return false;
   // Any other object: the value `x.constructor` is Function whenever x is a
   // function, and the gate cannot know. It is dangerous as soon as the value
-  // escapes into something that can call it (V17 review, round 4).
-  return member !== null && constructorValueEscapes(member);
+  // escapes into something that can call it (V17, round-4 review).
+  return member !== null && constructorValueEscapes(member, sc);
 }
 
-/** Non-escaping uses of a `.constructor` value: reads of its own properties, comparisons, type checks. */
 const COMPARISON_OPERATORS = new Set(["==", "!=", "===", "!==", "instanceof", "in", "<", ">", "<=", ">="]);
+const INVOKERS = new Set(["call", "apply", "bind"]);
 
 /**
- * True when the member's value leaves the expression in a way that can lead
- * to a call: called or `new`'d, bound to a name, passed as an argument,
- * placed in a literal, returned, thrown, yielded, awaited, or interpolated.
- * Reading a property of it, comparing it, `typeof`, `void`, and using it as
- * a `switch`/`if` test stay clean.
+ * True when the value of `member` (`x.constructor`) leaves the expression in
+ * a way that can lead to a call: called or `new`'d (also through
+ * `.call/.apply/.bind`), bound to a name, passed as an argument (including
+ * `Reflect.apply/construct`), placed in an array or object literal, returned,
+ * thrown, yielded, awaited, spread, or handed to a tagged template. Reading
+ * one of its own properties (`.name`), comparing it, `typeof`, `delete`, a
+ * statement test, a string interpolation or a property key stay clean.
  */
-function constructorValueEscapes(member: AstNode): boolean {
+function constructorValueEscapes(member: AstNode, sc: SourceCode): boolean {
   const outer = outermostWrapper(member);
   const p = outer.parent;
   if (!p) return false;
   switch (p.type) {
     case "MemberExpression": {
-      if (p.object !== outer) return true; // used as a computed key: the value is read
+      if (p.object !== outer) return false; // `a[x.constructor]`: the value is stringified into a key
       // `x.constructor.call/apply/bind(...)` invokes it; `.name`, `.length`,
       // `[k]` only read a property of it.
-      const method = staticPropertyName(p);
-      return (method === "call" || method === "apply" || method === "bind") && isCalleeOf(outermostWrapper(p));
+      const method = propertyName(p, sc);
+      return method !== null && INVOKERS.has(method) && isCalleeOf(outermostWrapper(p));
     }
     case "AssignmentExpression":
       return p.left !== outer; // `Child.prototype.constructor = Child` writes, it does not read
     case "BinaryExpression":
       return !COMPARISON_OPERATORS.has(p.operator);
-    case "UnaryExpression":
-      return p.operator !== "typeof" && p.operator !== "void" && p.operator !== "!";
+    case "UnaryExpression": // typeof, void, !, delete, +, -, ~
+    case "UpdateExpression":
     case "IfStatement":
     case "WhileStatement":
     case "DoWhileStatement":
     case "ForStatement":
+    case "ForInStatement":
+    case "ForOfStatement":
     case "SwitchStatement":
     case "SwitchCase":
     case "ExpressionStatement":
       return false;
+    case "Property":
+    case "MethodDefinition":
+    case "PropertyDefinition":
+      return !(p.computed && p.key === outer); // `{ [x.constructor]: 1 }` keys by its string
+    case "TemplateLiteral":
+      return p.parent?.type === "TaggedTemplateExpression"; // `${x.constructor}` only stringifies
     case "ConditionalExpression":
-      return p.test !== outer && constructorValueEscapes(p);
+      return p.test !== outer && constructorValueEscapes(p, sc);
     case "LogicalExpression":
-      return constructorValueEscapes(p);
+      return constructorValueEscapes(p, sc);
     case "SequenceExpression":
-      return p.expressions[p.expressions.length - 1] === outer && constructorValueEscapes(p);
+      return p.expressions[p.expressions.length - 1] === outer && constructorValueEscapes(p, sc);
     case "ChainExpression":
-      return constructorValueEscapes(p);
+      return constructorValueEscapes(p, sc);
     default:
+      // Call/new (callee or argument), VariableDeclarator, Return/Throw,
+      // Yield/Await, Array/Spread, arrow body, export default, class heritage...
       return true;
   }
 }
@@ -353,8 +380,9 @@ export const dynamicCode: Rule.RuleModule = {
         const [target, key] = n.arguments;
         if (!target) return;
         const k = foldString(key, sc);
-        if (k === "constructor" && constructorOfIsFunction(target, null, sc)) report(n, "constructor");
-        else if (isGlobalObject(target, sc) && (k === null || k === "eval" || k === "Function")) report(n, "globalComputedCall");
+        if (k === "constructor" && (constructorOfIsFunction(target, null, sc) || (method === "get" && constructorValueEscapes(n, sc)))) {
+          report(n, "constructor");
+        } else if (isGlobalObject(target, sc) && (k === null || k === "eval" || k === "Function")) report(n, "globalComputedCall");
       },
       NewExpression(node: never) {
         const n = node as AstNode;
