@@ -9,16 +9,16 @@ import { buildManifest } from "../git/manifest.js";
 import { buildGateFeedback } from "../report/feedback.js";
 import { verdictToCheckRun } from "../report/checkrun.js";
 import { renderSummaryMarkdown } from "../report/markdown.js";
-import type { MeasurementFingerprint } from "../types.js";
+import type { GateResult, MeasurementFingerprint } from "../types.js";
 import { mergePreviousAttemptTriggers } from "../ailoop/index.js";
 import { coverageGate, isAiLoopRun, mutationGate, testsGate } from "./actions-gates.js";
 import { candidateTree, readChangedTexts, toolVersions, type RunContext } from "./context.js";
-import { aggregate, applyMeasurementOverrides, applyWaiverDecisions, finalize } from "./decisions.js";
+import { aggregate, applyMeasurementOverrides, applyWaiverDecisions, finalize, type WaiverOutcome } from "./decisions.js";
 import { guard, type GateDraft } from "./draft.js";
 import { allSettledOrThrow } from "./settle.js";
 import { addMovingBaselineTriggers } from "./moving-baseline.js";
 import { complexityGate, depsGate, lintGate, measure, type MeasuredState } from "./service-gates.js";
-import type { RunGatesOptions, RunGatesOutput } from "./types.js";
+import type { AppliedWaiver, RunGatesOptions, RunGatesOutput } from "./types.js";
 
 async function buildContext(opts: RunGatesOptions, workDir: string): Promise<RunContext> {
   const policy = { ...opts.policy, revision: opts.policyRevision };
@@ -86,6 +86,7 @@ export async function runGates(opts: RunGatesOptions): Promise<RunGatesOutput> {
       ccccRuns: measured?.meas.runs ?? [],
       summaryMarkdown: renderSummaryMarkdown(all, verdict),
       checkRun: verdictToCheckRun(verdict, all),
+      appliedWaivers: appliedWaivers(waivers, results),
       feedback: buildGateFeedback(all, {
         attempt: opts.attempt ?? 1,
         preserve: ["Every test that passes on the base must still pass on the candidate."],
@@ -123,6 +124,15 @@ async function addPreviousAttemptTriggers(ctx: RunContext, workDir: string, g1: 
       authorFixable: false,
     });
   }
+}
+
+function appliedWaivers(w: WaiverOutcome, results: readonly GateResult[]): AppliedWaiver[] {
+  return w.applied.flatMap((a) => {
+    const waiver = w.valid.find((v) => v.id === a.id);
+    if (!waiver) return [];
+    const values = results.flatMap((r) => r.violations.filter((v) => v.waivedBy === a.id && typeof v.after === "number").map((v) => v.after as number));
+    return [{ waiver, value: values.length ? Math.max(...values) : null }];
+  });
 }
 
 function emptyMeasured(ctx: RunContext): MeasuredState {

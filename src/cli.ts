@@ -16,6 +16,9 @@ import { loadPolicy } from "./policy/load.js";
 import { dispatchEvent } from "./service/handlers.js";
 import { createServiceEvaluator } from "./service/evaluator.js";
 import { GitHubApi } from "./service/github.js";
+import { FileLedgerStore } from "./service/ledger.js";
+import { IssuedDebtStore, recordMergedPullRequest, type MergedPullRequest } from "./service/merge.js";
+import { VerdictStore } from "./service/verdicts.js";
 import { createWebhookServer } from "./service/http.js";
 import { EXIT_CODE } from "./types.js";
 
@@ -30,7 +33,8 @@ const USAGE = `usage:
               [--comments <comments.json>] [--policy-revision <rev>] [--runner-commit <sha>]
   nyorori fixtures [--cccc <bin>] [--dir <fixtures dir>]
   nyorori serve [--port <n>]   (env: NYORORI_APP_ID, NYORORI_PRIVATE_KEY_PATH,
-                                NYORORI_WEBHOOK_SECRET, NYORORI_POLICY, NYORORI_CCCC, NYORORI_WORKDIR)
+                                NYORORI_WEBHOOK_SECRET, NYORORI_POLICY, NYORORI_CCCC, NYORORI_WORKDIR,
+                                NYORORI_LEDGER)
 
 exit codes: 0 PASS/N/A/waived · 1 FAIL · 2 INCONCLUSIVE · 64 usage error`;
 
@@ -161,18 +165,28 @@ async function cmdServe(argv: string[]): Promise<number> {
   const loaded = await loadPolicy(env("NYORORI_POLICY"));
   const api = new GitHubApi({ appId, privateKeyPem: await readFile(env("NYORORI_PRIVATE_KEY_PATH"), "utf8") });
   const log = (msg: string, extra?: Record<string, unknown>) => process.stderr.write(`${JSON.stringify({ msg, ...extra })}\n`);
+  const workDir = process.env.NYORORI_WORKDIR ?? join(tmpdir(), "nyorori-service");
+  const ledger = new FileLedgerStore(process.env.NYORORI_LEDGER ?? join(workDir, "waivers.jsonl"));
+  const verdicts = new VerdictStore(join(workDir, "verdicts"));
+  const issued = new IssuedDebtStore(join(workDir, "debt-issues.json"));
   const evaluate = createServiceEvaluator({
     api,
     policy: loaded.policy,
     policyRevision: loaded.revision,
     ccccBinary: env("NYORORI_CCCC"),
-    workDir: process.env.NYORORI_WORKDIR ?? join(tmpdir(), "nyorori-service"),
+    workDir,
     runnerCommit: process.env.NYORORI_RUNNER_COMMIT ?? "service",
     log,
+    ledger,
+    verdicts,
   });
+  const onMerged = async (m: MergedPullRequest) => {
+    const r = await recordMergedPullRequest({ client: api, ledger, verdicts, issued, policy: loaded.policy, log }, m);
+    log("merge recorded", { repo: m.repo, pr: m.pr, ...r });
+  };
   const server = createWebhookServer({
     secret: env("NYORORI_WEBHOOK_SECRET"),
-    dispatch: (event, payload) => dispatchEvent({ client: api, appId, evaluate, log, policyRevision: loaded.revision }, event, payload),
+    dispatch: (event, payload) => dispatchEvent({ client: api, appId, evaluate, log, policyRevision: loaded.revision, onMerged }, event, payload),
     log,
   });
   await new Promise<void>((done) => server.listen(Number(values.port), done));

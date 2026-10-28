@@ -15,6 +15,7 @@ import { screenComments, type IssueComment } from "../waivers/index.js";
 import { ensureMirror, provenanceOf, type GitHubApi, type WorkflowRun } from "./github.js";
 import type { Evaluation, EvaluationContext } from "./handlers.js";
 import type { LedgerStore } from "./ledger.js";
+import type { VerdictStore } from "./verdicts.js";
 
 export interface ServiceConfig {
   api: GitHubApi;
@@ -27,6 +28,8 @@ export interface ServiceConfig {
   log?: (msg: string, extra?: Record<string, unknown>) => void;
   /** Waiver ledger for the quarterly budget; absent means no waivers used this quarter. */
   ledger?: LedgerStore;
+  /** Published verdicts per (PR, head), read back when the PR merges. */
+  verdicts?: VerdictStore;
 }
 
 type Timeline = Array<{ sha: string; observedAt: string }>;
@@ -373,6 +376,19 @@ export function createServiceEvaluator(cfg: ServiceConfig): (ctx: EvaluationCont
     }
     if (prc?.ignoredEdited.length) {
       verdict = { ...verdict, review: { ...verdict.review, observe: { ...verdict.review.observe, ignored_edited_commands: prc.ignoredEdited } } };
+    }
+    if (cfg.verdicts && prc && ctx.prNumber !== undefined) {
+      await cfg.verdicts.save(ctx.repo, {
+        repository: `${ctx.repo.owner}/${ctx.repo.repo}`,
+        pr: ctx.prNumber,
+        headSha: prc.head,
+        kind: ctx.kind,
+        base: ctx.base,
+        candidate: ctx.candidate,
+        verdict: { state: verdict.state, mergeAllowed: verdict.mergeAllowed, policy_revision: verdict.policy_revision },
+        appliedWaivers: out.appliedWaivers,
+        storedAt: new Date().toISOString(),
+      });
     }
     cfg.log?.("evaluated", { repo: ctx.repo, kind: ctx.kind, base: ctx.base, candidate: ctx.candidate, state: verdict.state });
     return { verdict, results: out.results.filter((r) => r.gate !== "simplification-review") };

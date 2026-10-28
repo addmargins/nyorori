@@ -8,6 +8,7 @@ import { QUALITY_GATE_CHECK, type QualityGateVerdict } from "../aggregate/types.
 import { toCheckRun, verdictToCheckRun, type CheckRunOutput } from "../report/checkrun.js";
 import { hasGateCommand } from "../waivers/command.js";
 import type { CheckRunRecord, GitHubClient, RepoRef } from "./client.js";
+import type { MergedPullRequest } from "./merge.js";
 
 export interface EvaluationContext {
   repo: RepoRef;
@@ -35,6 +36,8 @@ export interface ServiceDeps {
   policyRevision?: string;
   /** Per-PR serialization and generations; defaults to one queue per process. */
   queue?: EvaluationQueue;
+  /** Called once a PR is merged (pull_request closed + merged), e.g. to record its waivers. */
+  onMerged?: (m: MergedPullRequest) => Promise<void>;
 }
 
 /**
@@ -182,16 +185,28 @@ async function evaluateAndPublish(
 interface PullRequestPayload {
   action: string;
   repository: { owner: { login: string }; name: string };
-  pull_request: { number: number; head: { sha: string }; state: string };
+  pull_request: { number: number; head: { sha: string }; state: string; merged?: boolean; merge_commit_sha?: string | null };
 }
 
 const PR_ACTIONS = new Set(["opened", "synchronize", "reopened", "edited", "ready_for_review"]);
 
 /** Pre-check on `refs/pull/N/merge`: C is the test merge, B its first parent (spec 6.2). */
 export async function handlePullRequestEvent(deps: ServiceDeps, payload: PullRequestPayload): Promise<Evaluation | null> {
+  if (payload.action === "closed" && payload.pull_request.merged === true) {
+    await handleMergedPullRequest(deps, payload);
+    return null;
+  }
   if (!PR_ACTIONS.has(payload.action) || payload.pull_request.state !== "open") return null;
   const repo = { owner: payload.repository.owner.login, repo: payload.repository.name };
   return evaluatePullRequest(deps, repo, payload.pull_request.number, payload.pull_request.head.sha);
+}
+
+/** Merge-time bookkeeping (waiver ledger, debt issues); evaluates nothing. */
+async function handleMergedPullRequest(deps: ServiceDeps, payload: PullRequestPayload): Promise<void> {
+  const mergeCommit = payload.pull_request.merge_commit_sha;
+  if (!deps.onMerged || !mergeCommit) return;
+  const repo = { owner: payload.repository.owner.login, repo: payload.repository.name };
+  await deps.onMerged({ repo, pr: payload.pull_request.number, headSha: payload.pull_request.head.sha, mergeCommit });
 }
 
 export async function evaluatePullRequest(deps: ServiceDeps, repo: RepoRef, prNumber: number, headSha: string): Promise<Evaluation | null> {

@@ -32,6 +32,9 @@ class FakeClient implements GitHubClient {
     this.runs.push({ id, name: req.name, headSha: req.headSha, appId: APP, status: req.status, conclusion: req.conclusion ?? null, externalId: req.externalId, req });
     return id;
   }
+  async createIssue() {
+    return 1;
+  }
   async updateCheckRun(_r: unknown, id: number, req: CheckRunRequest) {
     this.updates.push({ id, req });
     const run = this.runs.find((r) => r.id === id)!;

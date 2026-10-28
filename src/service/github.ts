@@ -10,7 +10,7 @@ import { promisify } from "node:util";
 import type { ArtifactProvenance } from "../aggregate/index.js";
 import type { CommitIdentity } from "../review/independence.js";
 import type { IssueComment } from "../waivers/index.js";
-import type { CheckRunRecord, CheckRunRequest, GitHubClient, PullRequestInfo, RepoRef } from "./client.js";
+import type { CheckRunRecord, CheckRunRequest, GitHubClient, IssueRequest, PullRequestInfo, RepoRef } from "./client.js";
 import { DEFAULT_ZIP_LIMITS, readZip, ZipError, type ZipLimits } from "./zip.js";
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
@@ -184,6 +184,15 @@ export class GitHubApi implements GitHubClient {
 
   async createCheckRun(repo: RepoRef, req: CheckRunRequest): Promise<number> {
     return (await this.req<{ id: number }>(repo, "POST", `/repos/${repoKey(repo)}/check-runs`, this.checkBody(req))).id;
+  }
+
+  async createIssue(repo: RepoRef, issue: IssueRequest): Promise<number> {
+    const r = await this.req<{ number: number }>(repo, "POST", `/repos/${repoKey(repo)}/issues`, {
+      title: issue.title,
+      body: issue.body,
+      labels: issue.labels,
+    });
+    return r.number;
   }
 
   async updateCheckRun(repo: RepoRef, id: number, req: CheckRunRequest): Promise<void> {

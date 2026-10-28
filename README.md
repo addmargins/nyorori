@@ -103,7 +103,7 @@ spec 3.3의 구문별 계산 규칙 픽스처(`test/fixtures/cccc-rules`)를 새
 
 ## Deploying the gate service
 
-1. GitHub App을 만든다. 권한은 Checks: write, Contents: read, Pull requests: read, Issues: read, Actions: read, Members: read(org)이고, 이벤트는 `pull_request`, `merge_group`, `issue_comment`를 구독한다.
+1. GitHub App을 만든다. 권한은 Checks: write, Contents: read, Pull requests: read, Issues: write(부채 이슈), Actions: read, Members: read(org)이고, 이벤트는 `pull_request`, `merge_group`, `issue_comment`를 구독한다.
 2. 게이트 저장소의 commit을 조직 ruleset의 "Require workflows to pass before merging"으로 붙인다. 대상은 `.github/workflows/gate-untrusted-tests.yml`이고, 그 저장소·경로·SHA를 정책 `provenance.trusted_workflows`에 넣는다.
 3. 대상 저장소의 필수 체크는 `quality-gate` 하나만 두고, 예상 출처를 게이트 App으로 고정한다. merge queue를 켠다. 공식 판정은 `merge_group`이다.
 4. 서비스를 실행한다. App 키는 이 프로세스에만 둔다.
@@ -132,6 +132,23 @@ NYORORI_RUNNER_COMMIT=$(git rev-parse HEAD) node dist/cli.js serve --port 8080
 - 인용(`>`와 그 연속 줄), 코드 블록(``` 와 ~~~, 들여쓰기 4칸), HTML 주석(`<!-- -->`) 안의 명령은 무시한다.
 - 승인자는 PR 작성자, commit 작성자·committer·공동 작성자, AI 에이전트 호출자, 봇, (merge group이면) 그룹의 다른 PR 작성자가 아니어야 한다. 로그인에 연결되지 않은 commit 이메일이나 `Co-authored-by`가 있으면 **독립 승인자가 두 명** 필요하다. commit이 250개 이상인 PR은 독립성을 확인할 수 없어 승인을 받지 않는다.
 - 게이트 요약은 현재 head SHA와 blob을 넣은 복사용 명령을 코드 블록 안에 보여 준다.
+
+## Approvals, ledger and security limits
+
+PR 댓글 명령(전체 문법은 [`docs/operations.md`](docs/operations.md) 3절):
+
+```
+/gate-waive gate=complexity unit="src/a.ts::run#function[0]" metric=cogc ceiling=18 reason="…"
+/gate-waive-approve W1a2b3c4d5e blob=<그 파일의 C blob SHA>
+/simplification-review NO_SIMPLIFICATION_NEEDED sha=<리뷰한 PR head SHA>
+/gate-approve-tests key="TEST_REMOVED:test/a.test.ts::adds numbers" sha=<현재 PR head> note="…"
+```
+
+- **SHA 바인딩**: waiver 승인은 승인자가 본 파일 blob(`blob=`)에 묶인다. 이후 diff가 단위 범위를 건드리지 않으면 이어진다(ruling D15). 단순화 리뷰와 테스트 승인은 리뷰한 PR head(`sha=`)에 묶인다. 게이트 요약에 현재 SHA를 채운 복사용 명령이 나온다.
+- **수정된 댓글**: `updated_at`이 `created_at`보다 2초 넘게 늦은 댓글의 명령은 무시한다. 쓰기 권한자는 남의 댓글을 고칠 수 있기 때문이다. 명령은 새 댓글로 단다.
+- **두 승인자 규칙**: commit 작성자나 `Co-authored-by`의 신원을 로그인으로 확인할 수 없으면, 모든 승인(waiver, 단순화 리뷰, 테스트 승인, override)에 독립 승인자 두 명이 필요하다. PR commit이 250개 이상이면 승인을 받지 않는다.
+- **산출물 zip 제한**: 아카이브 100 MiB, 항목 1,000개, 항목당 64 MiB, 읽는 항목 합계 512 MiB, 압축률 200배까지다. 이름이 허용 목록(`tests.C.json`, `coverage/coverage-final.json` 등)에 있는 항목만 읽는다. 위반하면 INCONCLUSIVE `UNTRUSTED_ARTIFACT`다.
+- **waiver 원장**: 서비스는 판정을 게시할 때 (PR, head)별 판정을 `NYORORI_WORKDIR/verdicts`에 저장한다. PR이 병합되면(`pull_request` closed + merged) 그 head의 판정을 다시 읽어, 적용된 waiver를 `waivers.jsonl`에 한 줄씩 추가한다. 경로는 `NYORORI_LEDGER`로 바꿀 수 있고 기본값은 `NYORORI_WORKDIR/waivers.jsonl`이다. waiver마다 90일 기한의 `complexity-debt` 이슈도 연다. merge queue 판정이 있으면 그것을 PR 사전 확인보다 우선하고, 병합을 막는 판정이면 아무것도 기록하지 않는다. 같은 이벤트가 다시 와도 waiver id로 중복을 걸러서, 원장 줄과 이슈가 두 번 생기지 않는다. 분기별 예산(`waivers.per_quarter_budget`)은 이 원장으로 센다.
 
 ## Development
 

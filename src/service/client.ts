@@ -48,4 +48,12 @@ export interface GitHubClient {
   listCheckRuns(repo: RepoRef, sha: string): Promise<CheckRunRecord[]>;
   createCheckRun(repo: RepoRef, req: CheckRunRequest): Promise<number>;
   updateCheckRun(repo: RepoRef, id: number, req: CheckRunRequest): Promise<void>;
+  /** Opens an issue (the 90-day complexity-debt issue of a merged waiver); returns its number. */
+  createIssue(repo: RepoRef, issue: IssueRequest): Promise<number>;
+}
+
+export interface IssueRequest {
+  title: string;
+  body: string;
+  labels: string[];
 }
