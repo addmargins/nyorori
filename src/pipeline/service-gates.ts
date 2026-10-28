@@ -41,7 +41,10 @@ function hasMeasuredCode(manifest: Manifest): boolean {
  * reformat-only detection. The parser follows the measured path, so
  * extensionless shebang files format as the language cccc measured.
  */
-export async function normalizeSides(manifest: Manifest, meas: SideMeasurements): Promise<Normalization> {
+export async function normalizeSides(
+  manifest: Manifest,
+  meas: Pick<SideMeasurements, "sourcesB" | "sourcesC">,
+): Promise<Normalization> {
   const lines = new Map<string, { B?: number; C?: number }>();
   const identical = new Set<string>();
   for (const e of manifest.entries) {

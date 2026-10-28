@@ -205,6 +205,12 @@
     "s3": {
       "min_single_importer_modules": 2,
       "min_efferent_increase": 5
+    },
+    "moving_baseline": {
+      "enabled": true,
+      "lookback_merges": 5,
+      "lookback_days": 30,
+      "route": false
     }
   },
   "lint": {

@@ -15,6 +15,7 @@ import { coverageGate, isAiLoopRun, mutationGate, testsGate } from "./actions-ga
 import { candidateTree, readChangedTexts, toolVersions, type RunContext } from "./context.js";
 import { aggregate, applyMeasurementOverrides, applyWaiverDecisions, finalize } from "./decisions.js";
 import { guard, type GateDraft } from "./draft.js";
+import { addMovingBaselineTriggers } from "./moving-baseline.js";
 import { complexityGate, depsGate, lintGate, measure, type MeasuredState } from "./service-gates.js";
 import type { RunGatesOptions, RunGatesOutput } from "./types.js";
 
@@ -59,6 +60,7 @@ export async function runGates(opts: RunGatesOptions): Promise<RunGatesOutput> {
       return complexityGate(ctx, measured);
     });
     await addPreviousAttemptTriggers(ctx, workDir, g1);
+    await addMovingBaselineTriggers(ctx, measured, g1);
     // Lint maps hits to units; without measurements it falls back to file-level comparison.
     const state: MeasuredState = measured ?? emptyMeasured(ctx);
     const drafts: GateDraft[] = [

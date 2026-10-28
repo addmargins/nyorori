@@ -173,6 +173,20 @@ export const policySchema = z
           })
           .strict()
           .default({}),
+        /**
+         * Spec 7.5: S1/S9/S10/S12 also computed against an older state of each
+         * changed file, so a manipulation split over several PRs adds up.
+         * route=false records the hits only (P1); P2 flips it after calibration.
+         */
+        moving_baseline: z
+          .object({
+            enabled: z.boolean().default(true),
+            lookback_merges: z.number().int().positive().default(5),
+            lookback_days: z.number().int().positive().default(30),
+            route: z.boolean().default(false),
+          })
+          .strict()
+          .default({}),
       })
       .strict()
       .default({}),
