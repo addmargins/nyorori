@@ -143,6 +143,56 @@ q5: pass
 - 같은 PR의 평가는 한 번에 하나씩 돌고, 이벤트가 도착할 때마다 세대 번호를 받는다. 더 새 세대가 시작된 평가는 결과를 게시하지 않는다.
 - 체크 실행은 `external_id = <B>:<C>:<P revision>`로 구분한다. 같은 head에 대한 동시 평가가 서로의 체크를 덮어쓰지 않으며, 평가가 끝났을 때 B/C가 더 이상 현재가 아니면 자기 체크를 `SUPERSEDED`(failure)로 닫는다.
 
+## 4a. 운영 환경 요구사항
+
+### OS 격리
+
+게이트 서비스는 PR 코드를 실행하지 않지만, PR이 통제하는 입력(git blob, Actions 산출물, 댓글 본문)을 파서와 cccc에 먹인다. 분석 작업이 별도 자식 프로세스로 돌더라도 그것은 **프로세스 경계이지 샌드박스가 아니다** (같은 UID, 같은 파일시스템, 같은 네트워크). 운영에서는 다음을 추가한다.
+
+- 서비스 전체를 전용 사용자 또는 컨테이너로 돌린다. App 비공개 키와 webhook 시크릿을 읽을 수 있는 것은 그 사용자뿐이다.
+- 분석 자식(cccc, ESLint, dependency-cruiser)은 다시 별도 사용자/네임스페이스로 돌리고 네트워크를 차단한다(예: `unshare -n` 또는 네트워크 없는 컨테이너). 분석은 네트워크가 필요 없다. 필요한 것은 bare mirror와 측정기 바이너리뿐이다.
+- cgroup으로 메모리(분석 자식 1 GiB 정도)와 CPU를 제한하고, 벽시계 제한(정책 `measurer.timeout_ms`, 기본 120 s)을 넘기면 프로세스 그룹째 죽인다.
+- `NYORORI_WORKDIR`은 서비스 사용자만 읽고 쓰며(0700), 측정기 바이너리와 정책 파일은 읽기 전용 마운트에 둔다. 정책·측정기·작업 디렉터리는 대상 저장소 경로 안에 두지 않는다.
+
+### 시크릿과 교체
+
+| 시크릿 | 위치 | 교체 |
+|---|---|---|
+| App 비공개 키 (`NYORORI_PRIVATE_KEY_PATH`) | 서비스 프로세스만 읽는 파일(0400). Actions 시크릿에는 절대 두지 않는다(spec 10.1) | GitHub App 설정에서 새 키를 만들고 파일을 바꾼 뒤 프로세스를 재시작한다. 옛 키는 새 키로 발급된 체크가 보인 뒤 삭제 |
+| webhook 시크릿 (`NYORORI_WEBHOOK_SECRET`) | 환경 변수 또는 0400 파일 | GitHub App의 webhook 시크릿을 바꾸고 재시작. 서명이 맞지 않는 배달은 401로 거부되므로 교체 중 몇 건은 GitHub에서 재전송한다 |
+| 설치 토큰 | 메모리에만. 저장소 하나와 사용 권한(checks: write, contents: read, pull_requests: read, issues: write, actions: read, members: read)으로 범위를 좁혀 발급 | 1시간 만료, 5분 전 재발급. 디스크에 쓰지 않는다 |
+
+App에 위 권한 중 하나라도 없으면 토큰 발급 자체가 거부된다. 서비스가 반쯤의 권한으로 도는 것보다 낫다.
+
+### `NYORORI_WORKDIR`의 크기와 보존
+
+| 하위 경로 | 내용 | 크기 상한·보존 |
+|---|---|---|
+| `mirrors/<owner>/<repo>.git` | bare mirror(B, C, 승인이 가리킨 head) | 저장소당 수백 MB까지 자란다. 주 1회 `git -C … gc --prune=now`; 60일 넘게 평가가 없던 mirror는 삭제(다음 평가가 다시 만든다) |
+| `runs/` | 평가별 산출물(manifest, cccc 원본 JSON, gate-result) | 평가당 수 MB. 14일 보존 후 삭제; 분쟁 중인 PR의 것은 이슈에 첨부해 둔다 |
+| `verdicts/` | 게시된 판정(병합 시 waiver 기록용) | PR·head당 수 KB. 병합되거나 닫힌 PR은 90일 후 삭제 |
+| `comment-heads.json` | PR별 관측한 head 타임라인 | 작음. 닫힌 PR 항목은 90일 후 제거 |
+| `jobs/<owner>/<repo>/<delivery>.json` | 작업 저널(queued/running/done/superseded/failed) | `JobJournal.prune(30일, 저장소당 1000개)`를 시작 시와 하루 한 번 호출 |
+| `deliveries.log` | 본 배달 id와 본문 sha256 | 10,000개로 자동 압축 |
+| `waivers.jsonl`, `debt-issues.json` | waiver 원장, 열린 부채 이슈 | 삭제하지 않는다(감사 기록). 백업 대상 |
+
+가지치기 규칙: 디스크 사용량이 할당량의 80%를 넘으면 `runs/` → 오래된 mirror → 종료된 작업 저널 순으로 지운다. 원장과 판정은 지우지 않는다. 디스크가 가득 차면 평가가 INCONCLUSIVE(TOOL_ERROR)로 실패하므로, 80%에서 경보를 울린다.
+
+### 상태 확인과 모니터링
+
+- `GET /healthz`: 리스너가 살아 있고 저널·작업 디렉터리에 쓸 수 있음을 뜻한다. App 연결, mirror 신선도, 측정기 상태는 증명하지 않는다.
+- 로그(stderr, JSON 한 줄씩)에서 볼 지표: `evaluated`(상태별 비율 — 13.4의 장애 기준), `evaluation failed`, `artifact rejected`/`artifact not bound to its run`, `journal write failed`, `replaying job`.
+- 경보 조건: 15분 넘게 `quality-gate`가 in_progress인 PR(평가 실패 후 게시 실패), 1시간 동안 INCONCLUSIVE 비율이 직전 4주 평균의 3배, 디스크 80%, 저널의 `failed` 증가.
+- 재시작 시 `replayPendingJobs`가 queued/running 작업을 다시 보낸다. 재생된 작업은 GitHub에서 모든 상태를 다시 읽으므로, 오래된 것은 SUPERSEDED로 끝난다.
+
+### 검증 경계 (테스트가 증명하지 않는 것)
+
+- **실제 GitHub 왕복이 없다.** 서비스 테스트는 가짜 클라이언트와 가짜 fetch로 App JWT, 토큰 범위, 체크 실행, 산출물 바인딩, 재생, 중복 배달을 검사한다. App 설치, 권한 부여, ruleset의 필수 체크·필수 workflow, merge queue 동작은 운영 조직에서 따로 확인해야 한다.
+- **200개 PR 재생을 실제로 돌리지 않았다.** `nyorori replay`는 있지만 실제 조직 이력에 대한 보정(13.2)은 P0/P1에서 한다.
+- **cccc는 로컬 빌드다.** 테스트는 소스에서 빌드한 v1.8.5 바이너리를 쓴다. attestation을 검증한 릴리스 자산과 그 sha256 고정은 설치 시점의 절차이며, 기본 정책은 핀이 비어 있으면 INCONCLUSIVE(MEASURER_MISMATCH)로 막는다.
+- **OS 격리는 코드로 보장되지 않는다.** 위 OS 격리 절은 배포자가 구성한다.
+- **shadow 판정(`would_block`, `shadow`)은 기록일 뿐이다.** observe/degraded 게이트를 모두 enforce로 본 가상 판정이며, 임계값이 맞는지는 13.2의 리뷰어 일치도로만 알 수 있다.
+
 ## 5. 장애 대응 (기획서 13.4)
 
 **판단 기준**: 1시간 동안 FAIL 또는 INCONCLUSIVE 비율이 직전 4주 평균의 3배를 넘거나, `quality-gate`가 15분 넘게 보고되지 않으면 장애다.
@@ -179,6 +229,7 @@ P1에서 G6가 enforce여도 관측 모드 게이트(G1 등)의 트리거는 라
 - 루프는 `ai_loop.bot_accounts`에 등록된 봇 계정으로 식별한다. PR 본문의 자기 신고는 쓰지 않는다.
 - 루프의 diff가 보호 경로(`tests.protected_paths` + 게이트·도구 설정, `.github/**`, 스냅샷, waiver 원장), 테스트 스크립트(`package.json`의 `scripts.test*`, `jest`/`vitest`/`c8`/`nyc` 키), 억제 주석 추가, 측정 확장자 밖이나 제외 경로로의 이동을 건드리면 `policy-integrity` 행이 `POLICY_PATH_MODIFIED`로 실패한다. 루프는 waiver를 신청할 수 없다.
 - 자동 재시도는 `ai_loop.max_retries`회(기본 2)까지다. 위반 집합이 그대로이거나, 수정 후 라우팅 트리거가 하나라도 새로 발화하거나(S1·S9만이 아니다), 금지 변경이 생기면 즉시 사람에게 넘긴다.
+- 다음 경우에도 즉시 넘긴다: 어느 게이트든 INCONCLUSIVE(측정 문제는 사람 몫), 첫 시도와 B·정책 revision·측정기 fingerprint가 달라진 경우(spec 12.3 "같은 B"). `gate-feedback.json`의 `stop_if`에 같은 목록이, `forbidden_changes`에 12.2 금지 목록이, `attempts_remaining`은 `decideRetry` 결과에 들어 있다.
 - nyorori는 재시도 루프를 직접 돌리지 않는다. `decideRetry`(`src/ailoop`)는 AI 수정 루프를 돌리는 쪽이 매 시도 뒤 호출하는 라이브러리 함수이고, 게이트는 판정과 `gate-feedback.json`만 만든다.
 - 모든 재시도는 같은 병합 기준 B에 대해 측정한다.
 

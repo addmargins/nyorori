@@ -22,7 +22,11 @@ describe("differential findings", () => {
     const b = repo.commit({ "test/helpers.test.js": fnWithCogc("helper", 20) });
     const c = repo.commit({ "test/helpers.test.js": null, "src/helper.js": fnWithCogc("helper", 20) });
     const out = await run(repo, b, c, servicePolicy());
-    expect(gate(out, "complexity").violations.map((v) => v.reason)).toContain("OVER_LIMIT_NEW");
+    // The test allowance must not travel: the unit is judged as new (either reason is the same FAIL).
+    const reasons = gate(out, "complexity").violations.map((v) => v.reason);
+    expect(reasons).toHaveLength(1);
+    expect(["OVER_LIMIT_NEW", "UNMATCHED_OVER_BUDGET"]).toContain(reasons[0]);
+    expect(gate(out, "complexity").state).toBe("FAIL");
     expect(routed(out)).toContain("S11");
     expect(out.verdict.mergeAllowed).toBe(false);
     repo.dispose();

@@ -51,6 +51,27 @@ describe("nyorori CLI", () => {
     repo.dispose();
   });
 
+  it("refuses gate inputs inside the judged repository (64) unless --allow-repo-paths, and stamps authority local", () => {
+    const repo = new TestRepo();
+    const b = repo.commit({ "README.md": "x\n" });
+    const c = repo.commit({ "src/a.js": fnWithCogc("a", 3), "gate/policy.json": readFileSync(policyFile, "utf8") });
+    const inside = join(repo.dir, "gate", "policy.json");
+    const base = ["run", "--repo", repo.dir, "--base", b, "--candidate", c];
+    const refused = nyorori([...base, "--policy", inside]);
+    expect(refused.status).toBe(64);
+    expect(refused.stderr).toMatch(/inside the measured repository/);
+    expect(nyorori([...base, "--policy", policyFile, "--out", join(repo.dir, "out")]).status).toBe(64);
+
+    const out = join(dir, "out-authority");
+    expect(nyorori([...base, "--policy", inside, "--allow-repo-paths", "--out", out]).status).toBe(0);
+    const verdict = JSON.parse(readFileSync(join(out, "quality-gate.json"), "utf8"));
+    expect(verdict.authority).toBe("local");
+    expect(readFileSync(join(out, "gate-summary.md"), "utf8").split("\n")[0]).toContain("authority: local");
+    // The debugging path gives the same verdict without the worker.
+    expect(nyorori([...base, "--policy", policyFile, "--in-process"]).status).toBe(0);
+    repo.dispose();
+  });
+
   it("uses exit 64 for usage errors and 2 when the gate cannot run", () => {
     expect(nyorori(["run", "--repo", "/nonexistent"]).status).toBe(64);
     expect(nyorori(["nope"]).status).toBe(64);

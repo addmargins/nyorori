@@ -156,7 +156,7 @@ NYORORI_RUNNER_COMMIT=$(git rev-parse HEAD) node dist/cli.js serve --port 8080
 
 - **수정된 댓글의 명령은 효력이 없다.** 쓰기 권한이 있으면 남의 댓글을 고칠 수 있기 때문이다. 게이트 요약에 "edited command ignored; post a new comment"로 표시된다. 명령을 지우거나 고치면 PR이 다시 평가된다.
 - 인용(`>`와 그 연속 줄), 코드 블록(``` 와 ~~~, 들여쓰기 4칸), HTML 주석(`<!-- -->`) 안의 명령은 무시한다.
-- 승인자는 PR 작성자, commit 작성자·committer·공동 작성자, AI 에이전트 호출자, 봇, (merge group이면) 그룹의 다른 PR 작성자가 아니어야 한다. 로그인에 연결되지 않은 commit 이메일이나 `Co-authored-by`가 있으면 **독립 승인자가 두 명** 필요하다. commit이 250개 이상인 PR은 독립성을 확인할 수 없어 승인을 받지 않는다.
+- 승인자는 PR 작성자, commit 작성자·committer·공동 작성자, AI 에이전트 호출자, 봇, (merge group이면) 그룹의 다른 PR 작성자가 아니어야 한다. AI 루프 봇이 작성한 PR의 호출자는 PR assignee, PR 본문의 `@멘션`, `@봇`을 부른 댓글의 작성자, `closes #N`으로 연결된 이슈의 작성자에서 찾는다. 호출자를 하나도 찾지 못하면 **독립 승인자가 두 명** 필요하다. 로그인에 연결되지 않은 commit 이메일이나 `Co-authored-by`가 있으면 **독립 승인자가 두 명** 필요하다. commit이 250개 이상인 PR은 독립성을 확인할 수 없어 승인을 받지 않는다.
 - 게이트 요약은 현재 head SHA와 blob을 넣은 복사용 명령을 코드 블록 안에 보여 준다.
 
 ## Process isolation
@@ -188,6 +188,10 @@ npm test                         # NYORORI_CCCC로 cccc 위치 지정 (기본 /h
 
 ```bash
 npm run typecheck
+```
+
+```bash
+NYORORI_E2E_WORKER=1 npm test             # e2e를 전부 분리된 worker 경로로 실행 (느리다; CI 야간용)
 ```
 
 ```bash
