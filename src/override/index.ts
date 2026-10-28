@@ -11,9 +11,9 @@ import type {
   TriggerHit,
   UnmeasuredRecord,
 } from "../types.js";
-import { independenceProblem, inRoster, type PrIdentityContext, type TeamRosters } from "../review/independence.js";
+import { independenceProblem, inRoster, requiredApprovers, type PrIdentityContext, type TeamRosters } from "../review/independence.js";
 import { CommandError, findCommands, requireArgs } from "../waivers/command.js";
-import type { IssueComment } from "../waivers/index.js";
+import { EDITED_COMMAND_NOTE, screenComments, type IssueComment } from "../waivers/index.js";
 
 /** Reasons a gate owner may override. PARSE_ERROR_CANDIDATE only for listed parser-lag syntax. */
 export const OWNER_OVERRIDABLE: ReadonlySet<InconclusiveReason> = new Set<InconclusiveReason>([
@@ -125,7 +125,9 @@ export function applyOverrides(
 ): OverrideOutcome {
   const rejected: OverrideOutcome["rejected"] = [];
   const requests: OverrideRequest[] = [];
-  for (const c of comments) {
+  const screened = screenComments(comments);
+  for (const i of screened.ignored) rejected.push({ commentId: i.id, problem: EDITED_COMMAND_NOTE });
+  for (const c of screened.kept) {
     const parsed = parseOverrides(c);
     if (Array.isArray(parsed)) requests.push(...parsed);
     else rejected.push(parsed);
@@ -166,6 +168,23 @@ export function applyOverrides(
       continue;
     }
     valid.push(r);
+  }
+
+  // Unlinked commit identities: require two independent gate owners per override.
+  const needed = requiredApprovers(ctx.identity);
+  if (needed > 1) {
+    const owners = new Map<string, Set<string>>();
+    for (const r of valid) {
+      const k = `${r.file ?? "*"}\u0000${r.reason}`;
+      owners.set(k, (owners.get(k) ?? new Set()).add(r.owner.toLowerCase()));
+    }
+    for (let i = valid.length - 1; i >= 0; i--) {
+      const r = valid[i]!;
+      if (owners.get(`${r.file ?? "*"}\u0000${r.reason}`)!.size < needed) {
+        rejected.push({ commentId: r.commentId, problem: `needs ${needed} independent gate owners (unlinked commit identities)` });
+        valid.splice(i, 1);
+      }
+    }
   }
 
   const remaining: Inconclusive[] = [];

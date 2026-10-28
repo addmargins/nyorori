@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { evaluateSimplificationReview, parseReview, type ReviewComment, type SimplificationReviewInput } from "../../src/review/simplification.js";
 import type { TriggerHit } from "../../src/types.js";
-import { B, C, HEAD, identity, policy } from "./helpers.js";
+import { B, C, HEAD, identity, policy, withSha } from "./helpers.js";
 
 const S1: TriggerHit = { id: "S1", gate: "complexity", file: "src/plan.ts", evidence: "V 16→16, units 1→12", routing: true };
 const S4: TriggerHit = { id: "S4", gate: "lint-structure", file: "src/long.ts", evidence: "72 lines", routing: true };
@@ -12,7 +12,7 @@ const APPROVE = `/simplification-review NO_SIMPLIFICATION_NEEDED\n${RUBRIC_OK}\n
 const REQUIRE = "/simplification-review REQUIRED\nq1: pass\nq2: fail src/plan.ts:40 processPart2 is a single-use helper\nq3: pass\nq4: pass\nq5: fail src/plan.ts:10 five hops";
 
 function rc(id: number, login: string, body: string, headSha = HEAD): ReviewComment {
-  return { id, author: { login }, body, createdAt: `2026-10-28T12:${String(id).padStart(2, "0")}:00Z`, headSha };
+  return { id, author: { login }, body: withSha(body, headSha), createdAt: `2026-10-28T12:${String(id).padStart(2, "0")}:00Z`, headSha };
 }
 
 function input(over: Partial<SimplificationReviewInput> = {}): SimplificationReviewInput {
@@ -32,7 +32,7 @@ function input(over: Partial<SimplificationReviewInput> = {}): SimplificationRev
 
 describe("rubric parsing", () => {
   it("parses a complete rubric", () => {
-    const r = parseReview(REQUIRE);
+    const r = parseReview(withSha(REQUIRE, HEAD));
     expect(r && !("problem" in r) && r.answers[1]).toMatchObject({ pass: false, evidence: ["src/plan.ts:40"] });
   });
 
@@ -42,8 +42,9 @@ describe("rubric parsing", () => {
     ["REQUIRED without a core failure", "/simplification-review REQUIRED\nq1: pass\nq2: pass\nq3: pass\nq4: pass\nq5: fail a.ts:1"],
     ["approval contradicting a failure", "/simplification-review NO_SIMPLIFICATION_NEEDED\nq1: fail a.ts:1\nq2: pass\nq3: pass\nq4: pass\nq5: pass"],
     ["bad verdict", "/simplification-review LGTM\nq1: pass"],
+    ["missing sha", "/simplification-review NO_SIMPLIFICATION_NEEDED\nq1: pass\nq2: pass\nq3: pass\nq4: pass\nq5: pass"],
   ])("rejects %s", (_l, body) => {
-    expect(parseReview(body)).toHaveProperty("problem");
+    expect(parseReview(_l === "missing sha" ? body : withSha(body, HEAD))).toHaveProperty("problem");
   });
 
   it("returns null when there is no command", () => {
@@ -135,8 +136,8 @@ describe("G6 simplification review", () => {
   });
 
   it("D13: empty or duplicate dispositions are rejected", () => {
-    expect(parseReview(`/simplification-review NO_SIMPLIFICATION_NEEDED\n${RUBRIC_OK}\nS1:   `)).toHaveProperty("problem");
-    expect(parseReview(`/simplification-review NO_SIMPLIFICATION_NEEDED\n${RUBRIC_OK}\nS1: a\nS1: b`)).toHaveProperty("problem");
+    expect(parseReview(withSha(`/simplification-review NO_SIMPLIFICATION_NEEDED\n${RUBRIC_OK}\nS1:   `, HEAD))).toHaveProperty("problem");
+    expect(parseReview(withSha(`/simplification-review NO_SIMPLIFICATION_NEEDED\n${RUBRIC_OK}\nS1: a\nS1: b`, HEAD))).toHaveProperty("problem");
   });
 
   it("D13: an approval on an old head does not cover a trigger that fired later", () => {

@@ -7,8 +7,8 @@ import type { GateMode, GateResult, MeasurementFingerprint, TriggerHit, Violatio
 import { NON_ROUTING_TRIGGERS } from "../types.js";
 import { finalizeGateResult } from "../report/result.js";
 import { CommandError, findCommands } from "../waivers/command.js";
-import type { IssueComment } from "../waivers/index.js";
-import { independenceProblem, inRoster, type PrIdentityContext, type TeamRosters } from "./independence.js";
+import { EDITED_COMMAND_NOTE, screenComments, type IssueComment } from "../waivers/index.js";
+import { independenceProblem, inRoster, requiredApprovers, unresolvedIdentities, type PrIdentityContext, type TeamRosters } from "./independence.js";
 
 export type ReviewVerdict = "NO_SIMPLIFICATION_NEEDED" | "SUGGESTED" | "REQUIRED";
 
@@ -22,12 +22,17 @@ export interface RubricAnswer {
 
 export interface ParsedReview {
   verdict: ReviewVerdict;
+  /** PR head the reviewer looked at (`sha=`); the approval binds to it. */
+  sha: string;
   answers: RubricAnswer[];
   /** One-line disposition per trigger ID ("S1: helpers are named pricing rules"), ruling D13. */
   dispositions: Record<string, string>;
 }
 
-/** A review comment plus the PR head SHA it was posted against (recorded by the service). */
+/**
+ * A review comment plus the PR head the service had observed when it was
+ * posted. The approval itself binds to the explicit `sha=` in the command.
+ */
 export interface ReviewComment extends IssueComment {
   headSha: string;
 }
@@ -46,7 +51,7 @@ const EVIDENCE = /^[^\s:]+:\d+$/;
  * Format (each rubric item is pass/fail so polarity never depends on how the
  * question is phrased):
  *
- *   /simplification-review REQUIRED
+ *   /simplification-review REQUIRED sha=<40-hex PR head reviewed>
  *   q1: pass
  *   q2: fail src/billing/plan.ts:42 processPart2 is a single-use helper dragging 5 locals
  *   q3: pass
@@ -73,6 +78,10 @@ export function parseReview(body: string): ParsedReview | { problem: string } | 
     if (verdict !== "NO_SIMPLIFICATION_NEEDED" && verdict !== "SUGGESTED" && verdict !== "REQUIRED") {
       throw new CommandError("verdict must be NO_SIMPLIFICATION_NEEDED, SUGGESTED or REQUIRED");
     }
+    if (cmd.positional.length > 1) throw new CommandError(`unexpected "${cmd.positional[1]}"`);
+    const sha = (cmd.args.sha ?? "").toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new CommandError("missing sha=<40-hex PR head you reviewed>");
+    for (const k of Object.keys(cmd.args)) if (k !== "sha") throw new CommandError(`unknown argument "${k}"`);
     const answers = new Map<number, RubricAnswer>();
     const dispositions: Record<string, string> = {};
     for (const raw of cmd.bodyLines) {
@@ -105,7 +114,7 @@ export function parseReview(body: string): ParsedReview | { problem: string } | 
     if (verdict === "NO_SIMPLIFICATION_NEEDED" && coreFails.length > 0) {
       throw new CommandError("NO_SIMPLIFICATION_NEEDED contradicts a failed item among q1-q4");
     }
-    return { verdict, answers: list, dispositions };
+    return { verdict, sha, answers: list, dispositions };
   } catch (e) {
     return { problem: (e as Error).message };
   }
@@ -181,7 +190,9 @@ export function evaluateSimplificationReview(input: SimplificationReviewInput): 
   const problems: Array<{ commentId: string; problem: string }> = [];
   const latestByReviewer = new Map<string, AcceptedReview>();
   const triggeredFiles = routing.every((t) => t.file) ? new Set(routing.map((t) => t.file!)) : null;
-  const ordered = [...input.comments].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const screened = screenComments(input.comments);
+  for (const i of screened.ignored) problems.push({ commentId: i.id, problem: EDITED_COMMAND_NOTE });
+  const ordered = screened.kept.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   for (const c of ordered) {
     const parsed = parseReview(c.body);
     if (parsed === null) continue;
@@ -202,7 +213,7 @@ export function evaluateSimplificationReview(input: SimplificationReviewInput): 
     latestByReviewer.set(c.author.login.toLowerCase(), {
       reviewer: c.author.login,
       verdict: parsed.verdict,
-      sha: c.headSha,
+      sha: parsed.sha,
       commentId,
       dispositions: parsed.dispositions,
     });
@@ -234,12 +245,15 @@ export function evaluateSimplificationReview(input: SimplificationReviewInput): 
         message: `simplification requested by ${requiredBy.map((r) => r.reviewer).join(", ")}`,
         details: { reviews: requiredBy },
       });
-    } else if (approvedBy.length === 0) {
+    } else if (approvedBy.length < requiredApprovers(input.identity)) {
       violations.push({
         gate: "simplification-review",
         reason: "REVIEW_REQUIRED",
         file: "",
-        message: `simplification review required: ${ids}`,
+        message:
+          approvedBy.length > 0
+            ? `simplification review needs a second independent approver (unlinked commit identities: ${unresolvedIdentities(input.identity).join(", ")}): ${ids}`
+            : `simplification review required: ${ids}`,
         details: { stale_reviews: stale.map((r) => ({ reviewer: r.reviewer, sha: r.sha })), rejected_reviews: problems },
       });
     }
@@ -256,6 +270,9 @@ export function evaluateSimplificationReview(input: SimplificationReviewInput): 
     triggers: routing,
     applicable: routing.length > 0,
     observe: {
+      head_sha: input.headSha,
+      fired_triggers: firedIds,
+      required_approvers: requiredApprovers(input.identity),
       approvals: approvedBy.map((r) => ({ reviewer: r.reviewer, verdict: r.verdict, sha: r.sha })),
       stale_reviews: stale.map((r) => ({ reviewer: r.reviewer, sha: r.sha })),
       rejected_reviews: problems,

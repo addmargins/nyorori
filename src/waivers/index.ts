@@ -9,11 +9,13 @@ import {
   independenceProblem,
   inRoster,
   isAiLoopBot,
+  requiredApprovers,
+  unresolvedIdentities,
   type Actor,
   type PrIdentityContext,
   type TeamRosters,
 } from "../review/independence.js";
-import { CommandError, findCommands, requireArgs } from "./command.js";
+import { CommandError, findCommands, hasGateCommand, requireArgs } from "./command.js";
 
 export interface IssueComment {
   id: number | string;
@@ -21,6 +23,37 @@ export interface IssueComment {
   body: string;
   /** ISO-8601 creation time. */
   createdAt: string;
+  /** ISO-8601 last edit time (GitHub `updated_at`). */
+  updatedAt?: string;
+}
+
+export const EDITED_COMMAND_NOTE = "edited command ignored; post a new comment";
+
+/** GitHub sets updated_at a moment after created_at on some writes; anything later is an edit. */
+export const EDIT_JITTER_MS = 2000;
+
+/**
+ * Anyone with write access can edit another user's comment, so an edited
+ * comment proves nothing about its author. Gate commands count only from
+ * comments that were never edited; the author posts a new comment instead.
+ */
+export function isEdited(c: Pick<IssueComment, "createdAt" | "updatedAt">): boolean {
+  if (!c.updatedAt) return false;
+  const created = Date.parse(c.createdAt);
+  const updated = Date.parse(c.updatedAt);
+  if (Number.isNaN(created) || Number.isNaN(updated)) return true;
+  return updated - created > EDIT_JITTER_MS;
+}
+
+/** Splits comments into those whose commands count and edited command comments (reported, ignored). */
+export function screenComments<T extends IssueComment>(comments: readonly T[]): { kept: T[]; ignored: Array<{ id: string; author: string }> } {
+  const kept: T[] = [];
+  const ignored: Array<{ id: string; author: string }> = [];
+  for (const c of comments) {
+    if (!isEdited(c)) kept.push(c);
+    else if (hasGateCommand(c.body)) ignored.push({ id: String(c.id), author: c.author.login });
+  }
+  return { kept, ignored };
 }
 
 /** `tests` is waivable only for TESTS_FAILED_ON_BASE (ruling D14); every other G4 reason is not. */
@@ -92,6 +125,8 @@ export interface WaiverRequest {
 
 export interface ValidWaiver extends WaiverRequest {
   approver: string;
+  /** Every independent approver, in approval order (two are needed when identities are unresolved). */
+  approvers?: string[];
   approvedAt: string;
   expiresAt: string;
   /** Blob the approver saw. */
@@ -230,7 +265,9 @@ export function evaluateWaivers(
   const requests = new Map<string, WaiverRequest>();
   const rejected: WaiverRejection[] = [];
   const approvals: Approval[] = [];
-  const ordered = [...comments].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const screened = screenComments(comments);
+  for (const i of screened.ignored) rejected.push({ commentId: i.id, problem: EDITED_COMMAND_NOTE });
+  const ordered = screened.kept.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   for (const c of ordered) {
     const req = parseWaiverRequest(c, ctx.policy);
     if (Array.isArray(req)) for (const r of req) requests.set(r.id, r);
@@ -286,18 +323,30 @@ export function evaluateWaivers(
       reject("waiver expired");
       continue;
     }
-    if (!valid.has(req.id)) {
+    const prior = valid.get(req.id);
+    if (!prior) {
       valid.set(req.id, {
         ...req,
         approver: ap.approver.login,
+        approvers: [ap.approver.login],
         approvedAt: ap.approvedAt,
         expiresAt: expiresAt.toISOString(),
         blob: ap.blob,
         ...(carried ? { currentBlob: carried } : {}),
       });
+    } else if (!prior.approvers!.some((a) => a.toLowerCase() === ap.approver.login.toLowerCase())) {
+      prior.approvers!.push(ap.approver.login);
+      if (expiresAt.toISOString() < prior.expiresAt) prior.expiresAt = expiresAt.toISOString();
     }
   }
-  return { valid: [...valid.values()], rejected };
+  // Unlinked commit identities: one approval could come from that person (independence.requiredApprovers).
+  const needed = requiredApprovers(ctx.identity);
+  const out: ValidWaiver[] = [];
+  for (const w of valid.values()) {
+    if (w.approvers!.length >= needed) out.push(w);
+    else rejected.push({ commentId: w.commentId, waiverId: w.id, problem: `needs ${needed} independent approvers (unlinked commit identities: ${unresolvedIdentities(ctx.identity).join(", ")})` });
+  }
+  return { valid: out, rejected };
 }
 
 export interface WaiverApplication {

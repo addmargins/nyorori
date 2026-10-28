@@ -439,12 +439,10 @@ async function assembleManifest(
     }
     if (matchesAny(primaryPath, policy.scope.test_globs)) entry.isTest = true;
 
-    // A measurable file whose path the work dir cannot hold (ENAMETOOLONG). No
-    // dedicated reason code exists yet; INVALID_ENCODING is the author-fixable
-    // "this path is unusable" bucket.
+    // A measurable file whose path the work dir cannot hold (ENAMETOOLONG).
     if (c && jc?.tooLong) {
       problems.push({
-        reason: "INVALID_ENCODING",
+        reason: "PATH_TOO_LONG",
         path: c.path,
         detail: `path too long for the gate's work dir (${jc.tooLong}); rename it`,
       });
@@ -569,6 +567,7 @@ export function problemIsAuthorFixable(reason: InconclusiveReason): boolean {
     reason === "LFS_POINTER" ||
     reason === "FILE_TOO_LARGE" ||
     reason === "JSX_IN_JS" ||
-    reason === "INVALID_ENCODING"
+    reason === "INVALID_ENCODING" ||
+    reason === "PATH_TOO_LONG"
   );
 }

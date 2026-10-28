@@ -19,7 +19,14 @@ export interface PrIdentityContext {
   commits: CommitIdentity[];
   /** People who invoked or assigned the AI agent that produced the PR. */
   agentInvokers: string[];
+  /** Authors of the other PRs in the same merge group; excluded like the PR author. */
+  additionalAuthors?: string[];
+  /** True when the commit list may be incomplete (GitHub lists at most 250 PR commits). */
+  commitsTruncated?: boolean;
 }
+
+/** GitHub's "list commits on a pull request" stops at 250 commits. */
+export const MAX_ENUMERABLE_COMMITS = 250;
 
 export interface Actor {
   login: string;
@@ -81,7 +88,7 @@ export interface Participants {
 }
 
 export function participants(ctx: PrIdentityContext): Participants {
-  const logins = new Set<string>([norm(ctx.prAuthor), ...ctx.agentInvokers.map(norm)]);
+  const logins = new Set<string>([norm(ctx.prAuthor), ...ctx.agentInvokers.map(norm), ...(ctx.additionalAuthors ?? []).map(norm)]);
   const emails = new Set<string>();
   const addEmail = (e?: string | null) => {
     if (!e) return;
@@ -101,6 +108,52 @@ export function participants(ctx: PrIdentityContext): Participants {
   return { logins, emails };
 }
 
+/** Why independence cannot be judged at all for this PR, or null. */
+export function identityProblem(ctx: PrIdentityContext): string | null {
+  if (ctx.commitsTruncated || ctx.commits.length >= MAX_ENUMERABLE_COMMITS) {
+    return `independence unknown: the PR has ${MAX_ENUMERABLE_COMMITS} or more commits and GitHub does not list them all; split the PR or squash`;
+  }
+  return null;
+}
+
+const PLATFORM_EMAILS = new Set(["noreply@github.com"]);
+
+/**
+ * Commit identities known only by an email that maps to no login: an
+ * unlinked commit author/committer, or a Co-authored-by trailer that is not a
+ * GitHub noreply address and not the email of a linked commit author. The
+ * service cannot tell whether a reviewer is behind such an email.
+ */
+export function unresolvedIdentities(ctx: PrIdentityContext): string[] {
+  const linked = new Set<string>();
+  for (const c of ctx.commits) {
+    if (c.authorLogin && c.authorEmail) linked.add(norm(c.authorEmail));
+    if (c.committerLogin && c.committerEmail) linked.add(norm(c.committerEmail));
+  }
+  const out = new Set<string>();
+  const check = (email: string | null | undefined, login: string | null | undefined) => {
+    if (!email || login) return;
+    const e = norm(email);
+    if (PLATFORM_EMAILS.has(e) || loginFromEmail(e) || linked.has(e)) return;
+    out.add(e);
+  };
+  for (const c of ctx.commits) {
+    check(c.authorEmail, c.authorLogin);
+    if (!c.committerLogin || !PLATFORM_COMMITTERS.has(norm(c.committerLogin))) check(c.committerEmail, c.committerLogin);
+    for (const e of coAuthorEmails(c.message)) check(e, null);
+  }
+  return [...out].sort();
+}
+
+/**
+ * Fail-closed rule for unresolved identities: when any participant is known
+ * only by an unmapped email, one approval could come from that person, so
+ * two independent approvers are required.
+ */
+export function requiredApprovers(ctx: PrIdentityContext): 1 | 2 {
+  return unresolvedIdentities(ctx).length > 0 ? 2 : 1;
+}
+
 /**
  * Returns why `actor` may not approve, or null when they are independent.
  * Roster membership is checked separately by the caller.
@@ -108,6 +161,8 @@ export function participants(ctx: PrIdentityContext): Participants {
 export function independenceProblem(actor: Actor, ctx: PrIdentityContext, policy: Policy): string | null {
   const login = norm(actor.login);
   if (isBot(login, policy)) return "bots cannot approve";
+  const unknown = identityProblem(ctx);
+  if (unknown) return unknown;
   if (login === norm(ctx.prAuthor)) return "the PR author cannot approve";
   if (ctx.agentInvokers.some((i) => norm(i) === login)) return "the AI agent invoker cannot approve";
   const p = participants(ctx);

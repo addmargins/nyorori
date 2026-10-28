@@ -230,9 +230,15 @@ function isGraphFile(path: string): boolean {
   return CODE_EXTENSIONS.some((ext) => path.endsWith(ext));
 }
 
-/** Every tsconfig in the tree: `extends` chains and nested packages carry path aliases. */
-function isTsconfig(path: string): boolean {
-  return /^tsconfig.*\.json$/.test(basename(path));
+/**
+ * Resolution data G3 reads (never executes): every tsconfig (`extends` chains and
+ * nested aliases) and every package.json outside node_modules (`imports`, `exports`,
+ * self-reference by name).
+ */
+function isResolutionConfig(path: string): boolean {
+  const name = basename(path);
+  if (/^tsconfig.*\.json$/.test(name)) return true;
+  return name === "package.json" && !path.split("/").includes("node_modules");
 }
 
 /** G3 needs the whole module graph of both trees, not only the changed files. */
@@ -242,7 +248,7 @@ export async function depsGate(ctx: RunContext): Promise<GateDraft> {
   if (!draft.applicable) return draft;
   const root = await mkdtemp(join(opts.workDir, "deps-"));
   try {
-    const keep = (p: string) => isGraphFile(p) || isTsconfig(p);
+    const keep = (p: string) => isGraphFile(p) || isResolutionConfig(p);
     const skipped: Array<{ side: Side; path: string; reason: string }> = [];
     const tree = (side: Side, sha: string) =>
       materializeFullTree(opts.repoDir, sha, join(root, side), keep, {

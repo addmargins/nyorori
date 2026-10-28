@@ -3,13 +3,13 @@
 // forbidden layer edges (block from P2, observe before), and the S3
 // module-split and S11 unmeasured-target triggers.
 
-import { posix } from "node:path";
 import type { Policy } from "../../policy/schema.js";
 import type { GateState, Inconclusive, TriggerHit, Violation } from "../../types.js";
 import { matchesAny } from "../../util/glob.js";
 import { looksInternal, readAliasSpec, type AliasSpec } from "./aliases.js";
 import { changedComponents, cyclicComponents, findNewCycles, type NewCycle } from "./cycles.js";
-import { buildModuleGraph, CODE_EXTENSIONS, type Cruiser, type DepEdge, type ModuleGraph } from "./graph.js";
+import { buildModuleGraph, type Cruiser, type DepEdge, type ModuleGraph } from "./graph.js";
+import { candidateTargets, classifyTarget, readPackages, type PackageInfo, type TargetContext } from "./targets.js";
 
 export interface EvaluateDepsInput {
   /** Directories holding the complete code tree of B and C (all code files, not only changed ones). */
@@ -68,7 +68,9 @@ export async function evaluateDeps(input: EvaluateDepsInput): Promise<DepsEvalua
       observe: emptyObserve(),
     };
   }
-  const result = compareGraphs(gB, gC, { ...input, aliases });
+  // Both trees' package.json maps: C's is what runs, B's is what was trusted.
+  const packages = [...readPackages(input.treeB), ...readPackages(input.treeC)];
+  const result = compareGraphs(gB, gC, { ...input, aliases, packages });
   result.observe.ignored_tsconfig_extends = aliases.ignoredExtends;
   return result;
 }
@@ -90,7 +92,10 @@ function emptyObserve(): DepsEvaluation["observe"] {
 export function compareGraphs(
   gB: ModuleGraph,
   gC: ModuleGraph,
-  input: Pick<EvaluateDepsInput, "policy" | "changedPaths" | "renames" | "allFilesC"> & { aliases?: AliasSpec },
+  input: Pick<EvaluateDepsInput, "policy" | "changedPaths" | "renames" | "allFilesC"> & {
+    aliases?: AliasSpec;
+    packages?: readonly PackageInfo[];
+  },
 ): DepsEvaluation {
   const { policy } = input;
   const toB = (c: string): string | undefined => {
@@ -107,8 +112,15 @@ export function compareGraphs(
 
   cycleFindings(gB, gC, toB, violations, triggers, observe);
   forbiddenEdges(gB, gC, toB, policy, violations, observe);
-  unmeasuredTargets(gB, gC, toB, input.allFilesC, triggers, observe);
-  internalLookingUnresolved(gB, gC, toB, input.aliases, triggers, observe);
+  const allFiles = input.allFilesC ? new Set(input.allFilesC) : null;
+  const targetCtx: TargetContext = {
+    packages: input.packages ?? [],
+    ...(input.aliases ? { aliases: input.aliases } : {}),
+    allFiles,
+    baseUrlEntries: baseUrlEntries(input.aliases, [...gC.nodes, ...(input.allFilesC ?? [])]),
+  };
+  const routed = unmeasuredTargets(gB, gC, toB, targetCtx, triggers, observe);
+  internalLookingUnresolved(gB, gC, toB, input.aliases, targetCtx.baseUrlEntries, routed, triggers, observe);
   moduleSplitTriggers(gB, gC, toB, input, triggers, observe);
   return { violations, triggers, inconclusive: [], observe };
 }
@@ -259,54 +271,42 @@ function forbiddenEdges(
 }
 
 /**
- * Data and asset formats that bundlers load as data. Anything else outside
- * the code extensions (.txt, .md, .html, .node, .wasm, extensionless) is
- * code the gate cannot measure: CommonJS `require()` runs unknown extensions
- * as JavaScript (audit F6).
+ * S11 for a new import whose target is a repository file the gate does not
+ * measure, however the specifier reaches it (see targets.ts). Returns the
+ * (from, specifier) pairs it routed so they are not also reported as S3.
  */
-const DATA_EXTENSIONS = new Set([
-  ".json", ".jsonc", ".json5", ".css", ".scss", ".sass", ".less", ".styl", ".pcss", ".postcss",
-  ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".bmp", ".tif", ".tiff",
-  ".woff", ".woff2", ".ttf", ".otf", ".eot", ".mp3", ".mp4", ".webm", ".wav", ".ogg", ".m4a", ".mov",
-  ".graphql", ".gql", ".yaml", ".yml", ".toml", ".csv", ".tsv",
-]);
-/** Bundler queries that import a file as a string or URL, never as code. */
-const DATA_QUERY_RE = /[?&](raw|url|inline)\b/;
-
 function unmeasuredTargets(
   gB: ModuleGraph,
   gC: ModuleGraph,
   toB: (c: string) => string | undefined,
-  allFilesC: readonly string[] | undefined,
+  ctx: TargetContext,
   triggers: TriggerHit[],
   observe: DepsEvaluation["observe"],
-): void {
+): Set<string> {
   const before = new Set(gB.edges.map((e) => edgeKey(e.from, e.specifier)));
-  const allFiles = allFilesC ? new Set(allFilesC) : null;
-  const seen = new Set<string>();
+  const routed = new Set<string>();
   for (const e of gC.edges) {
-    if (e.local || !/^\.{1,2}\//.test(e.specifier)) continue;
+    if (e.local) continue;
+    const k = edgeKey(e.from, e.specifier);
+    if (routed.has(k)) continue;
     const from = toB(e.from);
     if (from !== undefined && before.has(edgeKey(from, e.specifier))) continue;
-    if (seen.has(edgeKey(e.from, e.specifier))) continue;
-    seen.add(edgeKey(e.from, e.specifier));
-    if (DATA_QUERY_RE.test(e.specifier)) continue;
-    const bare = e.specifier.split(/[?#]/)[0]!;
-    const target = posix.normalize(posix.join(posix.dirname(e.from), bare));
-    const ext = posix.extname(target).toLowerCase();
-    let unmeasured: boolean;
-    if (ext === "") unmeasured = allFiles?.has(target) ?? false;
-    else unmeasured = !CODE_EXTENSIONS.includes(ext) && !DATA_EXTENSIONS.has(ext);
-    if (!unmeasured) continue;
-    observe.unmeasured_targets.push({ from: e.from, specifier: e.specifier });
-    triggers.push({
-      id: "S11",
-      gate: GATE,
-      file: e.from,
-      evidence: `${e.from} imports ${e.specifier}, a file the gate does not measure (${ext || "no extension"})`,
-      routing: true,
-    });
+    for (const c of candidateTargets(e.from, e.specifier, ctx)) {
+      const v = classifyTarget(c, ctx.allFiles);
+      if (!v.unmeasured) continue;
+      routed.add(k);
+      observe.unmeasured_targets.push({ from: e.from, specifier: e.specifier });
+      triggers.push({
+        id: "S11",
+        gate: GATE,
+        file: e.from,
+        evidence: `${e.from} imports ${e.specifier} → ${c.path} (${c.via}), a file the gate does not measure (${v.reason})`,
+        routing: true,
+      });
+      break;
+    }
   }
+  return routed;
 }
 
 /** Bare specifiers that look like aliases or baseUrl paths but did not resolve: edges the graph may be missing. */
@@ -315,19 +315,15 @@ function internalLookingUnresolved(
   gC: ModuleGraph,
   toB: (c: string) => string | undefined,
   aliases: AliasSpec | undefined,
+  baseEntries: ReadonlySet<string>,
+  alreadyRouted: ReadonlySet<string>,
   triggers: TriggerHit[],
   observe: DepsEvaluation["observe"],
 ): void {
   if (!aliases) return;
-  const baseEntries = new Set<string>();
-  if (aliases.baseUrl !== null) {
-    const prefix = aliases.baseUrl === "" ? "" : `${aliases.baseUrl}/`;
-    for (const n of gC.nodes) {
-      if (n.startsWith(prefix)) baseEntries.add(n.slice(prefix.length).split("/")[0]!.replace(/\.[^.]+$/, ""));
-    }
-  }
   const before = new Set(gB.unresolvedBare.map((u) => edgeKey(u.from, u.specifier)));
   const fresh = gC.unresolvedBare.filter((u) => {
+    if (alreadyRouted.has(edgeKey(u.from, u.specifier))) return false;
     if (!looksInternal(u.specifier, aliases, baseEntries)) return false;
     const from = toB(u.from);
     return from === undefined || !before.has(edgeKey(from, u.specifier));
@@ -344,6 +340,20 @@ function internalLookingUnresolved(
       .join(", ")}`,
     routing: true,
   });
+}
+
+/** First path segments (extension dropped for files) under baseUrl. */
+function baseUrlEntries(aliases: AliasSpec | undefined, paths: readonly string[]): Set<string> {
+  const out = new Set<string>();
+  if (!aliases || aliases.baseUrl === null) return out;
+  const prefix = aliases.baseUrl === "" ? "" : `${aliases.baseUrl}/`;
+  for (const n of paths) {
+    if (!n.startsWith(prefix)) continue;
+    const first = n.slice(prefix.length).split("/");
+    out.add(first[0]!);
+    if (first.length === 1) out.add(first[0]!.replace(/\.[^.]+$/, ""));
+  }
+  return out;
 }
 
 function isTest(path: string, globs: readonly string[]): boolean {

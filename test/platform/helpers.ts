@@ -40,6 +40,8 @@ export const identity: PrIdentityContext = {
       message: "fix\n\nCo-authored-by: Grace <grace@example.com>\nCo-authored-by: Heidi <123+heidi@users.noreply.github.com>",
     },
     { sha: "f".repeat(40), authorLogin: "committer-ivan", committerLogin: "committer-ivan" },
+    // Grace's trailer email is linked through her own commit, so no identity is unresolved.
+    { sha: "a".repeat(40), authorLogin: "grace", authorEmail: "grace@example.com", committerLogin: "grace", committerEmail: "grace@example.com" },
   ],
 };
 
@@ -74,4 +76,9 @@ export function result(over: Partial<GateResultInput> = {}): GateResult {
 
 export function comment(id: number, login: string, body: string, createdAt = `2026-10-28T10:${String(id).padStart(2, "0")}:00Z`) {
   return { id, author: { login }, body, createdAt };
+}
+
+/** Adds the mandatory `sha=` to a /simplification-review command (round-3 item 8). */
+export function withSha(body: string, sha: string): string {
+  return body.replace(/^(\/simplification-review \S+)/m, `$1 sha=${sha}`);
 }

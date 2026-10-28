@@ -14,7 +14,7 @@ import { createWebhookServer, signatureFor } from "../../src/service/http.js";
 import type { GateId, TriggerHit } from "../../src/types.js";
 import { applyWaivers, evaluateWaivers, isWaivable, parseWaiverRequest } from "../../src/waivers/index.js";
 import { applyTestApprovals, testApprovalKey } from "../../src/waivers/test-approval.js";
-import { B, BLOB, BLOB2, C, HEAD, REV, RUNNER, comment, identity, policy, result, violation } from "./helpers.js";
+import { B, BLOB, BLOB2, C, HEAD, REV, RUNNER, comment, identity, policy, result, violation, withSha } from "./helpers.js";
 
 const WF = { repository: "org/gate", path: ".github/workflows/gate-untrusted-tests.yml", shas: ["9".repeat(40)] };
 const svc = (gate: GateId, over: Partial<Parameters<typeof result>[0]> = {}): SubmittedResult => ({ source: "service", result: result({ gate, ...over }) });
@@ -113,7 +113,7 @@ describe("D13 via aggregation: review must dispose of every trigger", () => {
   it("a degraded-gate S6 needs an explicit disposition", () => {
     const p = policy({ complexity: { mode: "degraded" } });
     const rubric = "q1: pass\nq2: pass\nq3: pass\nq4: pass\nq5: pass";
-    const review = (body: string): ReviewComment => ({ id: 9, author: { login: "rev-alice" }, body, createdAt: "2026-10-28T13:00:00Z", headSha: HEAD });
+    const review = (body: string): ReviewComment => ({ id: 9, author: { login: "rev-alice" }, body: withSha(body, HEAD), createdAt: "2026-10-28T13:00:00Z", headSha: HEAD });
     const run = (body: string) =>
       agg(swap("complexity", svc("complexity", { violations: [violation()] })), { policy: p, review: { headSha: HEAD, comments: [review(body)], identity } });
     expect(run(`/simplification-review NO_SIMPLIFICATION_NEEDED\n${rubric}`).state).toBe("FAIL");
@@ -175,7 +175,7 @@ describe("D15: waiver carry-over to a new blob", () => {
 describe("F12: gate-owner test approvals", () => {
   const removed = violation({ gate: "tests", reason: "TEST_REMOVED", unit: "test/a.test.ts::adds", file: "test/a.test.ts", metric: undefined, after: undefined });
   const key = testApprovalKey(removed);
-  const rc = (login: string, headSha = HEAD, body = `/gate-approve-tests key="${key}" note="moved to b.test.ts"`): ReviewComment => ({
+  const rc = (login: string, headSha = HEAD, body = `/gate-approve-tests key="${key}" sha=${headSha} note="moved to b.test.ts"`): ReviewComment => ({
     id: 3, author: { login }, body, createdAt: "2026-10-28T12:00:00Z", headSha,
   });
   const ctx = { policy: policy(), identity, headSha: HEAD };
@@ -195,7 +195,7 @@ describe("F12: gate-owner test approvals", () => {
     expect(applyTestApprovals([removed], [rc("owner-dave")], { ...ctx, identity: { ...identity, agentInvokers: ["owner-dave"] } }).applied).toHaveLength(0);
     expect(applyTestApprovals([removed], [rc("owner-dave", "0".repeat(40))], ctx).rejected[0]!.problem).toMatch(/another head/);
     const focus = { ...removed, reason: "TEST_FOCUS_OR_SKIP" as const };
-    expect(applyTestApprovals([focus], [rc("owner-dave", HEAD, `/gate-approve-tests key="${testApprovalKey(focus)}" note=x`)], ctx).applied).toHaveLength(0);
+    expect(applyTestApprovals([focus], [rc("owner-dave", HEAD, `/gate-approve-tests key="${testApprovalKey(focus)}" sha=${HEAD} note=x`)], ctx).applied).toHaveLength(0);
   });
 });
 

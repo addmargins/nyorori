@@ -112,6 +112,7 @@ export type InconclusiveReason =
   | "UNREGISTERED_EXTENSION"
   | "JSX_IN_JS"
   | "INVALID_ENCODING"
+  | "PATH_TOO_LONG"
   | "FINGERPRINT_MISMATCH"
   | "TOOL_ERROR"
   | "NO_TESTS_EXECUTED"

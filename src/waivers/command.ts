@@ -55,19 +55,82 @@ function tokenize(rest: string): string[] {
   return tokens;
 }
 
-/** Finds every occurrence of `/name` in a comment body. */
-export function findCommands(body: string, name: string): ParsedCommand[] {
-  const lines = body.replace(/\r\n?/g, "\n").split("\n");
-  const out: ParsedCommand[] = [];
-  let inFence = false;
-  for (let idx = 0; idx < lines.length; idx++) {
-    const line = lines[idx]!;
-    const trimmed = line.trimStart();
-    if (/^(```|~~~)/.test(trimmed)) {
-      inFence = !inFence;
+/**
+ * Lines a reader actually sees as plain paragraph text, per CommonMark as
+ * GitHub renders it; hidden or literal lines become null. Hidden: HTML
+ * comments (`<!-- … -->`, unterminated ones run to the end). Literal or
+ * quoted: fenced code (``` or ~~~, any info string, closed only by the same
+ * character repeated at least as often), indented code (4+ columns after a
+ * blank line or at the start), blockquotes and their lazy continuation lines.
+ */
+export function visibleLines(body: string): Array<string | null> {
+  const text = body.replace(/\r\n?/g, "\n").replace(/<!--[\s\S]*?(?:-->|$)/g, (m) => m.replace(/[^\n]/g, " ").replace(/^ /, "\u0000"));
+  const lines = text.split("\n");
+  const out: Array<string | null> = [];
+  let fence: { ch: string; len: number } | null = null;
+  let quote = false;
+  let prevBlank = true;
+  for (const raw of lines) {
+    // A line that was (part of) an HTML comment is hidden even if the comment
+    // left other characters on it, so `x <!-- -->/cmd` tricks gain nothing.
+    const hiddenByComment = raw.includes("\u0000");
+    const line = raw.replace(/\u0000/g, " ");
+    const expanded = line.replace(/\t/g, "    ");
+    const indent = expanded.length - expanded.trimStart().length;
+    const trimmed = expanded.trimStart();
+    const blank = trimmed.length === 0;
+    if (fence) {
+      const close = new RegExp(`^${fence.ch === "`" ? "`" : "~"}{${fence.len},}\\s*$`);
+      if (indent < 4 && close.test(trimmed)) fence = null;
+      out.push(null);
+      prevBlank = false;
       continue;
     }
-    if (inFence || trimmed.startsWith(">")) continue;
+    const open = indent < 4 ? /^(`{3,}|~{3,})(.*)$/.exec(trimmed) : null;
+    if (open && !(open[1]![0] === "`" && open[2]!.includes("`"))) {
+      fence = { ch: open[1]![0]!, len: open[1]!.length };
+      quote = false;
+      out.push(null);
+      prevBlank = false;
+      continue;
+    }
+    if (blank) {
+      quote = false;
+      out.push(hiddenByComment ? null : "");
+      prevBlank = !hiddenByComment;
+      continue;
+    }
+    if (indent < 4 && trimmed.startsWith(">")) {
+      quote = true;
+      out.push(null);
+      prevBlank = false;
+      continue;
+    }
+    if (quote) {
+      out.push(null); // lazy continuation of the blockquote paragraph
+      prevBlank = false;
+      continue;
+    }
+    if (indent >= 4 && prevBlank) {
+      out.push(null); // indented code block
+      continue;
+    }
+    out.push(hiddenByComment ? null : line);
+    prevBlank = false;
+  }
+  return out;
+}
+
+/** Finds every occurrence of `/name` in a comment body. */
+export function findCommands(body: string, name: string): ParsedCommand[] {
+  const lines = visibleLines(body);
+  const out: ParsedCommand[] = [];
+  for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx];
+    if (line === null || line === undefined) continue;
+    const expanded = line.replace(/\t/g, "    ");
+    if (expanded.length - expanded.trimStart().length >= 4) continue;
+    const trimmed = expanded.trimStart();
     const prefix = `/${name}`;
     if (!trimmed.startsWith(prefix)) continue;
     const after = trimmed.slice(prefix.length);
@@ -85,9 +148,20 @@ export function findCommands(body: string, name: string): ParsedCommand[] {
         positional.push(t);
       }
     }
-    out.push({ name, positional, args, bodyLines: lines.slice(idx + 1) });
+    out.push({ name, positional, args, bodyLines: lines.slice(idx + 1).map((l) => l ?? "") });
   }
   return out;
+}
+
+/** Any gate command, for routing events and the edited-comment rule. */
+export const GATE_COMMAND_NAMES = ["gate-waive", "gate-waive-approve", "gate-override", "gate-approve-tests", "simplification-review"] as const;
+
+export function hasGateCommand(body: string): boolean {
+  try {
+    return GATE_COMMAND_NAMES.some((n) => findCommands(body, n).length > 0);
+  } catch {
+    return true; // a malformed command is still a command attempt
+  }
 }
 
 export function requireArgs(cmd: ParsedCommand, required: string[], optional: string[] = []): void {

@@ -73,7 +73,7 @@ describe("normalization-insensitive collisions (security review #9)", () => {
     expect(foldPathForCollision("src/ıd.js")).toBe(foldPathForCollision("src/Id.js"));
     expect(foldPathForCollision("src/ſx.js")).toBe(foldPathForCollision("src/sx.js"));
     // Compatibility forms are not folded (no common file system does).
-    expect(foldPathForCollision("src/ﬁ.js")).not.toBe(foldPathForCollision("src/fi.js"));
+    expect(foldPathForCollision("src/\uff41.js")).not.toBe(foldPathForCollision("src/a.js"));
   });
 
   it.each([
@@ -114,7 +114,7 @@ describe("paths too long for the work dir (security review #10)", () => {
     const long = `src/${"x".repeat(300)}.js`;
     const c = commitRawPath(repo, long, "export const z = 1;\n");
     const m = await buildManifest(repo.dir, b, c, defaultPolicy());
-    expect(m.problems.map((p) => [p.reason, p.path])).toEqual([["INVALID_ENCODING", long]]);
+    expect(m.problems.map((p) => [p.reason, p.path])).toEqual([["PATH_TOO_LONG", long]]);
     expect(m.problems[0]!.detail).toContain("path too long for the gate's work dir");
     expect(entry(m, long).measure.C).toBe(false);
     work = mkdtempSync(join(tmpdir(), "nyorori-r3-"));

@@ -6,9 +6,10 @@
 import { createHash } from "node:crypto";
 import type { Policy } from "../policy/schema.js";
 import type { ReasonCode, Violation, WaiverApplied } from "../types.js";
-import { independenceProblem, inRoster, type PrIdentityContext, type TeamRosters } from "../review/independence.js";
+import { independenceProblem, inRoster, requiredApprovers, unresolvedIdentities, type PrIdentityContext, type TeamRosters } from "../review/independence.js";
 import type { ReviewComment } from "../review/simplification.js";
 import { findCommands, requireArgs } from "./command.js";
+import { EDITED_COMMAND_NOTE, screenComments } from "./index.js";
 
 export const TEST_APPROVABLE_REASONS: ReadonlySet<ReasonCode> = new Set<ReasonCode>(["TEST_REMOVED", "TEST_CONFIG_WEAKENED"]);
 
@@ -39,7 +40,10 @@ export interface TestApprovalOutcome {
 }
 
 /**
- * Format: /gate-approve-tests key="TEST_REMOVED:src/a.test.ts > adds numbers" note="moved to b.test.ts"
+ * Format: /gate-approve-tests key="TEST_REMOVED:src/a.test.ts > adds numbers" sha=<40-hex head> note="moved to b.test.ts"
+ *
+ * The approval binds to `sha=`, which must be the head under evaluation (no
+ * carry-over: a test deletion is re-approved after every push).
  */
 export function applyTestApprovals(
   violations: readonly Violation[],
@@ -49,13 +53,16 @@ export function applyTestApprovals(
   const out = violations.map((v) => ({ ...v }));
   const applied: WaiverApplied[] = [];
   const rejected: TestApprovalOutcome["rejected"] = [];
-  const ordered = [...comments].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const screened = screenComments(comments);
+  for (const i of screened.ignored) rejected.push({ commentId: i.id, problem: EDITED_COMMAND_NOTE });
+  const ordered = screened.kept.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const approvals = new Map<string, Array<{ commentId: string; owner: string }>>();
   for (const c of ordered) {
     const commentId = String(c.id);
     let cmds;
     try {
       cmds = findCommands(c.body, "gate-approve-tests");
-      for (const cmd of cmds) requireArgs(cmd, ["key", "note"]);
+      for (const cmd of cmds) requireArgs(cmd, ["key", "sha", "note"]);
     } catch (e) {
       rejected.push({ commentId, problem: (e as Error).message });
       continue;
@@ -72,23 +79,34 @@ export function applyTestApprovals(
         reject(indep);
         continue;
       }
-      if (!c.headSha || c.headSha !== ctx.headSha) {
-        reject("approval was given on another head; approve again on the current head");
+      if (cmd.args.sha!.toLowerCase() !== ctx.headSha.toLowerCase()) {
+        reject("approval names another head; approve again with the current head's sha=");
         continue;
       }
-      const targets = out.filter((v) => !v.waivedBy && testApprovalKey(v) === key);
-      if (targets.length === 0) {
-        reject("no open violation with this key");
-        continue;
-      }
-      if (targets.some((v) => !TEST_APPROVABLE_REASONS.has(v.reason))) {
-        reject("only TEST_REMOVED and TEST_CONFIG_WEAKENED can be approved");
-        continue;
-      }
-      const id = testApprovalId(commentId, key);
-      for (const v of targets) v.waivedBy = id;
-      applied.push({ id, unit: key, metric: TEST_APPROVAL_METRIC, ceiling: 0, approver: c.author.login });
+      const list = approvals.get(key) ?? [];
+      if (!list.some((a) => a.owner.toLowerCase() === c.author.login.toLowerCase())) list.push({ commentId, owner: c.author.login });
+      approvals.set(key, list);
     }
+  }
+  const needed = requiredApprovers(ctx.identity);
+  for (const [key, list] of approvals) {
+    const targets = out.filter((v) => !v.waivedBy && testApprovalKey(v) === key);
+    const reject = (problem: string) => rejected.push({ commentId: list[0]!.commentId, problem: `${key}: ${problem}` });
+    if (targets.length === 0) {
+      reject("no open violation with this key");
+      continue;
+    }
+    if (targets.some((v) => !TEST_APPROVABLE_REASONS.has(v.reason))) {
+      reject("only TEST_REMOVED and TEST_CONFIG_WEAKENED can be approved");
+      continue;
+    }
+    if (list.length < needed) {
+      reject(`needs ${needed} independent gate owners (unlinked commit identities: ${unresolvedIdentities(ctx.identity).join(", ")})`);
+      continue;
+    }
+    const id = testApprovalId(list[0]!.commentId, key);
+    for (const v of targets) v.waivedBy = id;
+    applied.push({ id, unit: key, metric: TEST_APPROVAL_METRIC, ceiling: 0, approver: list.map((a) => a.owner).join("+") });
   }
   return { violations: out, applied, rejected };
 }

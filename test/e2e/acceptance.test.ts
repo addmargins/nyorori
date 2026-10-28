@@ -113,3 +113,23 @@ describe("new tests without recognizable assertions", () => {
     repo.dispose();
   });
 });
+
+describe("imports of unmeasured files through package.json", () => {
+  it("a package `imports` mapping to a .txt file routes S11", async () => {
+    const repo = new TestRepo();
+    const b = repo.commit({
+      "package.json": JSON.stringify({ name: "victim", type: "commonjs" }, null, 2) + "\n",
+      "src/index.js": "module.exports = 1;\n",
+    });
+    const c = repo.commit({
+      "package.json": JSON.stringify({ name: "victim", type: "commonjs", imports: { "#logic": "./lib/logic.txt" } }, null, 2) + "\n",
+      "lib/logic.txt": "module.exports = (x) => x;\n",
+      "src/index.js": 'module.exports = require("#logic");\n',
+    });
+    const out = await run(repo, b, c, servicePolicy());
+    const s11 = gate(out, "deps").triggers.filter((t) => t.id === "S11");
+    expect(s11.map((t) => t.evidence).join("\n")).toContain("lib/logic.txt");
+    expect(out.verdict.mergeAllowed).toBe(false);
+    repo.dispose();
+  });
+});
