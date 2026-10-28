@@ -74,7 +74,7 @@ export function visibleLines(body: string): Array<string | null> {
     // A line that was (part of) an HTML comment is hidden even if the comment
     // left other characters on it, so `x <!-- -->/cmd` tricks gain nothing.
     const hiddenByComment = raw.includes("\u0000");
-    const line = raw.replace(/\u0000/g, " ");
+    const line = raw.replaceAll("\u0000", " ");
     const expanded = line.replace(/\t/g, "    ");
     const indent = expanded.length - expanded.trimStart().length;
     const trimmed = expanded.trimStart();

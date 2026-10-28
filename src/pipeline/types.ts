@@ -10,7 +10,7 @@ import type { CheckRunOutput } from "../report/checkrun.js";
 import type { PrIdentityContext, TeamRosters } from "../review/independence.js";
 import type { CarryOverInfo, LlmReview, ReviewComment } from "../review/simplification.js";
 import type { GateResult, Manifest } from "../types.js";
-import type { IssueComment, ValidWaiver } from "../waivers/index.js";
+import type { ValidWaiver } from "../waivers/index.js";
 
 /** Pull-request context read from GitHub by the service (or a JSON file for the CLI). */
 export interface PullRequestContext {

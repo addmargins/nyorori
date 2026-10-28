@@ -26,7 +26,7 @@ const SCRIPT_RE = Object.fromEntries(
   SCRIPTS.map((s) => [s, new RegExp(`\\p{Script=${s}}`, "u")]),
 ) as Record<(typeof SCRIPTS)[number], RegExp>;
 
-const INVISIBLE_RE = /[​-‏⁠-⁤﻿­]/u;
+const INVISIBLE_RE = /[\u200b-\u200f\u2060-\u2064\ufeff\u00ad]/u;
 
 export function normalizeName(name: string): string {
   return name.normalize("NFKC");

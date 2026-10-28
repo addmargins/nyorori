@@ -57,7 +57,7 @@ describe("G4 tests gate", () => {
   });
 
   it("FAILs a deleted test (report and static evidence), not waivable", () => {
-    const cSrc = B_SRC.replace(/  it\("vip"[^\n]*\n/, "");
+    const cSrc = B_SRC.replace(/ {2}it\("vip"[^\n]*\n/, "");
     const r = run(cSrc, {}, [ALL[0]!, ALL[2]!]);
     expect(reasons(r)).toEqual(["TEST_REMOVED"]);
     expect(r.violations[0]).toMatchObject({ unit: "price › vip", details: { waivable: false, approvalKind: "gate-owners", source: "report" } });

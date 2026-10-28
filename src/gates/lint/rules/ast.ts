@@ -8,7 +8,8 @@ import type { Rule } from "eslint";
 export interface AstNode {
   type: string;
   parent?: AstNode;
-  [key: string]: any;
+  // ESTree nodes are walked generically; a field can hold a node, a list or a literal.
+  [key: string]: any; // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
 export type Scope = Rule.RuleContext["sourceCode"]["scopeManager"]["globalScope"];

@@ -35,7 +35,7 @@ export function loadPolicyFromText(text: string, opts: { revision?: string } = {
   try {
     raw = JSON.parse(text);
   } catch (e) {
-    throw new Error(`policy is not valid JSON: ${(e as Error).message}`);
+    throw new Error(`policy is not valid JSON: ${(e as Error).message}`, { cause: e });
   }
   const parsed = parsePolicy(raw);
   const revision = opts.revision ?? policyDigest(parsed);

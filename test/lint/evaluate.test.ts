@@ -14,7 +14,7 @@ function hunks(a: string, b: string): Hunk[] {
   const dir = mkdtempSync(join(tmpdir(), "nyorori-diff-"));
   writeFileSync(join(dir, "a"), a);
   writeFileSync(join(dir, "b"), b);
-  let out = "";
+  let out: string;
   try {
     out = execFileSync("git", ["diff", "--no-index", "-U0", "a", "b"], { cwd: dir, encoding: "utf8" });
   } catch (e) {

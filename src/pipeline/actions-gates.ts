@@ -9,7 +9,6 @@ import { evaluateTests } from "../gates/tests/evaluate.js";
 import type { GateEvaluation } from "../gates/tests/evaluation.js";
 import { parseTestReport } from "../gates/tests/report.js";
 import { isAiLoopBot } from "../review/independence.js";
-import type { Manifest } from "../types.js";
 import { matchesAny } from "../util/glob.js";
 import type { RunContext } from "./context.js";
 import { emptyDraft, type GateDraft } from "./draft.js";
