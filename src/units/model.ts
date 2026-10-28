@@ -155,7 +155,29 @@ export function visibleBranches(m: FileMeasurement): number {
   return fnPart + Math.max(0, m.residue.cyclomatic);
 }
 
-/** Units that count for S1/S10 unit totals (signature-only rows excluded). */
+/**
+ * A signature-only row (CC 1, CogC 0, no children) is an overload signature
+ * only when a later sibling of the same name and kind follows it. Trivial
+ * helpers look identical, and they are exactly what mechanical splitting
+ * produces, so they must stay countable. Arrows are excluded because cccc
+ * reuses property names for them.
+ */
+export function isOverloadSignature(u: Unit, siblings: readonly Unit[]): boolean {
+  if (!u.signatureOnly || u.name === "<anonymous>") return false;
+  if (u.kind !== "function" && u.kind !== "method") return false;
+  const idx = siblings.indexOf(u);
+  return siblings.some((s, i) => i > idx && s.name === u.name && s.kind === u.kind);
+}
+
+/** Units that count for S1/S10 unit totals (overload signatures excluded). */
 export function countableUnits(m: FileMeasurement): Unit[] {
-  return flattenUnits(m.units).filter((u) => !u.signatureOnly);
+  const out: Unit[] = [];
+  const walk = (us: readonly Unit[]) => {
+    for (const u of us) {
+      if (!isOverloadSignature(u, us)) out.push(u);
+      walk(u.children);
+    }
+  };
+  walk(m.units);
+  return out;
 }

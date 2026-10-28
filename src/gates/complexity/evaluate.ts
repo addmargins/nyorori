@@ -15,7 +15,7 @@ import type {
   UnitMatch,
   Violation,
 } from "../../types.js";
-import { flattenUnits, visibleBranches } from "../../units/model.js";
+import { countableUnits, flattenUnits, isOverloadSignature, visibleBranches } from "../../units/model.js";
 import {
   bRangeTouched,
   cRangeTouched,
@@ -93,24 +93,7 @@ interface Ctx {
  * row that has a later same-name, same-kind sibling. Arrows (property
  * arrows share names like `test`) cannot be overloads.
  */
-export function isOverloadSignature(u: Unit, siblings: readonly Unit[]): boolean {
-  if (!u.signatureOnly || u.name === ANONYMOUS) return false;
-  if (u.kind !== "function" && u.kind !== "method") return false;
-  const idx = siblings.indexOf(u);
-  return siblings.some((s, i) => i > idx && s.name === u.name && s.kind === u.kind);
-}
-
-export function countableUnits(m: FileMeasurement): Unit[] {
-  const out: Unit[] = [];
-  const walk = (us: readonly Unit[]) => {
-    for (const u of us) {
-      if (!isOverloadSignature(u, us)) out.push(u);
-      walk(u.children);
-    }
-  };
-  walk(m.units);
-  return out;
-}
+export { countableUnits, isOverloadSignature };
 
 function allUnits(m: FileMeasurement): Unit[] {
   return [...flattenUnits(m.units), m.residue];
