@@ -48,24 +48,6 @@ export interface ComplexityInput {
   normalizedIdentical?: ReadonlySet<string>;
 }
 
-/**
- * Thresholds from rulings D17, D18 and D20 that the policy schema does not
- * carry yet. `policy.triggers.s9.min_branch_drop` remains the density-path
- * minimum; a policy may override the rest once the schema has the fields.
- */
-const RULING_DEFAULTS = {
-  s9_min_branch_drop_lines: 2,
-  s10_min_visible_branches: 8,
-  s12_min_residue: 8,
-  s12_min_rise: 5,
-  s12_pr_total_rise: 15,
-};
-
-function rulingThreshold(policy: Policy, group: "s9" | "s10" | "s12", field: string, key: keyof typeof RULING_DEFAULTS): number {
-  const fromPolicy = (policy.triggers as unknown as Record<string, Record<string, unknown> | undefined>)[group]?.[field];
-  return typeof fromPolicy === "number" ? fromPolicy : RULING_DEFAULTS[key];
-}
-
 export interface UnitObservation {
   unit: string;
   line: number;
@@ -419,7 +401,7 @@ function s9Triggers(ctx: Ctx): TriggerHit[] {
     const vb = visibleBranches(p.b);
     const vc = visibleBranches(p.c);
     const drop = vb - vc;
-    const minLines = rulingThreshold(ctx.input.policy, "s9", "min_branch_drop_lines", "s9_min_branch_drop_lines");
+    const minLines = cfg.min_branch_drop_lines;
     if (vb <= 0 || drop < Math.min(cfg.min_branch_drop, minLines)) continue;
     const l = lines(ctx, p);
     const lineDrop = l.b > 0 ? (l.b - l.c) / l.b : 0;
@@ -456,7 +438,7 @@ function s10Triggers(ctx: Ctx, cFiles: Array<{ entry: ManifestEntry; file: FileM
     const fresh = units.filter((u) => !ctx.byC.has(u.key)).length;
     // Ruling D17: a file with few visible branches is ordinary glue code.
     const v = visibleBranches(file);
-    const minV = rulingThreshold(ctx.input.policy, "s10", "min_visible_branches", "s10_min_visible_branches");
+    const minV = cfg.min_visible_branches;
     if (density >= cfg.min_density && fresh >= cfg.min_new_units && v >= minV) {
       hits.push({
         id: "S10",
@@ -479,12 +461,15 @@ const TEST_FILE_NAME = /\.(test|spec)\.[^/]+$/;
 
 /**
  * Audit F3: a file that lands under a test glob without being named as a
- * test is production-shaped code hiding from enforcement. New files and
+ * test is production-shaped code hiding from enforcement. Test support
+ * paths (fixtures, helpers, mocks: policy.scope.test_support_globs) are exempt. New files and
  * copies count, and so does a rename whose B path was outside the test globs.
  */
 function isNewUnderTestGlob(ctx: Ctx, e: ManifestEntry): boolean {
+  const scope = ctx.input.policy.scope;
+  if (e.c && matchesAny(e.c.path, scope.test_support_globs)) return false;
   if (e.status === "A" || e.status === "C") return true;
-  if (e.status === "R" && e.b) return !matchesAny(e.b.path, ctx.input.policy.scope.test_globs);
+  if (e.status === "R" && e.b) return !matchesAny(e.b.path, scope.test_globs);
   return false;
 }
 
@@ -505,9 +490,7 @@ function netCognitiveChange(ctx: Ctx): number {
  */
 function s12Triggers(ctx: Ctx, cFiles: Array<{ entry: ManifestEntry; file: FileMeasurement }>): TriggerHit[] {
   const policy = ctx.input.policy;
-  const minResidue = rulingThreshold(policy, "s12", "min_residue", "s12_min_residue");
-  const minRise = rulingThreshold(policy, "s12", "min_rise", "s12_min_rise");
-  const prTotal = rulingThreshold(policy, "s12", "pr_total_rise", "s12_pr_total_rise");
+  const { min_residue: minResidue, min_rise: minRise, pr_total_rise: prTotal } = policy.triggers.s12;
   const hits: TriggerHit[] = [];
   let totalRise = 0;
   const parts: string[] = [];

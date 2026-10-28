@@ -89,9 +89,11 @@ describe("F3: production code under a test glob", () => {
     expect(r.outcome.triggers.filter((t) => t.routing).map((t) => [t.id, t.evidence])).toEqual([["S11", "테스트 경로의 비테스트 코드 (A)"]]);
   });
 
-  it("real test files and edits of existing helpers do not", () => {
+  it("real test files, test-support paths and edits of existing helpers do not", () => {
     const T = "src/__tests__/pricing.test.ts";
     expect(triggerIds(runScenario({ b: {}, c: { [T]: ifChain("t", 3) }, tests: [T] }))).toEqual([]);
+    const F = "src/__tests__/fixtures/orders.ts";
+    expect(triggerIds(runScenario({ b: {}, c: { [F]: ifChain("order", 3) }, tests: [F] }))).toEqual([]);
     const H = "test/helpers.ts";
     expect(triggerIds(runScenario({ b: { [H]: ifChain("h", 2) }, c: { [H]: ifChain("h", 3) }, tests: [H] }))).toEqual([]);
   });
