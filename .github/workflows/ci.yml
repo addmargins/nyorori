@@ -45,17 +45,19 @@ jobs:
             "$CCCC_COMMIT"*) ;;
             *) echo "::error::tag $CCCC_TAG resolved to $actual, expected $CCCC_COMMIT"; exit 1 ;;
           esac
-          (cd "$RUNNER_TEMP/cccc" && cargo build --release --locked -p cccc-cli)
+          (cd "$RUNNER_TEMP/cccc" && CARGO_NET_GIT_FETCH_WITH_CLI=true cargo build --release --locked -p cccc-cli)
           mkdir -p .cccc-bin
           cp "$RUNNER_TEMP/cccc/target/release/cccc" .cccc-bin/cccc
 
       - name: Record measurer fingerprint
         run: |
-          echo "CCCC_BIN=$PWD/.cccc-bin/cccc" >> "$GITHUB_ENV"
-          echo "NYORORI_CCCC_BIN=$PWD/.cccc-bin/cccc" >> "$GITHUB_ENV"
+          echo "NYORORI_CCCC=$PWD/.cccc-bin/cccc" >> "$GITHUB_ENV"
           .cccc-bin/cccc --version
           sha256sum .cccc-bin/cccc
 
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+      - run: npm run build
+      # Spec 6.1: the calculation-rule fixtures must not drift for the pinned measurer.
+      - run: node dist/cli.js fixtures --cccc "$NYORORI_CCCC"
