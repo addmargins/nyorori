@@ -63,7 +63,13 @@ describe("GitHub App client", () => {
     expect(await api.getPullRequest(REPO, 5)).toMatchObject({ number: 5, headSha: "h", author: "alice", state: "open", assignees: [] });
     const id = await api.createCheckRun(REPO, { name: "quality-gate", headSha: "h", status: "completed", conclusion: "failure", title: "t", summary: "s", externalId: "e" });
     expect(id).toBe(99);
-    expect(f.calls.filter((c) => c.url.endsWith("/access_tokens"))).toHaveLength(1);
+    const tokenCall = f.calls.filter((c) => c.url.endsWith("/access_tokens"));
+    expect(tokenCall).toHaveLength(1);
+    // Round 4: the token is scoped to this repository and to the permissions the service uses.
+    expect(tokenCall[0]!.body).toEqual({
+      repositories: ["r"],
+      permissions: { checks: "write", contents: "read", pull_requests: "read", issues: "write", actions: "read", members: "read" },
+    });
     expect(f.calls.find((c) => c.url.endsWith("/installation"))!.auth).toMatch(/^Bearer /);
     expect(f.calls.find((c) => c.url.endsWith("/check-runs"))!.auth).toBe("token ghs_x");
     expect(f.calls.find((c) => c.url.endsWith("/check-runs"))!.body).toMatchObject({ name: "quality-gate", conclusion: "failure", output: { title: "t" } });

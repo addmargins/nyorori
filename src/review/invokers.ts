@@ -36,6 +36,8 @@ export function mentions(text: string | null | undefined): string[] {
 
 export function collectAgentInvokers(src: InvokerSources, policy: Policy): string[] {
   const bot = src.botLogin.toLowerCase();
+  // Apps are mentioned by their slug (`@dependabot`), the login carries `[bot]`.
+  const botMentions = new Set([bot, bot.replace(/\[bot\]$/, "")]);
   const out = new Set<string>();
   const add = (login: string) => {
     const l = login.toLowerCase();
@@ -44,7 +46,7 @@ export function collectAgentInvokers(src: InvokerSources, policy: Policy): strin
   for (const a of src.assignees) add(a);
   for (const m of mentions(src.body)) add(m);
   for (const c of src.comments) {
-    if (mentions(c.body).includes(bot)) add(c.author);
+    if (mentions(c.body).some((m) => botMentions.has(m))) add(c.author);
   }
   for (const a of src.linkedIssueAuthors) add(a);
   return [...out].sort();

@@ -23,7 +23,7 @@ import {
   cRangeTouched,
   filePairs,
   scopeChangesOf,
-  scopeOf,
+  scopeIndex,
   type FilePair,
   type ScopeChange,
 } from "../../units/match.js";
@@ -108,6 +108,12 @@ function allUnits(m: FileMeasurement): Unit[] {
   return [...flattenUnits(m.units), m.residue];
 }
 
+/** Whether one side of an entry is a test path: `isTestB`/`isTestC`, falling back to the legacy `isTest`. */
+function isTestSide(e: ManifestEntry, side: "B" | "C"): boolean {
+  const flag = side === "B" ? e.isTestB : e.isTestC;
+  return flag ?? e.isTest ?? false;
+}
+
 function maxCognitive(m: FileMeasurement): number {
   return allUnits(m).reduce((mx, u) => Math.max(mx, u.cognitive), 0);
 }
@@ -122,6 +128,7 @@ function buildCtx(input: ComplexityInput): Ctx {
   const cUnits = new Map<string, Unit>();
   for (const m of input.c.values()) for (const u of allUnits(m)) cUnits.set(u.key, u);
   const testGlobs = input.policy.scope.test_globs;
+  const scopes = scopeIndex({ manifest: input.manifest, testGlobs });
   const byC = new Map<string, UnitMatch>();
   const byB = new Map<string, UnitMatch>();
   const matches: UnitMatch[] = [];
@@ -129,7 +136,7 @@ function buildCtx(input: ComplexityInput): Ctx {
     // A test unit's allowance never travels into product code (or back), whatever the matcher did.
     const bp = bUnits.get(m.bKey)?.path;
     const cp = cUnits.get(m.cKey)?.path;
-    if (bp !== undefined && cp !== undefined && scopeOf(bp, testGlobs) !== scopeOf(cp, testGlobs)) continue;
+    if (bp !== undefined && cp !== undefined && (scopes.b.get(bp) ?? "product") !== (scopes.c.get(cp) ?? "product")) continue;
     matches.push(m);
     byC.set(m.cKey, m);
     byB.set(m.bKey, m);
@@ -153,9 +160,10 @@ function buildCtx(input: ComplexityInput): Ctx {
   const observedOnly = new Set<string>();
   for (const e of input.manifest.entries) {
     if (e.b && e.c && input.baselineMissing?.has(e.c.path)) noBaselineB.add(e.b.path);
-    if (e.isTest && !input.policy.complexity.enforce_on_tests) {
-      if (e.b) observedOnly.add(e.b.path);
-      if (e.c) observedOnly.add(e.c.path);
+    // Per side: a rename across the boundary has one observed side and one enforced side.
+    if (!input.policy.complexity.enforce_on_tests) {
+      if (e.b && isTestSide(e, "B")) observedOnly.add(e.b.path);
+      if (e.c && isTestSide(e, "C")) observedOnly.add(e.c.path);
     }
   }
   return {
@@ -590,7 +598,7 @@ function s11Triggers(ctx: Ctx): TriggerHit[] {
     } else if (e.unmeasured) {
       hits.push({ id: "S11", gate: "complexity", file: path, evidence: `미측정: ${e.unmeasured} (${e.status})`, routing: true });
     }
-    if (e.c && e.isTest && !TEST_FILE_NAME.test(e.c.path) && isNewUnderTestGlob(ctx, e)) {
+    if (e.c && isTestSide(e, "C") && !TEST_FILE_NAME.test(e.c.path) && isNewUnderTestGlob(ctx, e)) {
       hits.push({ id: "S11", gate: "complexity", file: e.c.path, evidence: `테스트 경로의 비테스트 코드 (${e.status})`, routing: true });
     }
     if (e.newInExcludedPath) {
@@ -659,7 +667,8 @@ export function evaluateComplexity(input: ComplexityInput): ComplexityOutcome {
   const triggerFiles = cFiles.filter(({ file }) => !ctx.observedOnly.has(file.path));
 
   for (const { entry, file } of cFiles) {
-    const enforce = !entry.isTest || cfg.enforce_on_tests;
+    // Keyed on the C side: a test→product rename is product code now and is enforced.
+    const enforce = !isTestSide(entry, "C") || cfg.enforce_on_tests;
     const hunks = ctx.pairByC.get(file.path)?.hunks;
     for (const cu of allUnits(file)) {
       if (cu.signatureOnly) continue;

@@ -78,9 +78,17 @@ npm run build
 ```
 
 ```bash
-node dist/cli.js run --repo . --base origin/main --candidate HEAD \
-  --policy policy/default.policy.json --cccc .nyorori-work/cccc-v1.8.5/cccc --out gate-out
+cp policy/default.policy.json ../nyorori-policy.json   # 정책은 측정 대상 checkout 밖에 둔다
 ```
+
+```bash
+node dist/cli.js run --repo . --base origin/main --candidate HEAD \
+  --policy ../nyorori-policy.json --cccc ../cccc-v1.8.5/cccc --out ../gate-out
+```
+
+**로컬 결과는 병합 승인이 아니다.** `quality-gate.json`과 `gate-summary.md`에는 `authority: "local"`이 찍힌다. 병합 여부를 정하는 것은 게이트 서비스가 게시하는 `quality-gate` 체크(`authority: "github-app"`)뿐이다.
+
+정책 파일, cccc 바이너리, `--out`, `--artifacts`, 작업 디렉터리가 `--repo` 안(realpath 기준, 심볼릭 링크 포함)에 있으면 사용법 오류(64)로 거부한다. 후보 commit이 그것들을 바꿀 수 있기 때문이다(spec 10.2 V1·V4). 픽스처 저장소를 그 자체로 판정할 때만 `--allow-repo-paths`를 쓴다.
 
 `--out` 디렉터리에는 `manifest.json`, cccc 원본 `raw.B.json`/`raw.C.json`과 stderr, 게이트별 `gate-result.<gate>.json`, 집계 `quality-gate.json`, 사람이 읽는 `gate-summary.md`, AI 수정 루프용 `gate-feedback.json`이 생긴다.
 
@@ -150,6 +158,10 @@ NYORORI_RUNNER_COMMIT=$(git rev-parse HEAD) node dist/cli.js serve --port 8080
 - 인용(`>`와 그 연속 줄), 코드 블록(``` 와 ~~~, 들여쓰기 4칸), HTML 주석(`<!-- -->`) 안의 명령은 무시한다.
 - 승인자는 PR 작성자, commit 작성자·committer·공동 작성자, AI 에이전트 호출자, 봇, (merge group이면) 그룹의 다른 PR 작성자가 아니어야 한다. 로그인에 연결되지 않은 commit 이메일이나 `Co-authored-by`가 있으면 **독립 승인자가 두 명** 필요하다. commit이 250개 이상인 PR은 독립성을 확인할 수 없어 승인을 받지 않는다.
 - 게이트 요약은 현재 head SHA와 blob을 넣은 복사용 명령을 코드 블록 안에 보여 준다.
+
+## Process isolation
+
+분석(cccc, ESLint, Prettier, TypeScript, 산출물 zip 해제)은 App 키를 가진 프로세스에서 실행하지 않는다. `runGatesIsolated()`가 `dist/pipeline/worker.js`를 **분리된 자식 프로세스**로 띄운다. 환경 변수는 `PATH`·임시 `HOME`·로케일만 넘기고(`NODE_OPTIONS`, 프록시, App 키, 클라우드 자격 증명 없음), V8 힙은 1 GiB, 벽시계 300초를 넘기면 프로세스 그룹을 `SIGKILL`하고, 응답이 64 MiB를 넘으면 버린다. 자식이 죽거나 시간을 넘기거나 응답이 너무 크면 모든 서비스 게이트가 INCONCLUSIVE `TOOL_ERROR`로 보고되므로 필수 체크가 빠지는 일은 없다. 산출물 zip은 부모가 상한까지만 내려받고 자식이 연다. CLI는 기본으로 같은 경로를 쓰며, `--in-process`는 디버깅용이다.
 
 ## Approvals, ledger and security limits
 

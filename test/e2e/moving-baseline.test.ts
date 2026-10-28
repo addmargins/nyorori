@@ -4,7 +4,7 @@
 
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { chooseBaseline } from "../../src/pipeline/moving-baseline.js";
+import { chooseBaseline, historyIndex, type FirstParentHistory } from "../../src/pipeline/history.js";
 import type { ReviewComment } from "../../src/review/simplification.js";
 import { TestRepo, approvalBody, run, servicePolicy } from "./helpers.js";
 
@@ -44,14 +44,14 @@ describe("moving baseline (spec 7.5)", () => {
     }
   });
 
-  it("chooses the older lookback candidate, never older than the file", async () => {
-    // Linear history: a (oldest) < b < c < d.
-    const order = ["a", "b", "c", "d"];
-    const isAncestor = async (x: string, y: string) => order.indexOf(x) <= order.indexOf(y);
-    expect(await chooseBaseline({ base: "d", nthTouch: "c", beforeCutoff: "b", creation: "a" }, isAncestor)).toBe("b");
-    expect(await chooseBaseline({ base: "d", nthTouch: "b", beforeCutoff: "c", creation: "a" }, isAncestor)).toBe("b");
-    expect(await chooseBaseline({ base: "d", nthTouch: "b", beforeCutoff: "a", creation: "c" }, isAncestor)).toBe("c");
-    expect(await chooseBaseline({ base: "d", nthTouch: "d", beforeCutoff: null, creation: "d" }, isAncestor)).toBeNull();
+  it("chooses the older lookback candidate, never older than the file", () => {
+    // Linear first-parent history, newest first: d > c > b > a.
+    const h: FirstParentHistory = ["d", "c", "b", "a"].map((sha, i) => ({ sha, time: 100 - i, touched: new Map() }));
+    const index = historyIndex(h);
+    expect(chooseBaseline({ base: "d", nthTouch: "c", beforeCutoff: "b", creation: "a" }, index)).toBe("b");
+    expect(chooseBaseline({ base: "d", nthTouch: "b", beforeCutoff: "c", creation: "a" }, index)).toBe("b");
+    expect(chooseBaseline({ base: "d", nthTouch: "b", beforeCutoff: "a", creation: "c" }, index)).toBe("c");
+    expect(chooseBaseline({ base: "d", nthTouch: "d", beforeCutoff: null, creation: "d" }, index)).toBeNull();
   });
 
   it("a rewrite split over three PRs shows up against the moving baseline only", async () => {

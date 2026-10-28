@@ -10,6 +10,7 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { evaluateComplexity } from "../../src/gates/complexity/evaluate.js";
 import { validateCcccRun } from "../../src/measure/cccc.js";
+import { countableUnits } from "../../src/units/model.js";
 import { CCCC, ifChain, runScenario, triggerIds, violationReasons } from "./helpers.js";
 
 const s11 = (r: ReturnType<typeof runScenario>) => r.outcome.triggers.filter((t) => t.id === "S11");
@@ -205,6 +206,25 @@ describe(".d.ts measured on C (policy.scope.declaration_impl_check)", () => {
     expect(r.outcome.violations).toEqual([]);
     expect(r.outcome.triggers).toEqual([]);
     expect(r.outcome.inconclusive).toEqual([]);
+  });
+
+  it("declared overloads (same-name CC 1 / CogC 0 rows) neither fail nor count for S1/S10", () => {
+    const sig = (name: string, t: string) => `export declare function ${name}(a: ${t}): ${t};\n`;
+    const overloads = (names: string[], types: string[]) => names.flatMap((n) => types.map((t) => sig(n, t))).join("");
+    const P = "src/api.d.ts";
+    const fresh = runScenario({ b: {}, c: { [P]: overloads(["a", "b", "c", "d", "e", "f"], ["string", "number", "boolean"]) } });
+    expect(fresh.c.get(P)!.units).toHaveLength(18);
+    expect(countableUnits(fresh.c.get(P)!)).toHaveLength(6);
+    expect(fresh.outcome.violations).toEqual([]);
+    expect(fresh.outcome.triggers).toEqual([]);
+    // Adding overloads to an existing declaration file: measured on both sides, matched, quiet.
+    const grown = runScenario({
+      b: { [P]: overloads(["a", "b"], ["string", "number"]) },
+      c: { [P]: overloads(["a", "b"], ["string", "number", "boolean"]) },
+    });
+    expect(grown.outcome.violations).toEqual([]);
+    expect(grown.outcome.triggers).toEqual([]);
+    expect(grown.outcome.inconclusive).toEqual([]);
   });
 
   it("an implementation inside a .d.ts is an author-fixable PARSE_ERROR_CANDIDATE", () => {

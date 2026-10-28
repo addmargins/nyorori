@@ -21,33 +21,31 @@ export const MAX_HISTORY_COMMITS = 20_000;
 const RECORD = "\u0001";
 
 /**
- * Parses `git log --first-parent --name-status --format=<RECORD>%H %ct -z`.
- * Record layout: RECORD, "<sha> <time>", then NUL-separated "<status>\t<path>"
- * fields (renames carry two paths: old then new).
+ * Parses `git log --first-parent --name-status -z --format=<RECORD>%H %ct`.
+ * With `-z` every token is NUL-separated: "<sha> <time>\0\n" then
+ * "<status>\0<path>\0" per file (a rename/copy carries "<status>\0<old>\0<new>\0").
  */
 export function parseHistory(out: string): FirstParentHistory {
   const commits: FirstParentHistory = [];
   for (const block of out.split(RECORD)) {
     if (!block.trim()) continue;
-    const nl = block.indexOf("\n");
-    const header = (nl === -1 ? block : block.slice(0, nl)).trim();
-    const [sha, time] = header.split(" ");
+    const tokens = block.split("\0").map((t, i) => (i === 1 ? t.replace(/^\n/, "") : t));
+    const [sha, time] = (tokens[0] ?? "").trim().split(" ");
     if (!sha || !time) continue;
     const touched = new Map<string, string>();
-    const fields = nl === -1 ? [] : block.slice(nl + 1).split("\0").filter((f) => f.length > 0);
-    for (let i = 0; i < fields.length; i++) {
-      const f = fields[i]!;
-      const tab = f.indexOf("\t");
-      if (tab === -1) continue;
-      const status = f.slice(0, tab);
-      const path = f.slice(tab + 1);
+    const fields = tokens.slice(1).filter((t) => t.length > 0);
+    for (let i = 0; i < fields.length; ) {
+      const status = fields[i]!;
+      const path = fields[i + 1];
+      if (path === undefined) break;
       if (status.startsWith("R") || status.startsWith("C")) {
-        // A rename/copy record lists the source path in this field and the destination in the next.
-        const dest = fields[++i];
-        if (dest !== undefined) touched.set(dest, status.charAt(0));
+        const dest = fields[i + 2];
         touched.set(path, status.startsWith("R") ? "D" : "M");
+        if (dest !== undefined) touched.set(dest, status.charAt(0));
+        i += 3;
       } else {
         touched.set(path, status.charAt(0));
+        i += 2;
       }
     }
     commits.push({ sha, time: Number(time), touched });

@@ -510,9 +510,10 @@ export function scopeChangesOf(input: PairInput, matches: readonly UnitMatch[]):
     m.byC.set(x.cKey, x);
   }
   const { bUnits, cUnits } = prUnits(input);
+  const idx = scopeIndex(input);
   for (const [b, c] of m.verbatimCandidates(bUnits, cUnits)) {
-    const from = scopeOf(b.path, input.testGlobs);
-    const to = scopeOf(c.path, input.testGlobs);
+    const from = scopeB(idx, b.path);
+    const to = scopeC(idx, c.path);
     if (from !== to) refuseMove(refused, b, c, from, to);
   }
   return refused;

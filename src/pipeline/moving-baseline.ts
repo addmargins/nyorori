@@ -6,7 +6,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { evaluateComplexity } from "../gates/complexity/evaluate.js";
-import { GitError, gitText } from "../git/exec.js";
 import { fileLineMaps } from "../git/linemap.js";
 import { buildManifest } from "../git/manifest.js";
 import { materializeSideChecked } from "../git/tree.js";
@@ -17,66 +16,10 @@ import { buildFileMeasurement } from "../units/model.js";
 import { isAiLoopRun } from "./actions-gates.js";
 import type { RunContext } from "./context.js";
 import type { GateDraft } from "./draft.js";
+import { candidatesFor, chooseBaseline, cutoffCommit, historyIndex, readFirstParentHistory, type FirstParentHistory } from "./history.js";
 import { normalizeSides, type MeasuredState } from "./service-gates.js";
 
 const KEPT: ReadonlySet<TriggerId> = new Set<TriggerId>(["S1", "S9", "S10", "S12"]);
-const DAY_S = 86_400;
-
-export interface BaselineCandidates {
-  /** The run's B. */
-  base: string;
-  /** The `lookback_merges`-th most recent first-parent commit touching the file (the oldest one if fewer). */
-  nthTouch: string | null;
-  /** The latest first-parent commit at least `lookback_days` older than B. */
-  beforeCutoff: string | null;
-  /** The first-parent commit that (most recently) added the file: the baseline is never older. */
-  creation: string | null;
-}
-
-/** `older` is an ancestor of `newer` (a first-parent commit list is totally ordered by it). */
-export type IsAncestor = (older: string, newer: string) => Promise<boolean>;
-
-/**
- * The older of the two lookback candidates, clamped to the file's creation.
- * Null when the result would be B itself (nothing older to compare with).
- */
-export async function chooseBaseline(c: BaselineCandidates, isAncestor: IsAncestor): Promise<string | null> {
-  let pick: string | null;
-  if (c.nthTouch && c.beforeCutoff) pick = (await isAncestor(c.nthTouch, c.beforeCutoff)) ? c.nthTouch : c.beforeCutoff;
-  else pick = c.nthTouch ?? c.beforeCutoff;
-  if (pick && c.creation && pick !== c.creation && (await isAncestor(pick, c.creation))) pick = c.creation;
-  return pick && pick !== c.base ? pick : null;
-}
-
-async function firstLine(repoDir: string, args: string[], last = false): Promise<string | null> {
-  const lines = (await gitText(repoDir, args)).split("\n").filter(Boolean);
-  return (last ? lines[lines.length - 1] : lines[0]) ?? null;
-}
-
-async function candidatesFor(ctx: RunContext, path: string, baseTime: number): Promise<BaselineCandidates> {
-  const { repoDir } = ctx.opts;
-  const cfg = ctx.policy.triggers.moving_baseline;
-  const base = ctx.manifest.baseSha;
-  const cutoff = baseTime - cfg.lookback_days * DAY_S;
-  const [nthTouch, beforeCutoff, creation] = await Promise.all([
-    firstLine(repoDir, ["log", "--first-parent", `-n${cfg.lookback_merges}`, "--format=%H", base, "--", path], true),
-    firstLine(repoDir, ["log", "--first-parent", "-n1", "--format=%H", `--before=${cutoff}`, base]),
-    firstLine(repoDir, ["log", "--first-parent", "-n1", "--diff-filter=A", "--format=%H", base, "--", path]),
-  ]);
-  return { base, nthTouch, beforeCutoff, creation };
-}
-
-function gitIsAncestor(repoDir: string): IsAncestor {
-  return async (older, newer) => {
-    try {
-      await gitText(repoDir, ["merge-base", "--is-ancestor", older, newer]);
-      return true;
-    } catch (e) {
-      if (e instanceof GitError && e.code === 1) return false;
-      throw e;
-    }
-  };
-}
 
 /** Changed C files that exist on B, keyed by their B path (history is looked up there). */
 function trackedFiles(manifest: Manifest): Map<string, string> {
@@ -173,18 +116,16 @@ export async function addMovingBaselineTriggers(ctx: RunContext, measured: Measu
   if (!cfg.enabled || !measured) return;
   const tracked = trackedFiles(ctx.manifest);
   if (tracked.size === 0) return;
-  const note: Record<string, unknown> = { route: cfg.route, baselines: {} as Record<string, string> };
+  const note: Record<string, unknown> = { route: cfg.route, files: tracked.size, baselines: {} as Record<string, string> };
+  // Observe-only runs are capped: a sweeping PR would otherwise measure hundreds of baselines for a signal nobody acts on yet.
+  if (!cfg.route && tracked.size > cfg.max_files) {
+    note.skipped = `${tracked.size} changed files exceed triggers.moving_baseline.max_files (${cfg.max_files}) while route=false`;
+    g1.observe = { ...g1.observe, moving_baseline: note };
+    return;
+  }
   try {
-    const repo = ctx.opts.repoDir;
-    const baseTime = Number((await gitText(repo, ["log", "-1", "--format=%ct", ctx.manifest.baseSha])).trim());
-    const isAncestor = gitIsAncestor(repo);
-    const groups = new Map<string, Set<string>>();
-    for (const [bPath, cPath] of tracked) {
-      const m = await chooseBaseline(await candidatesFor(ctx, bPath, baseTime), isAncestor);
-      if (!m) continue;
-      (note.baselines as Record<string, string>)[cPath] = m;
-      groups.set(m, (groups.get(m) ?? new Set()).add(cPath));
-    }
+    const groups = selectBaselines(await readFirstParentHistory(ctx.opts.repoDir, ctx.manifest.baseSha), tracked, cfg);
+    for (const [m, cPaths] of groups) for (const p of cPaths) (note.baselines as Record<string, string>)[p] = m;
     const seen = new Set(g1.triggers.map(triggerKey));
     const cache = new Map<string, FileMeasurement>();
     let hits = 0;
@@ -201,4 +142,21 @@ export async function addMovingBaselineTriggers(ctx: RunContext, measured: Measu
     note.error = { reason: "TOOL_ERROR", detail: e instanceof Error ? e.message : String(e) };
   }
   g1.observe = { ...g1.observe, moving_baseline: note };
+}
+
+/** Baseline commit → C paths judged against it. Pure: one history read serves every file. */
+export function selectBaselines(
+  history: FirstParentHistory,
+  tracked: ReadonlyMap<string, string>,
+  cfg: { lookback_merges: number; lookback_days: number },
+): Map<string, Set<string>> {
+  const index = historyIndex(history);
+  const beforeCutoff = cutoffCommit(history, cfg.lookback_days);
+  const groups = new Map<string, Set<string>>();
+  for (const [bPath, cPath] of tracked) {
+    const m = chooseBaseline(candidatesFor(history, bPath, cfg.lookback_merges, beforeCutoff), index);
+    if (!m) continue;
+    groups.set(m, (groups.get(m) ?? new Set()).add(cPath));
+  }
+  return groups;
 }

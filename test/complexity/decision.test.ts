@@ -103,7 +103,8 @@ describe("spec 14 policy rows", () => {
     const heavy = `describe("plan", () => {\n${Array.from({ length: 9 }, (_, i) => `  it("case ${i}", () => { if (globalThis.k === ${i}) throw 1; });`).join("\n")}\n});\n`;
     expect(triggerIds(runScenario({ b: {}, c: { [T]: spec }, tests: [T] }))).toEqual([]);
     expect(triggerIds(runScenario({ b: {}, c: { [T]: heavy }, tests: [T] }))).toEqual([]);
-    expect(triggerIds(runScenario({ b: {}, c: { [T]: heavy } }))).toEqual(["S10"]);
+    // Control: the same file at a product path (the globs classify `*.test.*` as a test on their own).
+    expect(triggerIds(runScenario({ b: {}, c: { "src/plan.js": heavy } }))).toEqual(["S10"]);
   });
 
   it("the limit comes from the policy", () => {

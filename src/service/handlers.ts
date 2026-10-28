@@ -111,11 +111,23 @@ async function journal(deps: ServiceDeps, ctx: EvaluationContext, status: "runni
   await deps.journal.update(`${ctx.repo.owner}/${ctx.repo.repo}`, ctx.deliveryId, status, note).catch((e) => deps.log?.("journal write failed", { error: String(e) }));
 }
 
-async function upsertCheck(deps: ServiceDeps, ctx: EvaluationContext, out: CheckRunOutput, status: "in_progress" | "completed"): Promise<void> {
+/** External id of the placeholder shown while the test merge is awaited; claimed by the real evaluation. */
+function waitingExternalId(headSha: string): string {
+  return `waiting:${headSha}`;
+}
+
+async function upsertCheck(
+  deps: ServiceDeps,
+  ctx: EvaluationContext,
+  out: CheckRunOutput,
+  status: "in_progress" | "completed",
+  claimExternalId?: string,
+): Promise<void> {
   const id = checkExternalId(ctx, deps.policyRevision);
-  const existing = ownCheckRuns(await deps.client.listCheckRuns(ctx.repo, ctx.checkSha), deps.appId, out.name).filter(
-    (r) => r.externalId === id,
-  );
+  const own = ownCheckRuns(await deps.client.listCheckRuns(ctx.repo, ctx.checkSha), deps.appId, out.name);
+  let existing = own.filter((r) => r.externalId === id);
+  // A placeholder run (waiting for the test merge) is taken over rather than left pending beside the real one.
+  if (existing.length === 0 && claimExternalId) existing = own.filter((r) => r.externalId === claimExternalId && r.status !== "completed");
   const req = {
     name: out.name,
     headSha: ctx.checkSha,
@@ -154,7 +166,7 @@ export async function runAndPublish(deps: ServiceDeps, ctx: EvaluationContext): 
   const ext = checkExternalId(ctx, deps.policyRevision);
   const gen = queue.begin(key, ext);
   // Pending right away, so the previous verdict is not what the required check shows while queued.
-  await upsertCheck(deps, ctx, { name: QUALITY_GATE_CHECK, conclusion: "failure", title: "running", summary: `B ${ctx.base}\nC ${ctx.candidate}` }, "in_progress");
+  await upsertCheck(deps, ctx, { name: QUALITY_GATE_CHECK, conclusion: "failure", title: "running", summary: `B ${ctx.base}\nC ${ctx.candidate}` }, "in_progress", waitingExternalId(ctx.checkSha));
   return queue.run(key, () => evaluateAndPublish(deps, ctx, queue, key, gen, ext));
 }
 
@@ -221,6 +233,16 @@ async function evaluateAndPublish(
   return evaluation;
 }
 
+/** The placeholder run keyed by `waiting:<head>` (B and C are unknown until the test merge exists). */
+async function waitingCheck(deps: ServiceDeps, ctx: EvaluationContext, out: CheckRunOutput, status: "in_progress" | "completed"): Promise<void> {
+  const id = waitingExternalId(ctx.checkSha);
+  const existing = ownCheckRuns(await deps.client.listCheckRuns(ctx.repo, ctx.checkSha), deps.appId, out.name).filter((r) => r.externalId === id);
+  const req = { name: out.name, headSha: ctx.checkSha, status, ...(status === "completed" ? { conclusion: out.conclusion } : {}), title: out.title, summary: out.summary, externalId: id };
+  const target = existing.sort((a, b) => b.id - a.id)[0];
+  if (target) await deps.client.updateCheckRun(ctx.repo, target.id, req);
+  else await deps.client.createCheckRun(ctx.repo, req);
+}
+
 /** Linear backoff 3 s → 10 s over five tries while GitHub computes the test merge. */
 export const TEST_MERGE_BACKOFF_MS: readonly number[] = [3000, 4750, 6500, 8250, 10000];
 
@@ -276,13 +298,11 @@ export async function evaluatePullRequest(deps: ServiceDeps, repo: RepoRef, prNu
     }
     const delay = TEST_MERGE_BACKOFF_MS[attempt];
     if (delay === undefined) break;
-    if (attempt === 0) {
-      await upsertCheck(deps, { ...pending, candidate: merge ?? "" }, { name: QUALITY_GATE_CHECK, conclusion: "failure", title: "waiting for the test merge", summary: `head ${headSha}` }, "in_progress");
-    }
+    if (attempt === 0) await waitingCheck(deps, pending, { name: QUALITY_GATE_CHECK, conclusion: "failure", title: "waiting for the test merge", summary: `head ${headSha}` }, "in_progress");
     await sleep(delay);
   }
   const [title, summary] = problem.split("|") as [string, string];
-  await upsertCheck(deps, pending, failingCheck(title, summary), "completed");
+  await waitingCheck(deps, pending, failingCheck(title, summary), "completed");
   await journal(deps, pending, "failed", title);
   return null;
 }

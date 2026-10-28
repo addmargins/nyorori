@@ -54,9 +54,12 @@ export function baseOptions(repo: TestRepo, base: string, candidate: string, pol
 }
 
 /**
- * The production path: the gates run in the detached worker (spec 10.1).
- * `extra.rng` cannot cross the process boundary and is ignored here.
+ * In process by default (a worker costs ~1.5 s per run). NYORORI_E2E_WORKER=1
+ * sends every run through the detached worker instead, the production path
+ * (spec 10.1); `extra.rng` cannot cross the process boundary and is dropped.
  */
+export const VIA_WORKER = process.env.NYORORI_E2E_WORKER === "1";
+
 export async function run(
   repo: TestRepo,
   base: string,
@@ -66,24 +69,26 @@ export async function run(
 ): Promise<RunGatesOutput> {
   const workDir = mkdtempSync(join(tmpdir(), "nyorori-e2e-"));
   try {
-    const { rng: _rng, ...rest } = extra;
-    return await runGatesIsolated({ ...baseOptions(repo, base, candidate, policy, workDir), ...rest }, { workerModule: WORKER });
+    const options = { ...baseOptions(repo, base, candidate, policy, workDir), ...extra };
+    if (!VIA_WORKER) return await runGates(options);
+    const { rng: _rng, ...wire } = options;
+    return await runGatesIsolated(wire, { workerModule: WORKER });
   } finally {
     rmSync(workDir, { recursive: true, force: true });
   }
 }
 
-/** Same run inside this process, for tests that need a function-valued option. */
-export async function runInProcess(
+/** Always through the detached worker, whatever NYORORI_E2E_WORKER says. */
+export async function runViaWorker(
   repo: TestRepo,
   base: string,
   candidate: string,
   policy: Policy,
-  extra: Partial<RunGatesOptions> = {},
+  extra: Partial<Omit<RunGatesOptions, "rng">> = {},
 ): Promise<RunGatesOutput> {
   const workDir = mkdtempSync(join(tmpdir(), "nyorori-e2e-"));
   try {
-    return await runGates({ ...baseOptions(repo, base, candidate, policy, workDir), ...extra });
+    return await runGatesIsolated({ ...baseOptions(repo, base, candidate, policy, workDir), ...extra }, { workerModule: WORKER });
   } finally {
     rmSync(workDir, { recursive: true, force: true });
   }

@@ -214,7 +214,8 @@
       "enabled": true,
       "lookback_merges": 5,
       "lookback_days": 30,
-      "route": false
+      "route": false,
+      "max_files": 200
     }
   },
   "lint": {

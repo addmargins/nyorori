@@ -264,7 +264,7 @@ describe("waivers end to end", () => {
     });
     expect(gate(ok, "complexity").state).toBe("ACCEPTED_WITH_WAIVER");
     expect(ok.verdict.state).toBe("ACCEPTED_WITH_WAIVER");
-    expect(ok.checkRun.title).toBe(`PASS with waiver: ${unit} cognitive ≤ 18`);
+    expect(ok.checkRun.title).toMatch(new RegExp(`^PASS with waiver: ${unit.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} cognitive ≤ 18`));
     expect(ok.verdict.mergeAllowed).toBe(true);
 
     const selfApproved = await run(repo, b, c, policy, {

@@ -17,6 +17,7 @@ import type {
   Side,
 } from "../../src/types.js";
 import { buildFileMeasurement } from "../../src/units/model.js";
+import { matchesAny } from "../../src/util/glob.js";
 import { matchUnits, type MatchResult } from "../../src/units/match.js";
 import { evaluateComplexity, type ComplexityOutcome } from "../../src/gates/complexity/evaluate.js";
 
@@ -118,27 +119,37 @@ function side(path: string, s: Side): ManifestEntry["b"] {
   return { path, blob: `blob-${s}-${path}`, mode: "100644", measuredPath: path };
 }
 
-export function buildManifest(s: Scenario): Manifest {
+/** Per-side test flags the way src/git/manifest.ts sets them (`tests` adds to the policy globs). */
+function testFlags(s: Scenario, policy: Policy, bPath: string | null, cPath: string | null): Pick<ManifestEntry, "isTest" | "isTestB" | "isTestC"> {
+  const isTest = (p: string) => (s.tests?.includes(p) ?? false) || matchesAny(p, policy.scope.test_globs);
+  const out: Pick<ManifestEntry, "isTest" | "isTestB" | "isTestC"> = {};
+  if (bPath !== null) out.isTestB = isTest(bPath);
+  if (cPath !== null) out.isTestC = isTest(cPath);
+  out.isTest = Boolean(out.isTestB || out.isTestC);
+  return out;
+}
+
+export function buildManifest(s: Scenario, policy: Policy = defaultPolicy(s.policy ?? {})): Manifest {
   const entries: ManifestEntry[] = [];
   const renamedFrom = new Map(Object.entries(s.renames ?? {}));
   const copiedFrom = new Map(Object.entries(s.copies ?? {}));
   const consumedB = new Set(renamedFrom.values());
-  const isTest = (p: string) => s.tests?.includes(p) ?? false;
+  const flags = (b: string | null, c: string | null) => testFlags(s, policy, b, c);
   for (const cPath of Object.keys(s.c)) {
     const bFrom = renamedFrom.get(cPath);
     if (bFrom !== undefined) {
-      entries.push({ status: "R", similarity: 90, b: side(bFrom, "B"), c: side(cPath, "C"), measure: { B: true, C: true }, isTest: isTest(cPath) });
+      entries.push({ status: "R", similarity: 90, b: side(bFrom, "B"), c: side(cPath, "C"), measure: { B: true, C: true }, ...flags(bFrom, cPath) });
     } else if (copiedFrom.has(cPath)) {
-      entries.push({ status: "C", similarity: 100, b: side(copiedFrom.get(cPath)!, "B"), c: side(cPath, "C"), measure: { B: false, C: true }, isTest: isTest(cPath) });
+      entries.push({ status: "C", similarity: 100, b: side(copiedFrom.get(cPath)!, "B"), c: side(cPath, "C"), measure: { B: false, C: true }, ...flags(null, cPath) });
     } else if (cPath in s.b) {
-      entries.push({ status: "M", b: side(cPath, "B"), c: side(cPath, "C"), measure: { B: true, C: true }, isTest: isTest(cPath) });
+      entries.push({ status: "M", b: side(cPath, "B"), c: side(cPath, "C"), measure: { B: true, C: true }, ...flags(cPath, cPath) });
     } else {
-      entries.push({ status: "A", b: null, c: side(cPath, "C"), measure: { B: false, C: true }, isTest: isTest(cPath) });
+      entries.push({ status: "A", b: null, c: side(cPath, "C"), measure: { B: false, C: true }, ...flags(null, cPath) });
     }
   }
   for (const bPath of Object.keys(s.b)) {
     if (bPath in s.c || consumedB.has(bPath) || [...copiedFrom.values()].includes(bPath)) continue;
-    entries.push({ status: "D", b: side(bPath, "B"), c: null, measure: { B: true, C: false }, isTest: isTest(bPath) });
+    entries.push({ status: "D", b: side(bPath, "B"), c: null, measure: { B: true, C: false }, ...flags(bPath, null) });
   }
   entries.push(...(s.extraEntries ?? []));
   return {
@@ -152,7 +163,7 @@ export function buildManifest(s: Scenario): Manifest {
 
 export function runScenario(s: Scenario): ScenarioResult {
   const policy = defaultPolicy(s.policy ?? {});
-  const manifest = buildManifest(s);
+  const manifest = buildManifest(s, policy);
   const bFiles: Record<string, string> = {};
   const cFiles: Record<string, string> = {};
   for (const e of manifest.entries) {
