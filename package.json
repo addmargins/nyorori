@@ -14,7 +14,9 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "lint": "eslint src test"
+    "lint": "eslint src test",
+    "fixtures": "node dist/cli.js fixtures",
+    "gen:policy": "vite-node scripts/gen-default-policy.ts"
   },
   "dependencies": {
     "@eslint/js": "^10.0.1",
@@ -28,5 +30,14 @@
   "devDependencies": {
     "vitest": "^4.0.0",
     "@types/node": "^22.0.0"
-  }
+  },
+  "main": "dist/pipeline/index.js",
+  "files": [
+    "dist",
+    "policy",
+    "test/fixtures/cccc-rules",
+    "docs",
+    "scripts/fetch-cccc.sh",
+    "README.md"
+  ]
 }

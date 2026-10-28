@@ -67,7 +67,11 @@ export const GATE_STATES = [
 ] as const;
 export type GateState = (typeof GATE_STATES)[number];
 
-export type GateMode = "enforce" | "observe";
+/**
+ * enforce: blocks. observe: recorded only (shadow). degraded: set by the 13.4
+ * incident procedure; FAILs and routing triggers become required G6 review.
+ */
+export type GateMode = "enforce" | "observe" | "degraded";
 
 export const GATE_IDS = [
   "complexity",
@@ -150,9 +154,12 @@ export type TriggerId =
   | "S8"
   | "S9"
   | "S10"
-  | "S11";
+  | "S11"
+  | "S12";
 
 /** S8 is observe-only; every other trigger routes to G6 when it fires. */
+/** Triggers that route even from observe-mode gates (rulings D16). */
+export const ALWAYS_ROUTING_TRIGGERS: ReadonlySet<TriggerId> = new Set(["S6", "S11"]);
 export const NON_ROUTING_TRIGGERS: ReadonlySet<TriggerId> = new Set(["S8"]);
 
 // ---------------------------------------------------------------------------
@@ -166,6 +173,7 @@ export type UnmeasuredReason =
   | "SUBMODULE"
   | "TYPE_CHANGE"
   | "UNSUPPORTED_FORMAT" // .vue .svelte .astro .mdx ...
+  | "FOREIGN_LANGUAGE" // .py .sh .go ... (rulings D5/D6)
   | "MEASUREMENT_OVERRIDE";
 
 export type ExcludedReason = "DECLARATION_FILE" | "POLICY_EXCLUDE" | "NOT_CODE";

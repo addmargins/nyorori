@@ -4,7 +4,7 @@
 
 import { z } from "zod";
 
-const mode = z.enum(["enforce", "observe"]);
+const mode = z.enum(["enforce", "observe", "degraded"]);
 const glob = z.string().min(1);
 
 export const policySchema = z
@@ -51,6 +51,14 @@ export const policySchema = z
             ".css", ".scss", ".sass", ".less", ".html", ".csv", ".snap", ".map",
             ".gitignore", ".gitattributes", ".gitmodules", ".npmrc", ".nvmrc",
             ".editorconfig", ".prettierrc", ".env.example", "",
+          ]),
+        /** Code in other languages: unmeasured FOREIGN_LANGUAGE, routed to S11 when it may hide JS/TS logic. */
+        foreign_code_extensions: z
+          .array(z.string())
+          .default([
+            ".py", ".sh", ".bash", ".zsh", ".rb", ".go", ".rs", ".java", ".kt", ".kts",
+            ".scala", ".php", ".pl", ".lua", ".swift", ".c", ".h", ".cc", ".cpp", ".hpp",
+            ".cs", ".tf", ".hcl", ".ps1", ".wasm",
           ]),
         exclude: z.array(glob).default([]),
         test_globs: z
@@ -137,6 +145,8 @@ export const policySchema = z
          * rule. P1 lists only the dynamic-code rules (spec 13.1).
          */
         enforced_rules: z.array(z.string()).default([]),
+        /** Files allowed to construct code dynamically (config loaders). Reviewed in the gate repo. */
+        dynamic_code_allowlist: z.array(glob).default([]),
         /** Suppression comments that may be added (exact rule names / directive text). */
         suppression_allowlist: z.array(z.string()).default([]),
       })
