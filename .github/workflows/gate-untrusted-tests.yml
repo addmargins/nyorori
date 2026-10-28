@@ -1,0 +1,133 @@
+# Untrusted half of the gate bundle: G4 tests/integrity, G5 changed-branch
+# coverage and G7 mutation execute PR code, so they run here and NOT in the
+# gate service. Attach this file to adopting repositories with an organization
+# ruleset ("Require workflows to pass before merging") pinned to a commit of
+# the gate repository; the gate service accepts artifacts only from this path
+# at a SHA listed in its trusted-workflow allowlist.
+#
+# Hard rules (spec 10.1):
+# - no pull_request_target, no secrets, contents: read only, no persisted token
+# - nothing in the uploaded metadata is trusted: the gate service reads the
+#   run's workflow path, SHA, head SHA and attempt from the GitHub API
+name: gate-untrusted-tests
+
+on:
+  pull_request:
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-untrusted-${{ github.event.merge_group.head_sha || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    # The gate repository itself has no adopter test layout; set this
+    # repository variable there so the template does not run on itself.
+    if: vars.NYORORI_IS_GATE_REPO != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # merge_group: C is the commit that will be merged; pull_request: the test merge.
+      C_SHA: ${{ github.event.merge_group.head_sha || github.sha }}
+      B_SHA: ${{ github.event.merge_group.base_sha || '' }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.C_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: candidate
+
+      - name: Resolve B and changed files
+        id: diff
+        working-directory: candidate
+        run: |
+          if [ -z "$B_SHA" ]; then B_SHA="$(git rev-parse HEAD^1)"; fi
+          echo "B_SHA=$B_SHA" >> "$GITHUB_ENV"
+          git diff --name-only -z --diff-filter=ACMR "$B_SHA" "$C_SHA" \
+            | tr '\0' '\n' | grep -E '\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$' \
+            | grep -vE '\.d\.(ts|mts|cts)$' > "$RUNNER_TEMP/changed.txt" || true
+          echo "count=$(wc -l < "$RUNNER_TEMP/changed.txt")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.B_SHA }}
+          persist-credentials: false
+          path: base
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Detect test runner
+        id: runner
+        working-directory: candidate
+        run: |
+          if [ -f node_modules/.bin/vitest ] || grep -q '"vitest"' package.json; then echo "kind=vitest" >> "$GITHUB_OUTPUT";
+          elif grep -q '"jest"' package.json; then echo "kind=jest" >> "$GITHUB_OUTPUT";
+          else echo "kind=none" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Test base (B) for the test-ID baseline
+        working-directory: base
+        continue-on-error: true
+        run: |
+          npm ci
+          mkdir -p "$RUNNER_TEMP/out"
+          case "${{ steps.runner.outputs.kind }}" in
+            vitest) npx vitest run --reporter=json --outputFile="$RUNNER_TEMP/out/tests.B.json" ;;
+            jest) npx jest --ci --json --outputFile="$RUNNER_TEMP/out/tests.B.json" ;;
+          esac
+
+      - name: Test candidate (C) with changed-file coverage
+        working-directory: candidate
+        run: |
+          npm ci
+          mkdir -p "$RUNNER_TEMP/out"
+          set +e
+          include_args=()
+          while IFS= read -r f; do [ -n "$f" ] && include_args+=("--coverage.include=$f"); done < "$RUNNER_TEMP/changed.txt"
+          case "${{ steps.runner.outputs.kind }}" in
+            vitest)
+              # include = changed files, otherwise files no test imports vanish from the report;
+              # reportOnFailure so a red run still yields coverage.
+              npx vitest run --reporter=json --outputFile="$RUNNER_TEMP/out/tests.C.json" \
+                --coverage.enabled --coverage.provider=v8 --coverage.reporter=json \
+                --coverage.reportsDirectory="$RUNNER_TEMP/out/coverage" --coverage.reportOnFailure \
+                "${include_args[@]}"
+              ;;
+            jest)
+              npx jest --ci --json --outputFile="$RUNNER_TEMP/out/tests.C.json" --coverage \
+                --coverageReporters=json --coverageDirectory="$RUNNER_TEMP/out/coverage"
+              ;;
+          esac
+          # The runner's exit code is evidence for G4, not this step's outcome.
+          echo "$?" > "$RUNNER_TEMP/out/tests.C.rc"
+          exit 0
+
+      - name: Describe the run (untrusted metadata)
+        run: |
+          cp "$RUNNER_TEMP/changed.txt" "$RUNNER_TEMP/out/changed.txt"
+          cat > "$RUNNER_TEMP/out/metadata.json" <<JSON
+          {
+            "schema_version": 1,
+            "event": "${{ github.event_name }}",
+            "base_sha": "$B_SHA",
+            "candidate_sha": "$C_SHA",
+            "run_id": ${{ github.run_id }},
+            "run_attempt": ${{ github.run_attempt }},
+            "workflow_ref": "${{ github.workflow_ref }}",
+            "workflow_sha": "${{ github.workflow_sha }}",
+            "runner": "${{ steps.runner.outputs.kind }}"
+          }
+          JSON
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nyorori-gate-${{ env.C_SHA }}
+          path: ${{ runner.temp }}/out
+          retention-days: 14
+          if-no-files-found: error

@@ -97,6 +97,7 @@ describe("branch hiding (S9 trigger, spec 7.2 c/d/d′/f/f′/f″)", () => {
     ],
     ["exported api object", `export const api = { get: () => 1, put: () => 2 };`],
     ["top-level async entry", `declare function main(): Promise<void>;\n(async () => {\n  await main();\n})();`],
+    ["async IIFE in an effect", `declare function useEffect(f: () => void): void; declare function load(): Promise<void>;\nuseEffect(() => {\n  void (async () => {\n    await load();\n  })();\n});`],
     ["plain forEach", `declare const items: number[]; declare function use(n: number): void;\nitems.forEach((i) => use(i));`],
     ["plain if", `declare function compute(): number; let cache: number | undefined;\nif (!cache) cache = compute();`],
     ["array literal index", `export const first = [1, 2][0];`],

@@ -15,13 +15,11 @@ import type {
   UnitMatch,
   Violation,
 } from "../../types.js";
-import { countableUnits, flattenUnits, visibleBranches } from "../../units/model.js";
+import { flattenUnits, visibleBranches } from "../../units/model.js";
 import {
   bRangeTouched,
   cRangeTouched,
   filePairs,
-  hunkIndexOfB,
-  hunkIndexOfC,
   type FilePair,
 } from "../../units/match.js";
 import { checkName, normalizeName } from "../../units/names.js";
@@ -79,6 +77,35 @@ interface Ctx {
   byB: Map<string, UnitMatch>;
   pairs: FilePair[];
   pairByC: Map<string, FilePair>;
+  /** B paths of files whose baseline failed to parse. */
+  noBaselineB: Set<string>;
+}
+
+/**
+ * Overload signatures appear as CC 1 / CogC 0 rows followed by a same-name
+ * sibling (the implementation). model.ts's `signatureOnly` flag cannot tell
+ * them from trivial one-line helpers, which are exactly what mechanical
+ * splitting produces, so S1/S10 count every unit except a function/method
+ * row that has a later same-name, same-kind sibling. Arrows (property
+ * arrows share names like `test`) cannot be overloads.
+ */
+export function isOverloadSignature(u: Unit, siblings: readonly Unit[]): boolean {
+  if (!u.signatureOnly || u.name === ANONYMOUS) return false;
+  if (u.kind !== "function" && u.kind !== "method") return false;
+  const idx = siblings.indexOf(u);
+  return siblings.some((s, i) => i > idx && s.name === u.name && s.kind === u.kind);
+}
+
+export function countableUnits(m: FileMeasurement): Unit[] {
+  const out: Unit[] = [];
+  const walk = (us: readonly Unit[]) => {
+    for (const u of us) {
+      if (!isOverloadSignature(u, us)) out.push(u);
+      walk(u.children);
+    }
+  };
+  walk(m.units);
+  return out;
 }
 
 function allUnits(m: FileMeasurement): Unit[] {
@@ -103,7 +130,12 @@ function buildCtx(input: ComplexityInput): Ctx {
     byB.set(m.bKey, m);
   }
   const pairs = filePairs(input);
+  const noBaselineB = new Set<string>();
+  for (const e of input.manifest.entries) {
+    if (e.b && e.c && input.baselineMissing?.has(e.c.path)) noBaselineB.add(e.b.path);
+  }
   return {
+    noBaselineB,
     input,
     T: input.policy.complexity.cognitive_limit,
     bUnits,
@@ -129,20 +161,21 @@ function measuredCEntries(ctx: Ctx): Array<{ entry: ManifestEntry; file: FileMea
 // ---------------------------------------------------------------------------
 
 /** Unmatched B units over the limit that could plausibly be this C unit's origin. */
+/**
+ * Unmatched over-limit B units that could be this C unit's origin: in the
+ * paired file any unit of the same kind (it lost its identity), elsewhere in
+ * the PR a unit with the same name. Files without a baseline offer none.
+ */
 function plausibleOrigins(ctx: Ctx, cu: Unit): Unit[] {
-  const T = ctx.T;
   const pair = ctx.pairByC.get(cu.path);
   const name = cu.name === ANONYMOUS ? undefined : normalizeName(cu.name);
-  const cHunk = pair ? hunkIndexOfC(pair.hunks, cu.line) : -1;
   const out: Unit[] = [];
   for (const bu of ctx.bUnits.values()) {
-    if (bu.isResidue !== cu.isResidue || bu.cognitive <= T || ctx.byB.has(bu.key)) continue;
-    const sameName = name !== undefined && bu.name !== ANONYMOUS && normalizeName(bu.name) === name;
+    if (bu.isResidue !== cu.isResidue || bu.cognitive <= ctx.T || ctx.byB.has(bu.key)) continue;
+    if (ctx.noBaselineB.has(bu.path)) continue;
     if (pair && bu.path === pair.b.path) {
-      const sameHunk =
-        cHunk >= 0 && bu.kind === cu.kind && hunkIndexOfB(pair.hunks, bu.line) === cHunk;
-      if (sameName || sameHunk || cu.isResidue) out.push(bu);
-    } else if (sameName) {
+      if (bu.kind === cu.kind) out.push(bu);
+    } else if (name !== undefined && bu.name !== ANONYMOUS && normalizeName(bu.name) === name) {
       out.push(bu);
     }
   }
@@ -377,13 +410,13 @@ function s9Triggers(ctx: Ctx): TriggerHit[] {
     const byLines = branchDrop > cfg.branch_drop_ratio && lineDrop < cfg.max_line_drop_ratio;
     const byDensity = densityDrop >= cfg.density_drop_ratio;
     if (!byLines && !byDensity) continue;
-    const pct = (x: number) => `${Math.round(x * 100)}%`;
+    const pct = (x: number) => `${x >= 0 ? "−" : "+"}${Math.abs(Math.round(x * 100))}%`;
     hits.push({
       id: "S9",
       gate: "complexity",
       file: p.c.path,
       evidence:
-        `V ${vb}→${vc} (−${pct(branchDrop)}), 행 ${l.b}→${l.c} (−${pct(lineDrop)}` +
+        `V ${vb}→${vc} (${pct(branchDrop)}), 행 ${l.b}→${l.c} (${pct(lineDrop)}` +
         `${l.normalized ? "" : ", 비정규화 행 수"}), 분기 밀도 ${densityB.toFixed(2)}→${densityC.toFixed(2)}`,
       routing: true,
     });
@@ -442,7 +475,7 @@ function s11Triggers(ctx: Ctx): TriggerHit[] {
     if (source === undefined) continue;
     const cNames = new Set(flattenUnits(p.c.units).map((u) => normalizeName(u.name)));
     for (const bu of flattenUnits(p.b.units)) {
-      if (bu.name === ANONYMOUS || ctx.byB.has(bu.key) || bu.signatureOnly) continue;
+      if (bu.name === ANONYMOUS || ctx.byB.has(bu.key)) continue;
       const name = normalizeName(bu.name);
       if (cNames.has(name)) continue;
       if (new RegExp(`(?<![\\p{L}\\p{N}_$])${escapeRegExp(name)}(?![\\p{L}\\p{N}_$])`, "u").test(source)) {

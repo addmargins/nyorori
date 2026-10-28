@@ -416,10 +416,14 @@ const branchHiding: Rule.RuleModule = {
         const n = node as AstNode;
         const callee = unwrap(n.callee);
         if (isFunctionLike(callee)) {
-          // A top-level `(async () => { ... })()` is the script entry idiom.
-          const stmt = outermostWrapper(n).parent;
-          const topLevel = stmt?.type === "ExpressionStatement" && stmt.parent?.type === "Program";
-          if (!topLevel) context.report({ node, messageId: "iife" });
+          // `(async () => { ... })()` as a statement (optionally `void`ed) is
+          // the fire-and-forget idiom of scripts and React effects, and a
+          // top-level IIFE is a module entry point; neither hides a branch.
+          let stmt = outermostWrapper(n).parent;
+          if (stmt?.type === "UnaryExpression" && stmt.operator === "void") stmt = stmt.parent;
+          const asStatement = stmt?.type === "ExpressionStatement";
+          const topLevel = asStatement && stmt!.parent?.type === "Program";
+          if (!topLevel && !(asStatement && callee.async)) context.report({ node, messageId: "iife" });
           return;
         }
         if (callee.type === "MemberExpression" && !callee.computed) {
