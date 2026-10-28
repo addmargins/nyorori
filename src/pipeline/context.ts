@@ -1,6 +1,9 @@
 // State shared by the gate steps of one run, computed once from git.
 
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { batchCheck, listTree, readBlobs, type TreeEntry } from "../git/manifest.js";
 import type { Policy } from "../policy/schema.js";
 import type { FileLineMap, Manifest, MeasurementFingerprint } from "../types.js";
@@ -22,9 +25,30 @@ export interface RunContext {
 
 const require = createRequire(import.meta.url);
 
-function versionOf(pkg: string): string {
+/**
+ * package.json locations of the pinned tools, resolved with literal specifiers
+ * (the gate's own dynamic-code rule would flag a computed require).
+ */
+const TOOL_PACKAGES: ReadonlyArray<readonly [string, () => string]> = [
+  ["eslint", () => require.resolve("eslint/package.json")],
+  ["typescript-eslint", () => require.resolve("typescript-eslint/package.json")],
+  ["typescript", () => require.resolve("typescript/package.json")],
+  // dependency-cruiser does not export its package.json: walk up from its entry point.
+  ["dependency-cruiser", () => packageJsonAbove(fileURLToPath(import.meta.resolve("dependency-cruiser")), "dependency-cruiser")],
+  ["prettier", () => require.resolve("prettier/package.json")],
+];
+
+function packageJsonAbove(entry: string, name: string): string {
+  for (let dir = dirname(entry); dir !== dirname(dir); dir = dirname(dir)) {
+    const candidate = join(dir, "package.json");
+    if (existsSync(candidate) && (JSON.parse(readFileSync(candidate, "utf8")) as { name?: string }).name === name) return candidate;
+  }
+  throw new Error(`package.json of ${name} not found`);
+}
+
+function versionAt(resolvePath: () => string): string {
   try {
-    return (require(`${pkg}/package.json`) as { version: string }).version;
+    return (JSON.parse(readFileSync(resolvePath(), "utf8")) as { version: string }).version;
   } catch {
     return "unknown";
   }
@@ -32,13 +56,7 @@ function versionOf(pkg: string): string {
 
 /** Pinned tool versions recorded in every fingerprint (spec 6.1). */
 export function toolVersions(): Record<string, string> {
-  return {
-    eslint: versionOf("eslint"),
-    "typescript-eslint": versionOf("typescript-eslint"),
-    typescript: versionOf("typescript"),
-    "dependency-cruiser": versionOf("dependency-cruiser"),
-    prettier: versionOf("prettier"),
-  };
+  return Object.fromEntries(TOOL_PACKAGES.map(([name, at]) => [name, versionAt(at)]));
 }
 
 /** Reads both sides of every changed entry so the test, config and AI-loop checks see non-code files too. */

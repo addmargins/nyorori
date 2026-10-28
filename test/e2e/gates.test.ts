@@ -3,15 +3,13 @@
 
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { defaultPolicy } from "../../src/policy/schema.js";
 import type { ReviewComment } from "../../src/review/simplification.js";
 import { waiverId } from "../../src/waivers/index.js";
-import { TestRepo, fnWithCogc, gate, run, servicePolicy } from "./helpers.js";
+import { TestRepo, approvalBody, fnWithCogc, gate, run, servicePolicy, testPolicy } from "./helpers.js";
 
 const MANIP = new URL("../fixtures/manipulation/", import.meta.url).pathname;
 const original = readFileSync(`${MANIP}original/price.js`, "utf8");
 const variantB = readFileSync(`${MANIP}b/price.js`, "utf8");
-const APPROVE = "/simplification-review NO_SIMPLIFICATION_NEEDED\nq1: pass\nq2: pass\nq3: pass\nq4: pass\nq5: pass";
 
 const identity = { prAuthor: "alice", commits: [{ sha: "x", authorLogin: "alice", committerLogin: "alice" }], agentInvokers: [] };
 const comment = (id: number, login: string, body: string, headSha: string): ReviewComment => ({
@@ -137,7 +135,7 @@ describe("scope and applicability", () => {
     const repo = new TestRepo();
     const b = repo.commit({ "src/a.ts": fnWithCogc("a", 3), "README.md": "a\n" });
     const c = repo.commit({ "README.md": "b\n", "docs/guide.md": "c\n" });
-    const out = await run(repo, b, c, defaultPolicy());
+    const out = await run(repo, b, c, testPolicy());
     expect(out.verdict.state).toBe("NOT_APPLICABLE");
     expect(out.verdict.mergeAllowed).toBe(true);
     expect(out.checkRun.conclusion).toBe("success");
@@ -149,7 +147,7 @@ describe("scope and applicability", () => {
     const repo = new TestRepo();
     const b = repo.commit({ "README.md": "x\n" });
     const c = repo.commit({ "src/a.js": fnWithCogc("a", 3) });
-    const out = await run(repo, b, c, defaultPolicy({ coverage: { mode: "observe" } }));
+    const out = await run(repo, b, c, testPolicy({ coverage: { mode: "observe" } }));
     expect(gate(out, "tests").state).toBe("INCONCLUSIVE");
     expect(out.verdict.state).toBe("INCONCLUSIVE");
     expect(out.checkRun.conclusion).toBe("failure");
@@ -171,7 +169,7 @@ describe("scope and applicability", () => {
       ],
     });
     const wf = { repository: "org/gate", path: ".github/workflows/gate-untrusted-tests.yml", shas: ["a".repeat(40)] };
-    const policy = defaultPolicy({ coverage: { mode: "observe" }, provenance: { trusted_workflows: [wf] } });
+    const policy = testPolicy({ coverage: { mode: "observe" }, provenance: { trusted_workflows: [wf] } });
     const unproven = await run(repo, b, c, policy, { artifacts: { tests: { reportC: report } } });
     expect(unproven.verdict.reasons).toContain("UNTRUSTED_ARTIFACT");
     expect(unproven.verdict.mergeAllowed).toBe(false);
@@ -227,6 +225,7 @@ describe("G6 simplification review end to end", () => {
     expect(gate(before, "complexity").state).toBe("PASS");
     expect(triggerIds(before)).toEqual(expect.arrayContaining(["S1", "S10"]));
     expect(reasons(before, "simplification-review")).toEqual(["REVIEW_REQUIRED"]);
+    const APPROVE = approvalBody(triggerIds(before));
 
     const self = await run(repo, b, c, policy, { pr: { comments: [comment(1, "alice", APPROVE, c)], identity, headSha: c } });
     expect(reasons(self, "simplification-review")).toEqual(["REVIEW_REQUIRED"]);

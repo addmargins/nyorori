@@ -152,10 +152,6 @@ function sanitizeWaivers(s: SubmittedResult): GateResult {
   return { ...r, violations, waivers_applied: [...applied.values()].filter((w) => used.has(w.id)) };
 }
 
-/** S6 and S11 always route, whatever the producing gate's mode (ruling D16). */
-function normalizeRouting(t: TriggerHit): TriggerHit {
-  return ALWAYS_ROUTING_TRIGGERS.has(t.id) && !t.routing ? { ...t, routing: true } : t;
-}
 
 /** A degraded gate never blocks; what it would have blocked goes to the simplification review instead. */
 function degradedTriggers(gate: GateId, r: GateResult | undefined): TriggerHit[] {
@@ -290,7 +286,9 @@ export function aggregateQualityGate(input: AggregateInput): QualityGateVerdict 
   }
 
   // Observe-mode gates are excluded from aggregation except for S6/S11 (ruling D16).
-  const triggers: TriggerHit[] = routingTriggers([...counted.flatMap((r) => r.triggers), ...extraTriggers].map(normalizeRouting));
+  // S6/S11 route whatever the producing gate's mode, but a gate may still mark
+  // one observe-only on purpose (ruling D5: an ordinary foreign-language file).
+  const triggers: TriggerHit[] = routingTriggers([...counted.flatMap((r) => r.triggers), ...extraTriggers]);
   // A degraded G6 cannot route to itself, so it behaves like observe.
   const reviewMode = policyMode(policy, "simplification-review");
   const review = evaluateSimplificationReview({

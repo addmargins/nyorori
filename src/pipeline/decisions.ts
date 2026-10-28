@@ -4,15 +4,27 @@
 
 import { aggregateQualityGate, policyMode, type QualityGateVerdict, type SubmittedResult } from "../aggregate/index.js";
 import { detectForbiddenChanges, type LoopChange, type PackageJsonPair } from "../ailoop/index.js";
+import { blobLineDiff, cRangeTouched } from "../git/linemap.js";
 import { applyOverrides } from "../override/index.js";
 import type { Policy } from "../policy/schema.js";
 import { finalizeGateResult } from "../report/result.js";
 import type { PrIdentityContext } from "../review/independence.js";
-import type { GateResult, Violation, WaiverApplied } from "../types.js";
-import { applyWaivers, evaluateWaivers, waiverTriggers, WAIVABLE_GATES, type ValidWaiver } from "../waivers/index.js";
+import type { GateResult, Hunk, Violation, WaiverApplied } from "../types.js";
+import { flattenUnits } from "../units/model.js";
+import { findCommands } from "../waivers/command.js";
+import {
+  applyWaivers,
+  evaluateWaivers,
+  parseWaiverRequest,
+  waiverTriggers,
+  WAIVABLE_GATES,
+  type ValidWaiver,
+} from "../waivers/index.js";
+import { applyTestApprovals } from "../waivers/test-approval.js";
 import { candidateBlobLookup, type RunContext } from "./context.js";
 import type { GateDraft } from "./draft.js";
 import { isAiLoopRun } from "./actions-gates.js";
+import type { MeasuredState } from "./service-gates.js";
 
 const NO_IDENTITY: PrIdentityContext = { prAuthor: "", commits: [], agentInvokers: [] };
 
@@ -30,6 +42,8 @@ export function applyMeasurementOverrides(ctx: RunContext, drafts: GateDraft[]):
       identity: identity(ctx),
       ...(ctx.opts.pr?.teams ? { teams: ctx.opts.pr.teams } : {}),
       candidateBlob,
+      base: ctx.manifest.baseSha,
+      candidate: ctx.manifest.candidateSha,
     });
     d.inconclusive = o.inconclusive;
     d.unmeasured.push(...o.unmeasured);
@@ -51,7 +65,52 @@ function budgetedPolicy(policy: Policy, quarterUsed: number): Policy {
   return { ...policy, waivers: { ...policy.waivers, per_pr_budget: Math.min(policy.waivers.per_pr_budget, left) } };
 }
 
-export function applyWaiverDecisions(ctx: RunContext, drafts: GateDraft[]): WaiverOutcome {
+type TouchQuery = { file: string; unit: string; approvedBlob: string; currentBlob: string };
+
+/**
+ * Ruling D15 carry-over: a waiver approved on an older blob of its file stays
+ * valid when the diff to the current blob leaves the unit's range untouched.
+ * The diffs are computed up front because the waiver check is synchronous;
+ * anything undecidable (blob not in the mirror, unit not measured) is "touched".
+ */
+async function unitTouchedSince(ctx: RunContext, measured: MeasuredState | undefined): Promise<(q: TouchQuery) => boolean> {
+  const comments = ctx.opts.pr?.comments ?? [];
+  const current = candidateBlobLookup(ctx.treeC);
+  const files = new Set<string>();
+  const blobs = new Set<string>();
+  for (const c of comments) {
+    const reqs = parseWaiverRequest(c, ctx.policy);
+    if (Array.isArray(reqs)) for (const r of reqs) files.add(r.file);
+    try {
+      for (const cmd of findCommands(c.body, "gate-waive-approve")) if (cmd.args.blob) blobs.add(cmd.args.blob.toLowerCase());
+    } catch {
+      // Malformed approvals are reported by evaluateWaivers.
+    }
+  }
+  const hunks = new Map<string, Hunk[] | null>();
+  for (const file of files) {
+    const now = current(file);
+    if (!now) continue;
+    for (const approved of blobs) {
+      if (approved === now) continue;
+      hunks.set(`${approved}|${now}`, await blobLineDiff(ctx.opts.repoDir, approved, now).catch(() => null));
+    }
+  }
+  return ({ file, unit, approvedBlob, currentBlob }) => {
+    const h = hunks.get(`${approvedBlob}|${currentBlob}`);
+    const m = measured?.meas.c.get(file);
+    if (!h || !m || m.blob !== currentBlob) return true;
+    const u = m.residue.key === unit ? m.residue : flattenUnits(m.units).find((x) => x.key === unit);
+    if (!u) return true;
+    return cRangeTouched({ hunks: h }, u.line, u.endLine);
+  };
+}
+
+export async function applyWaiverDecisions(
+  ctx: RunContext,
+  drafts: GateDraft[],
+  measured: MeasuredState | undefined,
+): Promise<WaiverOutcome> {
   const comments = ctx.opts.pr?.comments ?? [];
   const { valid, rejected } = evaluateWaivers(comments, {
     policy: ctx.policy,
@@ -59,6 +118,7 @@ export function applyWaiverDecisions(ctx: RunContext, drafts: GateDraft[]): Waiv
     ...(ctx.opts.pr?.teams ? { teams: ctx.opts.pr.teams } : {}),
     now: ctx.opts.now ?? new Date(),
     candidateBlob: candidateBlobLookup(ctx.treeC),
+    unitTouchedSince: await unitTouchedSince(ctx, measured),
   });
   const waivable = drafts.filter((d) => WAIVABLE_GATES.has(d.gate));
   const all: Violation[] = waivable.flatMap((d) => d.violations);
@@ -80,7 +140,23 @@ export function applyWaiverDecisions(ctx: RunContext, drafts: GateDraft[]): Waiv
     const ids = new Set(d.violations.flatMap((v) => (v.waivedBy ? [v.waivedBy] : [])));
     d.waivers = result.applied.filter((a) => ids.has(a.id));
   }
+  applyGateOwnerTestApprovals(ctx, drafts);
   return { applied: result.applied, valid };
+}
+
+/** TEST_REMOVED / TEST_CONFIG_WEAKENED are cleared by a gate owner's approval, not a waiver (spec 8.3). */
+function applyGateOwnerTestApprovals(ctx: RunContext, drafts: GateDraft[]): void {
+  const tests = drafts.find((d) => d.gate === "tests");
+  if (!tests || tests.violations.length === 0) return;
+  const out = applyTestApprovals(tests.violations, ctx.opts.pr?.comments ?? [], {
+    policy: ctx.policy,
+    identity: identity(ctx),
+    ...(ctx.opts.pr?.teams ? { teams: ctx.opts.pr.teams } : {}),
+    headSha: ctx.opts.pr?.headSha ?? ctx.manifest.candidateSha,
+  });
+  tests.violations = out.violations;
+  tests.waivers.push(...out.applied);
+  if (out.rejected.length) tests.observe = { ...tests.observe, test_approvals_rejected: out.rejected };
 }
 
 /** Spec 12.2: forbidden changes are a mechanical FAIL for registered AI-loop bots only. */
@@ -151,6 +227,7 @@ export function aggregate(
         ...(policy.measurer.cccc_sha256 ? { sha256: policy.measurer.cccc_sha256 } : {}),
       },
       tools: ctx.tools,
+      ...(opts.pr?.headSha ? { prHeadSha: opts.pr.headSha } : {}),
     },
     results: submitted,
     trustedWorkflows: { workflows: policy.provenance.trusted_workflows },

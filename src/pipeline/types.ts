@@ -75,6 +75,11 @@ export interface RunGatesOptions {
   now?: Date;
   /** AI fix-loop attempt number, for gate-feedback.json. */
   attempt?: number;
+  /**
+   * AI fix loop only: the previous attempt C_{n-1}. S1/S9/S10 are also computed
+   * against it for files that violated G1 there (ruling D17).
+   */
+  previousAttempt?: string;
 }
 
 export interface RunGatesOutput {

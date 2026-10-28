@@ -10,7 +10,8 @@ import { buildGateFeedback } from "../report/feedback.js";
 import { verdictToCheckRun } from "../report/checkrun.js";
 import { renderSummaryMarkdown } from "../report/markdown.js";
 import type { MeasurementFingerprint } from "../types.js";
-import { coverageGate, mutationGate, testsGate } from "./actions-gates.js";
+import { mergePreviousAttemptTriggers } from "../ailoop/index.js";
+import { coverageGate, isAiLoopRun, mutationGate, testsGate } from "./actions-gates.js";
 import { candidateTree, readChangedTexts, toolVersions, type RunContext } from "./context.js";
 import { aggregate, applyMeasurementOverrides, applyWaiverDecisions, finalize } from "./decisions.js";
 import { guard, type GateDraft } from "./draft.js";
@@ -57,6 +58,7 @@ export async function runGates(opts: RunGatesOptions): Promise<RunGatesOutput> {
       measured = await measure(ctx);
       return complexityGate(ctx, measured);
     });
+    await addPreviousAttemptTriggers(ctx, workDir, g1);
     // Lint maps hits to units; without measurements it falls back to file-level comparison.
     const state: MeasuredState = measured ?? emptyMeasured(ctx);
     const drafts: GateDraft[] = [
@@ -69,7 +71,7 @@ export async function runGates(opts: RunGatesOptions): Promise<RunGatesOutput> {
     ];
 
     applyMeasurementOverrides(ctx, drafts);
-    const waivers = applyWaiverDecisions(ctx, drafts);
+    const waivers = await applyWaiverDecisions(ctx, drafts, measured);
     const results = drafts.map((d) => finalize(ctx, d));
     const verdict = aggregate(ctx, drafts, results, waivers);
     const all = [...results, verdict.review];
@@ -90,6 +92,35 @@ export async function runGates(opts: RunGatesOptions): Promise<RunGatesOutput> {
   }
 }
 
+/** G1 alone for another (B, C) pair of the same repository and policy. */
+async function complexityFor(opts: RunGatesOptions, workDir: string, base: string, candidate: string): Promise<GateDraft> {
+  const ctx = await buildContext({ ...opts, base, candidate }, workDir);
+  return complexityGate(ctx, await measure(ctx));
+}
+
+/**
+ * Ruling D17: an AI loop could launder a redistribution across attempts, each
+ * attempt looking fine against B. For files that violated G1 in C_{n-1}, the
+ * shape triggers of C_n against C_{n-1} also route (the B ratchet is unchanged).
+ */
+async function addPreviousAttemptTriggers(ctx: RunContext, workDir: string, g1: GateDraft): Promise<void> {
+  const prev = ctx.opts.previousAttempt;
+  if (!prev || !isAiLoopRun(ctx)) return;
+  try {
+    const prevVsB = await complexityFor(ctx.opts, workDir, ctx.opts.base, prev);
+    const violating = new Set(prevVsB.violations.map((v) => v.file));
+    if (violating.size === 0) return;
+    const vsPrev = await complexityFor(ctx.opts, workDir, prev, ctx.opts.candidate);
+    g1.triggers = mergePreviousAttemptTriggers(g1.triggers, vsPrev.triggers, violating);
+  } catch (e) {
+    g1.inconclusive.push({
+      reason: "TOOL_ERROR",
+      detail: `previous-attempt comparison against ${prev} failed: ${e instanceof Error ? e.message : String(e)}`,
+      authorFixable: false,
+    });
+  }
+}
+
 function emptyMeasured(ctx: RunContext): MeasuredState {
   return {
     meas: {
@@ -104,5 +135,6 @@ function emptyMeasured(ctx: RunContext): MeasuredState {
       determinismChecked: false,
     },
     match: { matches: [], byC: new Map(), byB: new Map(), nameWarnings: [] },
+    normalization: { lines: new Map(), identical: new Set() },
   };
 }

@@ -172,7 +172,7 @@ async function cmdServe(argv: string[]): Promise<number> {
   });
   const server = createWebhookServer({
     secret: env("NYORORI_WEBHOOK_SECRET"),
-    dispatch: (event, payload) => dispatchEvent({ client: api, appId, evaluate, log }, event, payload),
+    dispatch: (event, payload) => dispatchEvent({ client: api, appId, evaluate, log, policyRevision: loaded.revision }, event, payload),
     log,
   });
   await new Promise<void>((done) => server.listen(Number(values.port), done));

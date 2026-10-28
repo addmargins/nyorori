@@ -62,16 +62,26 @@ export function codeLineCount(source: string, jsx: boolean): number {
   return lines.size;
 }
 
-/** Normalized line count, or null when the source cannot be formatted (e.g. syntax error). */
-export async function normalizedLineCount(source: string, path: string): Promise<number | null> {
+/** `source` reformatted with the pinned options, or null when it cannot be formatted (e.g. syntax error). */
+export async function normalizeSource(source: string, path: string): Promise<string | null> {
   const p = parserFor(path);
   if (!p) return null;
   try {
-    const formatted = await format(source, { ...PRETTIER_OPTIONS, parser: p.parser, filepath: p.fakeName });
-    return codeLineCount(formatted, p.jsx);
+    return await format(source, { ...PRETTIER_OPTIONS, parser: p.parser, filepath: p.fakeName });
   } catch {
     return null;
   }
+}
+
+/** Code lines of an already normalized source (see normalizeSource). */
+export function normalizedCodeLines(formatted: string, path: string): number {
+  return codeLineCount(formatted, parserFor(path)?.jsx ?? true);
+}
+
+/** Normalized line count, or null when the source cannot be formatted (e.g. syntax error). */
+export async function normalizedLineCount(source: string, path: string): Promise<number | null> {
+  const formatted = await normalizeSource(source, path);
+  return formatted === null ? null : normalizedCodeLines(formatted, path);
 }
 
 /** Normalized line counts for every path present on either side. */

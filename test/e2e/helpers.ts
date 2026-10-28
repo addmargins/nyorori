@@ -12,15 +12,25 @@ if (!existsSync(CCCC)) throw new Error(`cccc binary not found at ${CCCC}; set NY
 
 export { TestRepo };
 
+/**
+ * Default policy for local runs: the binary here is a source build, not the
+ * attested release asset, so no sha256 is pinned (audit F10).
+ */
+export function testPolicy(over: Partial<PolicyInput> = {}): Policy {
+  return defaultPolicy({ ...over, measurer: { allow_unpinned: true, ...over.measurer } });
+}
+
 /** Default policy with the PR-executing gates observed, so a run needs no artifacts. */
 export function servicePolicy(over: Partial<PolicyInput> = {}): Policy {
-  return defaultPolicy({
-    tests: { mode: "observe" },
-    coverage: { mode: "observe" },
-    ...over,
-    // The locally built binary is not the attested release asset (audit F10).
-    measurer: { allow_unpinned: true, ...over.measurer },
-  });
+  return testPolicy({ tests: { mode: "observe" }, coverage: { mode: "observe" }, ...over });
+}
+
+const RUBRIC_OK = "q1: pass\nq2: pass\nq3: pass\nq4: pass\nq5: pass";
+
+/** A NO_SIMPLIFICATION_NEEDED review with the disposition line every fired trigger needs (ruling D13). */
+export function approvalBody(triggerIds: readonly string[]): string {
+  const lines = [...new Set(triggerIds)].map((id) => `${id}: reviewed, the shape is intended`);
+  return ["/simplification-review NO_SIMPLIFICATION_NEEDED", RUBRIC_OK, ...lines].join("\n");
 }
 
 export async function run(

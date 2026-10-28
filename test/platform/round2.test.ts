@@ -79,7 +79,7 @@ describe("bug #3: webhook server survives hostile clients", () => {
 });
 
 describe("D16: observe and degraded modes", () => {
-  const s11: TriggerHit = { id: "S11", gate: "complexity", file: "src/a.vue", evidence: "unmeasured SFC", routing: false };
+  const s11: TriggerHit = { id: "S11", gate: "complexity", file: "src/a.vue", evidence: "unmeasured SFC", routing: true };
   const s1: TriggerHit = { id: "S1", gate: "complexity", file: "src/a.ts", evidence: "V kept", routing: true };
 
   it("observe-mode gates route only S6/S11", () => {
@@ -88,6 +88,9 @@ describe("D16: observe and degraded modes", () => {
     const v = agg(swap("complexity", svc("complexity", { triggers: [s1, s11] })), { policy: p });
     expect(v.state).toBe("FAIL");
     expect(v.triggers.map((t) => t.id)).toEqual(["S11"]);
+    // The gate's own routing flag still holds: an ordinary foreign-language file is observe-only (ruling D5).
+    const foreign: TriggerHit = { ...s11, file: "tools/x.py", evidence: "FOREIGN_LANGUAGE", routing: false };
+    expect(agg(swap("complexity", svc("complexity", { triggers: [foreign] })), { policy: p }).state).toBe("PASS");
   });
 
   it("a degraded gate never blocks; its FAILs and triggers require the simplification review", () => {

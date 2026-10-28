@@ -88,6 +88,8 @@ node dist/cli.js run --repo . --base origin/main --candidate HEAD \
 
 - `--artifacts <dir>`: required workflow 산출물과 같은 구조(`tests.C.json`, `tests.B.json`, `coverage/coverage-final.json`, `coverage-meta.json`, `mutation.json`, `metadata.json`). `provenance.json`이 없으면 산출물은 게이트를 **통과시키지 못한다**(차단만 가능).
 - `--pr <pr.json>`: `{ comments, identity, teams, headSha, carryOver, quarterWaiversUsed }`. waiver·단순화 리뷰·override 명령을 재현할 때 쓴다.
+- 기본 정책은 cccc sha256을 고정하지 않으므로, enforce 게이트가 있으면 `MEASURER_MISMATCH`(INCONCLUSIVE)다. 운영에서는 `measurer.cccc_sha256`에 attestation을 검증한 바이너리 해시를 넣고, 로컬 실험에서만 `measurer.allow_unpinned: true`를 쓴다.
+- AI 수정 루프의 재시도는 `runGates({ previousAttempt })`로 직전 시도 C_{n−1}을 넘기면, C_{n−1}에서 G1 위반이 있던 파일의 S1·S9·S10을 C_{n−1} 대비로도 계산한다(ruling D17).
 - `policy/default.policy.json`은 tests를 enforce로 두므로 산출물 없이 코드 변경을 판정하면 INCONCLUSIVE다. 산출물 없이 G1~G3만 보려면 정책에서 `tests.mode`와 `coverage.mode`를 `observe`로 둔다.
 
 측정기 업그레이드 검사(spec 6.1):
@@ -135,5 +137,6 @@ npm run typecheck
 - **cccc의 계산 특성**(논리 할당 무비용, 콜백 비가산, 이름 기반 재귀)은 고정해도 사라지지 않는다. 이를 G2와 트리거로 보완한다.
 - **PR 코드를 실행해 얻은 증거(G4 테스트 결과, G5, G7)는 악의적인 PR이 위조할 수 있다**(spec 10.3). 이 게이트들은 최적화 압력을 막을 뿐이다.
 - 여러 PR에 나눈 조작을 잡는 이동 기준 비교(spec 7.5)와 override 시 ESLint `complexity` 대체 측정은 아직 구현하지 않았다.
+- waiver carry-over(ruling D15)는 승인 당시 blob이 서비스 mirror에 있어야 판단할 수 있다. 없으면 "변경됨"으로 보고 다시 승인받는다.
 - 서비스는 issue comment가 게시된 시점의 head SHA를 "그 댓글로 처음 판정한 head"로 기록한다(`comment-heads.json`). 댓글과 push가 경합하면 승인이 stale로 처리된다(안전한 방향).
 - `scripts/fetch-cccc.sh`의 릴리스 다운로드 경로와 워크플로 템플릿의 action SHA는 실제 환경에서 검증해야 한다.

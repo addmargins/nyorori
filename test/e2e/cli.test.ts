@@ -4,8 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeAll, describe, expect, it } from "vitest";
-import { defaultPolicy } from "../../src/policy/schema.js";
-import { CCCC, TestRepo, fnWithCogc } from "./helpers.js";
+import { CCCC, TestRepo, fnWithCogc, servicePolicy } from "./helpers.js";
 
 const ROOT = new URL("../../", import.meta.url).pathname;
 const CLI = join(ROOT, "dist/cli.js");
@@ -21,7 +20,7 @@ describe("nyorori CLI", () => {
     execFileSync("npx", ["tsc", "-p", "tsconfig.build.json"], { cwd: ROOT, stdio: "inherit" });
     dir = mkdtempSync(join(tmpdir(), "nyorori-cli-"));
     policyFile = join(dir, "policy.json");
-    const { revision: _r, ...p } = defaultPolicy({ tests: { mode: "observe" }, coverage: { mode: "observe" } });
+    const { revision: _r, ...p } = servicePolicy();
     writeFileSync(policyFile, JSON.stringify(p));
     return () => rmSync(dir, { recursive: true, force: true });
   }, 120_000);
