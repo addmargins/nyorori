@@ -51,10 +51,15 @@
 - 원장은 merge 시 기본 브랜치 workflow가 여는 `complexity-debt` 이슈. 과소집계 가능성을 문서화한다.
 - GitHub-hosted runner만. self-hosted는 테스트 job이 호스트를 오염시킨다.
 
-## 5. 이 검토에서 드러난 현재 설계의 결함 (모드와 무관하게 수정 대상)
+## 5. 이 검토에서 드러난 현재 설계의 결함 (수정 완료, 독립 검증)
 
-- 서비스가 `workflow_run` 완료를 구독하지 않아, push 직후 첫 평가는 테스트 아티팩트가 없어 INCONCLUSIVE(REPORT_MISSING)가 되고 재트리거까지 머문다. merge queue에서는 PR이 큐에서 빠진다. Actions-only는 `needs:`로 구조적으로 없다.
-- App 키와 적대적 객체 파싱이 한 호스트에 있다. 키는 KMS/HSM 서명 전용으로, 워커는 별도 컨테이너로 두어야 한다.
+| 결함 | 수정 | 검증 |
+|---|---|---|
+| 서비스가 `workflow_run` 완료를 구독하지 않아 push 직후 첫 평가가 INCONCLUSIVE(REPORT_MISSING)가 되고 merge queue에서 PR이 빠짐 | 증거가 아직 없고 신뢰 workflow가 대기·실행 중이면 체크를 **in_progress "waiting for test evidence"**로 두고 G1~G3 결과를 먼저 보여 준다. `workflow_run` 완료로 재평가, 마감(`tests.evidence_wait_minutes`, 기본 45분 = merge queue 60분 제한 아래) 뒤 INCONCLUSIVE, 재시작 시 저널에서 대기 복구, 신뢰 workflow가 여럿이면 모두 끝날 때까지 대기하고 run별 아티팩트를 병합 | 독립 검증자가 실제 git·파이프라인·워커·가짜 GitHub API로 재현: 첫 평가는 완료된 실패를 게시하지 않음, `workflow_run` → 최종 판정, 마감 → INCONCLUSIVE, 다른 head/저장소/경로/비신뢰 workflow 무시, 대기 중 push 시 stale 대기가 현재 head를 덮어쓰지 않음(실제 동시성), 중복 webhook+스위퍼 → 평가 1회, 재시작 후 마감 보존 |
+| App 키가 적대적 git 객체·zip을 파싱하는 호스트에 있음 | `NYORORI_SIGNER=command`: 외부 KMS/HSM 명령이 서명 입력을 stdin으로 받아 서명만 돌려주므로 키가 프로세스에 들어오지 않음(허용 목록 env 전달, `NYORORI_*`·토큰·비밀은 이름을 적어도 전달 불가, 타임아웃). 워커는 `NYORORI_WORKER_COMMAND` 접두 명령(예: `docker run --network none`)으로 별도 컨테이너에서 실행 | JWT가 공개키로 검증됨, 명령 argv에 서명 입력이 섞이지 않음, 셸 미사용, env 차단, 접두 명령이 멈추면 TOOL_ERROR |
+| (검증 중 발견) PR이 필수 workflow와 같은 경로의 workflow를 추가해 신뢰 reusable workflow를 호출하면 출처 검사를 통과할 수 있음 | run의 `workflow_url` 소유 저장소가 게이트 저장소여야 하고(없으면 UNTRUSTED_ARTIFACT, fail closed), 후보 트리가 신뢰 경로의 파일을 정의하면 증거를 거부 | 두 형태 모두 재현에서 거부됨 |
+
+운영 주의: 신뢰 workflow가 둘 이상이면 아티팩트 병합이 서비스 프로세스에서 zip을 읽는다(한도는 있으나 워커 밖). 도입 저장소가 신뢰 경로에 자기 파일을 두면 증거가 영구히 거부된다(의도된 엄격함). 만료 뒤 늦게 온 `workflow_run`은 한 번만 재평가된다.
 
 ## 6. 사양에서 고칠 곳 (Actions-only 모드를 공식화할 때)
 

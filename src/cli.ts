@@ -16,7 +16,7 @@ import { replayCommand } from "./replay/cli.js";
 import type { PullRequestContext, RunGatesOptions } from "./pipeline/types.js";
 import { loadPolicy } from "./policy/load.js";
 import { dispatchEvent, replayPendingJobs, sweepWaiting, type ServiceDeps } from "./service/handlers.js";
-import { CommandSigner, createSigner, type AppJwtSigner } from "./service/signer.js";
+import { CommandSigner, createSigner, signerEnvironment, type AppJwtSigner } from "./service/signer.js";
 import { FileDeliveryStore, JobJournal } from "./service/journal.js";
 import { loadArtifactDir } from "./replay/inputs.js";
 import { writeRunOutputs } from "./replay/outputs.js";
@@ -169,7 +169,7 @@ function envStringArray(name: string): string[] | undefined {
  * only PATH plus the variables named in NYORORI_SIGNER_ENV (cloud credentials
  * for the KMS CLI), and NYORORI_SIGNER_TIMEOUT_MS bounds each signature.
  */
-async function signerFromEnv(): Promise<AppJwtSigner> {
+export async function signerFromEnv(): Promise<AppJwtSigner> {
   const kind = process.env.NYORORI_SIGNER ?? "file";
   if (kind === "file") {
     return createSigner({ kind: "file", privateKeyPem: await readFile(env("NYORORI_PRIVATE_KEY_PATH"), "utf8") });
@@ -177,10 +177,9 @@ async function signerFromEnv(): Promise<AppJwtSigner> {
   if (kind !== "command") throw new UsageError("NYORORI_SIGNER must be \"file\" or \"command\"");
   const argv = envStringArray("NYORORI_SIGNER_COMMAND");
   if (!argv || argv.length === 0) throw new UsageError("NYORORI_SIGNER=command needs NYORORI_SIGNER_COMMAND (JSON argv)");
-  const forwarded: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
-  for (const name of envStringArray("NYORORI_SIGNER_ENV") ?? []) {
-    if (process.env[name] !== undefined) forwarded[name] = process.env[name]!;
-  }
+  // The allowlist goes through signerEnvironment so the denylist (NYORORI_*,
+  // tokens, secrets) holds even when an operator names one of them.
+  const forwarded = signerEnvironment(envStringArray("NYORORI_SIGNER_ENV") ?? []);
   const timeoutRaw = process.env.NYORORI_SIGNER_TIMEOUT_MS;
   const timeoutMs = timeoutRaw === undefined ? undefined : Number(timeoutRaw);
   if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) throw new UsageError("NYORORI_SIGNER_TIMEOUT_MS must be a positive integer");
