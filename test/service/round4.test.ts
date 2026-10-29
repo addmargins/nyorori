@@ -291,7 +291,7 @@ describe("5. job journal", () => {
     expect((await journal.pending()).map((j) => j.delivery)).toEqual(["d-crashed", "d-queued"]);
     const fresh = new Fake();
     const r = await replayPendingJobs({ ...deps, client: fresh, queue: new EvaluationQueue(), sleep: async () => {} }, journal);
-    expect(r).toEqual({ replayed: 2, dropped: 0 });
+    expect(r).toEqual({ replayed: 2, dropped: 0, waits: 0 });
     expect(await journal.pending()).toEqual([]);
     expect(fresh.runs.filter((x) => x.name === "quality-gate" && x.status === "completed")).toHaveLength(2);
 

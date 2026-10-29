@@ -298,44 +298,57 @@ export { ARTIFACT_ENTRIES } from "../pipeline/artifacts.js";
  * its conclusion travels with the provenance so a failed run never supplies
  * passing evidence. A hostile artifact is reported, never crashes the service.
  */
-async function findArtifacts(
-  cfg: ServiceConfig,
-  ctx: EvaluationContext,
-  prHead: string | undefined,
-): Promise<{ artifacts: Artifacts; artifactZip?: ArtifactZip; problem?: string }> {
+export interface FoundArtifacts {
+  artifacts: Artifacts;
+  artifactZip?: ArtifactZip;
+  problem?: string;
+  /** Trusted workflow paths with no completed run for this commit yet (the evidence may still arrive). */
+  pending: string[];
+}
+
+/** Actions gates that would block without evidence: enforce mode only (observe/degraded never block). */
+export function evidenceRequired(policy: Policy): boolean {
+  return policy.tests.mode === "enforce" || policy.coverage.mode === "enforce" || policy.mutation.mode === "enforce";
+}
+
+async function findArtifacts(cfg: ServiceConfig, ctx: EvaluationContext, prHead: string | undefined): Promise<FoundArtifacts> {
   const lookupSha = ctx.kind === "merge_group" ? ctx.candidate : prHead;
-  if (!lookupSha) return { artifacts: {} };
+  const trusted = cfg.policy.provenance.trusted_workflows;
+  if (!lookupSha) return { artifacts: {}, pending: [] };
   const runs = await cfg.api.listWorkflowRuns(ctx.repo, lookupSha);
   let best: { run: WorkflowRun; prov: ArtifactProvenance } | undefined;
+  const completed = new Set<string>();
   for (const run of runs) {
-    if (run.status !== "completed" || run.event !== ctx.kind) continue;
-    for (const wf of cfg.policy.provenance.trusted_workflows) {
+    if (run.event !== ctx.kind) continue;
+    for (const wf of trusted) {
       const prov = provenanceOf(run, wf);
-      if (!prov) continue;
+      if (!prov || run.status !== "completed") continue;
+      completed.add(wf.path);
       if (!best || run.id > best.run.id || (run.id === best.run.id && run.runAttempt > best.run.runAttempt)) best = { run, prov };
     }
   }
-  if (!best) return { artifacts: {} };
+  const pending = trusted.map((w) => w.path).filter((p) => !completed.has(p));
+  if (!best) return { artifacts: {}, pending };
   const bound = bindArtifact(best.run, await cfg.api.listRunArtifacts(ctx.repo, best.run.id), lookupSha, ctx.candidate);
   if (bound.problem) {
     cfg.log?.("artifact not bound to its run", { run: best.run.id, problem: bound.problem });
-    return { artifacts: {}, problem: `artifact of run ${best.run.id} is not bound to the attempt: ${bound.problem}` };
+    return { artifacts: {}, pending, problem: `artifact of run ${best.run.id} is not bound to the attempt: ${bound.problem}` };
   }
   const artifact = bound.artifact;
-  if (!artifact) return { artifacts: {} };
+  if (!artifact) return { artifacts: {}, pending };
   // Only the capped bytes are fetched here; the detached worker parses them.
   let archive: Buffer;
   try {
     archive = await cfg.api.downloadArtifactArchive(ctx.repo, artifact.id);
   } catch (e) {
     cfg.log?.("artifact rejected", { artifact: artifact.id, error: String(e) });
-    return { artifacts: {}, problem: `artifact ${artifact.id} of run ${best.run.id} was rejected: ${(e as Error).message}` };
+    return { artifacts: {}, pending, problem: `artifact ${artifact.id} of run ${best.run.id} was rejected: ${(e as Error).message}` };
   }
   const zipDir = join(cfg.workDir, "artifacts");
   await mkdir(zipDir, { recursive: true });
   const path = join(zipDir, `${randomUUID()}.zip`);
   await writeFile(path, archive);
-  return { artifacts: {}, artifactZip: { path, provenance: best.prov } };
+  return { artifacts: {}, artifactZip: { path, provenance: best.prov }, pending };
 }
 
 export function createServiceEvaluator(cfg: ServiceConfig): (ctx: EvaluationContext) => Promise<Evaluation> {
@@ -388,7 +401,16 @@ export function createServiceEvaluator(cfg: ServiceConfig): (ctx: EvaluationCont
         storedAt: new Date().toISOString(),
       });
     };
-    cfg.log?.("evaluated", { repo: ctx.repo, kind: ctx.kind, base: ctx.base, candidate: ctx.candidate, state: verdict.state });
-    return { verdict, results: out.results.filter((r) => r.gate !== "simplification-review"), onPublished };
+    // No evidence yet, but a trusted workflow may still deliver it: the handler
+    // parks the evaluation instead of publishing REPORT_MISSING (deployment-shapes §5).
+    const hasEvidence = Boolean(found.artifactZip || found.artifacts.tests || found.artifacts.coverage || found.artifacts.mutation);
+    const waiting = evidenceRequired(cfg.policy) && !hasEvidence && !found.problem && found.pending.length > 0 ? { workflows: found.pending } : undefined;
+    cfg.log?.("evaluated", { repo: ctx.repo, kind: ctx.kind, base: ctx.base, candidate: ctx.candidate, state: verdict.state, ...(waiting ? { waiting: waiting.workflows } : {}) });
+    return {
+      verdict,
+      results: out.results.filter((r) => r.gate !== "simplification-review"),
+      onPublished,
+      ...(waiting ? { waiting, evidenceWaitMinutes: cfg.policy.tests.evidence_wait_minutes } : {}),
+    };
   };
 }

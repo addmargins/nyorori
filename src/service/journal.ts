@@ -4,12 +4,52 @@
 // state from GitHub; nothing from the journal is trusted beyond the event).
 // The delivery dedupe set is persisted next to it.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { withFileLock } from "./lock.js";
 
-export type JobStatus = "queued" | "running" | "done" | "superseded" | "failed";
+export type JobStatus = "queued" | "running" | "waiting" | "done" | "superseded" | "failed";
+
+/** An evaluation parked until the untrusted workflow's evidence for C arrives (or the deadline passes). */
+export interface WaitRecord {
+  repository: string;
+  kind: "pull_request" | "merge_group";
+  pr?: number;
+  /** Commit the check runs hang on; equals the PR head (pull_request) or C (merge_group). */
+  checkSha: string;
+  prHeadSha?: string;
+  base: string;
+  candidate: string;
+  policyRevision: string;
+  /** Trusted workflow paths still expected to report. */
+  workflows: string[];
+  /** ISO time after which the wait becomes INCONCLUSIVE(REPORT_MISSING). */
+  deadline: string;
+  deliveryId?: string;
+  startedAt: string;
+}
+
+/** Where parked evaluations live; the journal implements it durably, tests may use memory. */
+export interface WaitStore {
+  /** Replaces any wait with the same key. */
+  putWait(key: string, wait: WaitRecord): Promise<void>;
+  listWaits(): Promise<Array<{ key: string; wait: WaitRecord }>>;
+  clearWait(key: string): Promise<void>;
+}
+
+export class MemoryWaitStore implements WaitStore {
+  private readonly waits = new Map<string, WaitRecord>();
+  async putWait(key: string, wait: WaitRecord): Promise<void> {
+    this.waits.set(key, wait);
+  }
+  async listWaits(): Promise<Array<{ key: string; wait: WaitRecord }>> {
+    return [...this.waits].map(([key, wait]) => ({ key, wait }));
+  }
+  async clearWait(key: string): Promise<void> {
+    this.waits.delete(key);
+  }
+}
 
 export interface JobRecord {
   delivery: string;
@@ -25,6 +65,14 @@ export interface JobRecord {
   payload?: unknown;
   replayable: boolean;
   note?: string;
+  /** Set while status is "waiting". */
+  wait?: WaitRecord;
+}
+
+/** One wait per (repo, kind, subject): a newer push for the same PR replaces the older wait. */
+export function waitKey(w: Pick<WaitRecord, "repository" | "kind" | "pr" | "checkSha">): string {
+  const subject = w.kind === "pull_request" && w.pr !== undefined ? `pr${w.pr}` : w.checkSha;
+  return `${w.repository}|${w.kind}|${subject}`;
 }
 
 const SEGMENT = /^[A-Za-z0-9._-]+$/;
@@ -37,11 +85,63 @@ function safe(seg: string, what: string): string {
   return seg;
 }
 
-export class JobJournal {
+export class JobJournal implements WaitStore {
   constructor(
     private readonly dir: string,
     private readonly now: () => Date = () => new Date(),
   ) {}
+
+  // --- WaitStore: a wait is a job file in status "waiting" under `<repo>/wait-<hash>.json` ---
+
+  private waitFile(key: string): string {
+    const [repository] = key.split("|", 1);
+    const h = createHash("sha256").update(key).digest("hex").slice(0, 24);
+    return this.file(repository ?? "", `wait-${h}`);
+  }
+
+  async putWait(key: string, wait: WaitRecord): Promise<void> {
+    const file = this.waitFile(key);
+    const rec: JobRecord = {
+      delivery: `wait-${createHash("sha256").update(key).digest("hex").slice(0, 24)}`,
+      repository: wait.repository,
+      event: wait.kind,
+      status: "waiting",
+      generation: 0,
+      receivedAt: wait.startedAt,
+      replayable: false,
+      wait,
+    };
+    await withFileLock(file, () => this.write(file, rec));
+  }
+
+  async listWaits(): Promise<Array<{ key: string; wait: WaitRecord }>> {
+    const out: Array<{ key: string; wait: WaitRecord }> = [];
+    for (const file of await this.files()) {
+      try {
+        const rec = JSON.parse(await readFile(file, "utf8")) as JobRecord;
+        if (rec.status === "waiting" && rec.wait) out.push({ key: waitKey(rec.wait), wait: rec.wait });
+      } catch {
+        // torn write; ignore
+      }
+    }
+    return out.sort((a, b) => a.wait.startedAt.localeCompare(b.wait.startedAt));
+  }
+
+  async clearWait(key: string): Promise<void> {
+    const file = this.waitFile(key);
+    await withFileLock(file, async () => {
+      let rec: JobRecord;
+      try {
+        rec = JSON.parse(await readFile(file, "utf8")) as JobRecord;
+      } catch {
+        return;
+      }
+      rec.status = "done";
+      rec.finishedAt = this.now().toISOString();
+      delete rec.wait;
+      await this.write(file, rec);
+    });
+  }
 
   private file(repository: string, delivery: string): string {
     const [owner, repo] = repository.split("/");

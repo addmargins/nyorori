@@ -9,7 +9,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { checkCalculationRules } from "./fixtures/rules.js";
-import { runGatesIsolated } from "./pipeline/isolated.js";
+import { isolationFromEnv, runGatesIsolated } from "./pipeline/isolated.js";
 import { assertToolsOutsideRepo, RepoPathError } from "./pipeline/paths.js";
 import { runGates } from "./pipeline/run.js";
 import { replayCommand } from "./replay/cli.js";
@@ -39,7 +39,8 @@ const USAGE = `usage:
               [--in-process] [--allow-repo-paths]
       The policy, measurer, outputs and artifacts must live outside --repo (spec 10.2);
       --allow-repo-paths lifts that for fixtures. Local results carry authority "local":
-      they are not merge approvals.
+      they are not merge approvals. NYORORI_WORKER_COMMAND (JSON argv prefix, e.g. a
+      "docker run" line) wraps the analysis worker in a container; see docs/operations.md.
   nyorori fixtures [--cccc <bin>] [--dir <fixtures dir>]
   nyorori replay --repo <dir> --pairs <pairs.json> --policy <file.json> --out <dir> [...]  (see: nyorori replay --help)
   nyorori serve [--port <n>]   (env: NYORORI_APP_ID, NYORORI_PRIVATE_KEY_PATH,
@@ -125,7 +126,7 @@ async function cmdRun(argv: string[]): Promise<number> {
     ...(prContext ? { pr: prContext } : {}),
   };
   // The isolated worker is the production path; --in-process keeps stack traces for debugging.
-  const out = values["in-process"] ? await runGates(options) : await runGatesIsolated(options);
+  const out = values["in-process"] ? await runGates(options) : await runGatesIsolated(options, isolationFromEnv());
   if (values.out) await writeRunOutputs(values.out, out);
   process.stdout.write(out.summaryMarkdown + "\n");
   return EXIT_CODE[out.verdict.state];

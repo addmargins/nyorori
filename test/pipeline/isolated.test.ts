@@ -2,11 +2,11 @@
 // oversized child becomes INCONCLUSIVE(TOOL_ERROR) on every service gate and
 // one aggregated verdict, never a missing check (spec 9.1, 10.1).
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { failedRunOutput, runGatesIsolated } from "../../src/pipeline/isolated.js";
+import { failedRunOutput, isolationFromEnv, runGatesIsolated, workerArgv } from "../../src/pipeline/isolated.js";
 import type { RunGatesOptions } from "../../src/pipeline/types.js";
 import { defaultPolicy } from "../../src/policy/schema.js";
 import { TestRepo } from "../git/repo.js";
@@ -85,6 +85,49 @@ describe("runGatesIsolated failure modes", () => {
     const garbage = fake("garbage", 'process.stdout.write("not json", () => process.exit(0));\n');
     const out = await runGatesIsolated(opts, { workerModule: garbage });
     expectAllToolError(out, /no readable result/);
+  });
+
+  it("a workerCommand prefix wraps `node <module>` and keeps the protocol intact", async () => {
+    const record = join(dir, "argv.txt");
+    const prefix = join(dir, "prefix.sh");
+    // Records argv (marker included) the way a `docker run` prefix would see it, drops the marker, runs the real command.
+    writeFileSync(prefix, `#!/bin/sh\nprintf '%s\\n' "$@" > "${record}"\nshift\nexec "$@"\n`, { mode: 0o755 });
+    const real = new URL("../../dist/pipeline/worker.js", import.meta.url).pathname;
+    // No workflow artifact here, so the artifact gates are observed; the point is the prefix, not G4.
+    const policy = defaultPolicy({ measurer: { allow_unpinned: true }, tests: { mode: "observe" }, coverage: { mode: "observe" } });
+    const out = await runGatesIsolated(
+      { ...opts, policy, ccccBinary: process.env.NYORORI_CCCC ?? "/home/user/moznion/cccc/target/release/cccc" },
+      { workerCommand: [prefix, "--flag"], workerModule: real },
+    );
+    const argv = readFileSync(record, "utf8").trim().split("\n");
+    expect(argv.slice(0, 2)).toEqual(["--flag", "node"]);
+    expect(argv[2]).toMatch(/^--max-old-space-size=\d+$/);
+    expect(argv[3]).toBe(real);
+    expect(out.verdict.state).toBe("PASS");
+    expect(out.verdict.authority).toBe("github-app");
+  });
+
+  it("a prefix that never starts the worker is killed by the wall timer", async () => {
+    const stuck = join(dir, "stuck.sh");
+    writeFileSync(stuck, "#!/bin/sh\nsleep 600\n", { mode: 0o755 });
+    const started = Date.now();
+    const out = await runGatesIsolated(opts, { workerCommand: [stuck], timeoutMs: 1500 });
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expectAllToolError(out, /exceeded 1500 ms/);
+  });
+
+  it("isolationFromEnv parses the JSON prefix and rejects a malformed one", () => {
+    expect(isolationFromEnv({})).toEqual({});
+    expect(isolationFromEnv({ NYORORI_WORKER_COMMAND: '["docker","run","--rm","-i","img"]', NYORORI_WORKER_TIMEOUT_MS: "120000" })).toEqual({
+      workerCommand: ["docker", "run", "--rm", "-i", "img"],
+      timeoutMs: 120_000,
+    });
+    expect(() => isolationFromEnv({ NYORORI_WORKER_COMMAND: "docker run" })).toThrow(/JSON array/);
+    expect(() => isolationFromEnv({ NYORORI_WORKER_COMMAND: "[]" })).toThrow(/non-empty/);
+    expect(() => isolationFromEnv({ NYORORI_WORKER_TIMEOUT_MS: "soon" })).toThrow(/positive integer/);
+    expect(workerArgv({ maxOldSpaceMb: 512, workerModule: "/w.js", workerCommand: ["bwrap", "--ro-bind", "/", "/"] })).toEqual([
+      "bwrap", "--ro-bind", "/", "/", "node", "--max-old-space-size=512", "/w.js",
+    ]);
   });
 
   it("the fallback verdict resolves revisions and keeps the authority", async () => {

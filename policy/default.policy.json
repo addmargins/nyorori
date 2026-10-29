@@ -233,6 +233,7 @@
   },
   "tests": {
     "mode": "enforce",
+    "evidence_wait_minutes": 90,
     "protected_paths": [
       "vitest.config.*",
       "vite.config.*",

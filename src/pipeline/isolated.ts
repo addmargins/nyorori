@@ -3,7 +3,8 @@
 // crash, a timeout or an oversized result turns into INCONCLUSIVE(TOOL_ERROR)
 // for every service gate, so the required check is never left missing.
 
-import { fork } from "node:child_process";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +29,51 @@ export interface IsolationOptions {
   maxOldSpaceMb?: number;
   /** Worker entry module; defaults to the built `worker.js` next to this file. */
   workerModule?: string;
+  /**
+   * argv prefix that wraps the worker in a container or sandbox, e.g.
+   * ["docker","run","--rm","-i","--network","none","--memory","1g","-v",...,"nyorori-worker"]
+   * or ["bwrap", ...]. The worker is then started as
+   * `<prefix> node --max-old-space-size=<n> <workerModule>` with the same
+   * stdin/stdout JSON protocol, env scrub, wall timer and output cap.
+   *
+   * Protocol contract for the prefix: the request names host paths the
+   * worker reads or writes — `repoDir` (the git mirror, read-only),
+   * `workDir` (scratch trees, read-write), `ccccBinary` (read-only) and
+   * `artifactZip.path` (read-only). The prefix must bind-mount each at the
+   * same path (or `workerModule` must point at the module inside the
+   * image); nothing else of the host is needed. The wall timer kills the
+   * prefix's process group, so the prefix must propagate that to what it
+   * started (`docker run --rm --init`, `timeout`, ...).
+   */
+  workerCommand?: string[];
+}
+
+/** Environment variables carried into a prefixed worker: what container tooling needs, never credentials. */
+const PREFIX_PASSTHROUGH = ["DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT", "CONTAINERS_CONF", "XDG_RUNTIME_DIR", "TMPDIR"];
+
+/** Isolation settings from the environment (NYORORI_WORKER_COMMAND is a JSON array). */
+export function isolationFromEnv(env: NodeJS.ProcessEnv = process.env): IsolationOptions {
+  const out: IsolationOptions = {};
+  const cmd = env.NYORORI_WORKER_COMMAND;
+  if (cmd) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(cmd);
+    } catch {
+      throw new Error("NYORORI_WORKER_COMMAND must be a JSON array of strings");
+    }
+    if (!Array.isArray(parsed) || parsed.length === 0 || !parsed.every((x) => typeof x === "string" && x.length > 0)) {
+      throw new Error("NYORORI_WORKER_COMMAND must be a non-empty JSON array of strings");
+    }
+    out.workerCommand = parsed as string[];
+  }
+  if (env.NYORORI_WORKER_MODULE) out.workerModule = env.NYORORI_WORKER_MODULE;
+  if (env.NYORORI_WORKER_TIMEOUT_MS) {
+    const ms = Number(env.NYORORI_WORKER_TIMEOUT_MS);
+    if (!Number.isInteger(ms) || ms <= 0) throw new Error("NYORORI_WORKER_TIMEOUT_MS must be a positive integer");
+    out.timeoutMs = ms;
+  }
+  return out;
 }
 
 const DEFAULTS = { timeoutMs: 300_000, maxOutputBytes: 64 * 1024 * 1024, maxOldSpaceMb: 1024 };
@@ -43,8 +89,11 @@ export class WorkerError extends Error {
   }
 }
 
+/** The built worker beside this module; when this module itself runs from source (vitest, vite-node), the one in dist/. */
 function defaultWorkerModule(): string {
-  return fileURLToPath(new URL("./worker.js", import.meta.url));
+  const beside = fileURLToPath(new URL("./worker.js", import.meta.url));
+  if (import.meta.url.endsWith(".ts") && !existsSync(beside)) return fileURLToPath(new URL("../../dist/pipeline/worker.js", import.meta.url));
+  return beside;
 }
 
 interface Collected {
@@ -54,15 +103,20 @@ interface Collected {
   stderr: string;
 }
 
+/** The worker's own argv; inside a prefix the image's `node` resolves through PATH. */
+export function workerArgv(o: Pick<Required<IsolationOptions>, "maxOldSpaceMb" | "workerModule"> & { workerCommand?: string[] | undefined }): string[] {
+  const node = o.workerCommand ? "node" : process.execPath;
+  const argv = [node, `--max-old-space-size=${o.maxOldSpaceMb}`, o.workerModule];
+  return o.workerCommand ? [...o.workerCommand, ...argv] : argv;
+}
+
 function spawnWorker(request: string, home: string, o: Required<IsolationOptions>): Promise<Collected> {
   return new Promise((done, fail) => {
-    const child = fork(o.workerModule, [], {
-      execArgv: [`--max-old-space-size=${o.maxOldSpaceMb}`],
-      // No App key, proxy or cloud credentials, NODE_OPTIONS or preload hooks reach the analysis.
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, LANG: "C.UTF-8", LC_ALL: "C.UTF-8" },
-      detached: true,
-      stdio: ["pipe", "pipe", "pipe", "ipc"],
-    });
+    const [cmd, ...args] = workerArgv(o);
+    // No App key, proxy or cloud credentials, NODE_OPTIONS or preload hooks reach the analysis.
+    const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, LANG: "C.UTF-8", LC_ALL: "C.UTF-8" };
+    if (o.workerCommand) for (const k of PREFIX_PASSTHROUGH) if (process.env[k] !== undefined) env[k] = process.env[k];
+    const child = spawn(cmd!, args, { env, detached: true, stdio: ["pipe", "pipe", "pipe"] });
     const out: Buffer[] = [];
     let outBytes = 0;
     let err = "";
@@ -149,7 +203,12 @@ export async function failedRunOutput(opts: RunGatesOptions, detail: string): Pr
 
 /** `runGates` in a detached child; never throws for an analysis failure. */
 export async function runGatesIsolated(opts: RunGatesOptions, isolation: IsolationOptions = {}): Promise<RunGatesOutput> {
-  const o: Required<IsolationOptions> = { ...DEFAULTS, workerModule: isolation.workerModule ?? defaultWorkerModule(), ...isolation };
+  const o: Required<IsolationOptions> = {
+    ...DEFAULTS,
+    workerModule: isolation.workerModule ?? defaultWorkerModule(),
+    workerCommand: undefined as unknown as string[],
+    ...isolation,
+  };
   const home = await mkdtemp(join(tmpdir(), "nyorori-worker-home-"));
   try {
     const got = await spawnWorker(JSON.stringify(toWireOptions(opts)), home, o);

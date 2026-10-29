@@ -11,13 +11,16 @@ import type { ArtifactProvenance } from "../aggregate/index.js";
 import type { CommitIdentity } from "../review/independence.js";
 import type { IssueComment } from "../waivers/index.js";
 import type { CheckRunRecord, CheckRunRequest, GitHubClient, IssueRequest, PullRequestInfo, RepoRef } from "./client.js";
+import { FileKeySigner, type AppJwtSigner } from "./signer.js";
 import { DEFAULT_ZIP_LIMITS, readZip, ZipError, type ZipLimits } from "./zip.js";
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
 export interface AppCredentials {
   appId: number;
-  privateKeyPem: string;
+  /** In-process key (FileKeySigner). Prefer `signer` so the key stays out of this process. */
+  privateKeyPem?: string;
+  signer?: AppJwtSigner;
   apiBase?: string;
 }
 
@@ -25,14 +28,25 @@ function b64url(data: Buffer | string): string {
   return Buffer.from(data).toString("base64url");
 }
 
-/** RS256 App JWT; iat is backdated 60 s for clock skew, exp stays under GitHub's 10 min cap. */
-export function appJwt(appId: number, privateKeyPem: string, nowMs = Date.now()): string {
+/** Unsigned `<header>.<payload>` for an App JWT; iat backdated 60 s for clock skew, exp under GitHub's 10 min cap. */
+export function appJwtSigningInput(appId: number, nowMs: number, kid?: string): string {
   const now = Math.floor(nowMs / 1000);
-  const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT" }));
+  const header = b64url(JSON.stringify({ alg: "RS256", typ: "JWT", ...(kid ? { kid } : {}) }));
   const payload = b64url(JSON.stringify({ iat: now - 60, exp: now + 9 * 60, iss: String(appId) }));
+  return `${header}.${payload}`;
+}
+
+export async function appJwtWith(appId: number, signer: AppJwtSigner, nowMs = Date.now()): Promise<string> {
+  const input = appJwtSigningInput(appId, nowMs, signer.kid);
+  return `${input}.${await signer.sign(input)}`;
+}
+
+/** RS256 App JWT signed in-process (kept for tools and tests that hold the PEM). */
+export function appJwt(appId: number, privateKeyPem: string, nowMs = Date.now()): string {
+  const input = appJwtSigningInput(appId, nowMs);
   const signer = createSign("RSA-SHA256");
-  signer.update(`${header}.${payload}`);
-  return `${header}.${payload}.${b64url(signer.sign(privateKeyPem))}`;
+  signer.update(input);
+  return `${input}.${b64url(signer.sign(privateKeyPem))}`;
 }
 
 /**
@@ -96,12 +110,17 @@ export class GitHubApi implements GitHubClient {
   private readonly tokens = new Map<string, CachedToken>();
   private readonly installations = new Map<string, number>();
 
+  private readonly signer: AppJwtSigner;
+
   constructor(
     private readonly creds: AppCredentials,
     private readonly fetchImpl: FetchLike = fetch,
     private readonly now: () => number = Date.now,
   ) {
     this.api = (creds.apiBase ?? "https://api.github.com").replace(/\/+$/, "");
+    if (creds.signer) this.signer = creds.signer;
+    else if (creds.privateKeyPem) this.signer = new FileKeySigner(creds.privateKeyPem);
+    else throw new Error("GitHubApi needs a signer or a private key");
   }
 
   private async call(auth: string, method: string, path: string, body?: unknown, accept = "application/vnd.github+json"): Promise<Response> {
@@ -129,7 +148,7 @@ export class GitHubApi implements GitHubClient {
     const key = repoKey(repo);
     const cached = this.tokens.get(key);
     if (cached && cached.expiresAt - 5 * 60_000 > this.now()) return cached.token;
-    const jwt = `Bearer ${appJwt(this.creds.appId, this.creds.privateKeyPem, this.now())}`;
+    const jwt = `Bearer ${await appJwtWith(this.creds.appId, this.signer, this.now())}`;
     let id = this.installations.get(key);
     if (id === undefined) {
       const path = `/repos/${key}/installation`;

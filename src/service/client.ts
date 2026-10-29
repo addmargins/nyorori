@@ -55,6 +55,8 @@ export interface GitHubClient {
   createIssue(repo: RepoRef, issue: IssueRequest): Promise<number>;
   /** Author of an issue (for `closes #N` invoker discovery); null when unknown. */
   getIssueAuthor?(repo: RepoRef, number: number): Promise<string | null>;
+  /** Workflow runs for a commit; lets the wait sweeper notice evidence that arrived without a webhook. */
+  listWorkflowRuns?(repo: RepoRef, headSha: string): Promise<Array<{ id: number; path: string; status: string; conclusion: string | null; headSha: string; event: string }>>;
 }
 
 export interface IssueRequest {

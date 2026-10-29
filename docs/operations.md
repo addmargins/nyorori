@@ -13,6 +13,7 @@
 - 서비스는 같은 이름이라도 자기 App이 만들지 않은 체크를 읽지도 갱신하지도 않는다(`ownCheckRuns`).
 - Actions 산출물은 `gate-result.json`의 내용이 아니라 **GitHub API에서 읽은 run 정보**(workflow 경로, workflow SHA, head SHA, event, run attempt)로 출처를 확인한다. 산출물 안의 `metadata.json`은 신뢰하지 않는다.
 - `pull_request_target`은 쓰지 않는다.
+- **테스트 증거 대기.** push 직후에는 필수 workflow가 아직 돌고 있어 G4·G5·G7의 산출물이 없다. 이때 서비스는 REPORT_MISSING을 게시하지 않고, G1~G3 결과를 체크 본문에 실어 `quality-gate`를 **in_progress**("waiting for test evidence (<workflow>)")로 두고 작업을 `waiting`으로 저널에 적는다(merge queue는 in_progress 체크를 기다리므로 PR이 큐에서 빠지지 않는다). App은 `workflow_run` 이벤트를 구독해야 하며, 신뢰 workflow의 완료 run이 대기 중인 head(pull_request면 PR head, merge_group이면 C)와 일치하면 평가를 재개한다. 다른 head·다른 workflow의 run은 무시한다. 웹훅을 놓쳐도 매 이벤트와 60초 타이머의 sweeper가 완료 run을 API에서 찾아 재개하고, `tests.evidence_wait_minutes`(기본 90)를 넘기면 `INCONCLUSIVE(REPORT_MISSING, "no evidence from <workflow> within N minutes")`를 게시한다. 대기 중 새 push가 오면 이전 대기는 새 대기로 대체된다. Actions 게이트가 모두 observe/degraded면 기다리지 않는다. run이 실패로 끝났지만 보고서가 있으면 그것은 대기가 아니라 `TESTS_FAILED`다. 대기 상태는 저널에 있으므로 재시작 후 `replayPendingJobs`가 다시 arm한다.
 
 ## 2. 역할 (기획서 16.1)
 
@@ -158,7 +159,7 @@ q5: pass
 
 | 시크릿 | 위치 | 교체 |
 |---|---|---|
-| App 비공개 키 (`NYORORI_PRIVATE_KEY_PATH`) | 서비스 프로세스만 읽는 파일(0400). Actions 시크릿에는 절대 두지 않는다(spec 10.1) | GitHub App 설정에서 새 키를 만들고 파일을 바꾼 뒤 프로세스를 재시작한다. 옛 키는 새 키로 발급된 체크가 보인 뒤 삭제 |
+| App 비공개 키 | `NYORORI_SIGNER=command`(권장): 키는 KMS/HSM에 두고 `NYORORI_SIGNER_COMMAND`(argv JSON 배열)가 stdin의 JWT 서명 입력에 RS256 서명을 해 base64url로 stdout에 낸다. 이 프로세스(적대적 git 객체·zip을 파싱하는 곳)에는 키가 들어오지 않는다. `NYORORI_SIGNER=file` + `NYORORI_PRIVATE_KEY_PATH`: 서비스 프로세스만 읽는 파일(0400). 어느 쪽이든 Actions 시크릿에는 절대 두지 않는다(spec 10.1) | command: KMS에서 키를 교체하고 App에 새 공개키를 등록한다(재시작 불필요). file: GitHub App 설정에서 새 키를 만들고 파일을 바꾼 뒤 재시작. 옛 키는 새 키로 발급된 체크가 보인 뒤 삭제 |
 | webhook 시크릿 (`NYORORI_WEBHOOK_SECRET`) | 환경 변수 또는 0400 파일 | GitHub App의 webhook 시크릿을 바꾸고 재시작. 서명이 맞지 않는 배달은 401로 거부되므로 교체 중 몇 건은 GitHub에서 재전송한다 |
 | 설치 토큰 | 메모리에만. 저장소 하나와 사용 권한(checks: write, contents: read, pull_requests: read, issues: write, actions: read, members: read)으로 범위를 좁혀 발급 | 1시간 만료, 5분 전 재발급. 디스크에 쓰지 않는다 |
 
@@ -183,7 +184,8 @@ App에 위 권한 중 하나라도 없으면 토큰 발급 자체가 거부된�
 - `GET /healthz`: 리스너가 살아 있고 저널·작업 디렉터리에 쓸 수 있음을 뜻한다. App 연결, mirror 신선도, 측정기 상태는 증명하지 않는다.
 - 로그(stderr, JSON 한 줄씩)에서 볼 지표: `evaluated`(상태별 비율 — 13.4의 장애 기준), `evaluation failed`, `artifact rejected`/`artifact not bound to its run`, `journal write failed`, `replaying job`.
 - 경보 조건: 15분 넘게 `quality-gate`가 in_progress인 PR(평가 실패 후 게시 실패), 1시간 동안 INCONCLUSIVE 비율이 직전 4주 평균의 3배, 디스크 80%, 저널의 `failed` 증가.
-- 재시작 시 `replayPendingJobs`가 queued/running 작업을 다시 보낸다. 재생된 작업은 GitHub에서 모든 상태를 다시 읽으므로, 오래된 것은 SUPERSEDED로 끝난다.
+- 재시작 시 `replayPendingJobs`가 queued/running 작업을 다시 보내고 `waiting` 작업을 다시 arm한다. 재생된 작업은 GitHub에서 모든 상태를 다시 읽으므로, 오래된 것은 SUPERSEDED로 끝난다.
+- 대기 지표: 저널의 `waiting` 수, 평균 대기 시간, 기한 초과로 REPORT_MISSING이 된 수(`sweepWaiting`의 `expired`). 기한 초과가 반복되면 필수 workflow가 돌지 않거나 `workflow_run` 구독이 빠진 것이다.
 
 ### 검증 경계 (테스트가 증명하지 않는 것)
 
@@ -192,6 +194,52 @@ App에 위 권한 중 하나라도 없으면 토큰 발급 자체가 거부된�
 - **cccc는 로컬 빌드다.** 테스트는 소스에서 빌드한 v1.8.5 바이너리를 쓴다. attestation을 검증한 릴리스 자산과 그 sha256 고정은 설치 시점의 절차이며, 기본 정책은 핀이 비어 있으면 INCONCLUSIVE(MEASURER_MISMATCH)로 막는다.
 - **OS 격리는 코드로 보장되지 않는다.** 위 OS 격리 절은 배포자가 구성한다.
 - **shadow 판정(`would_block`, `shadow`)은 기록일 뿐이다.** observe/degraded 게이트를 모두 enforce로 본 가상 판정이며, 임계값이 맞는지는 13.2의 리뷰어 일치도로만 알 수 있다.
+
+## 4b. 키 보관과 워커 격리
+
+`docs/review/deployment-shapes.md` §5가 지적한 결함: App 비공개 키와 적대적 객체(후보 트리, ESLint·Prettier·TypeScript 파싱, cccc, 산출물 zip)가 한 프로세스·한 호스트에 있으면 파서의 결함 하나가 키 유출이 된다. 두 축으로 분리한다.
+
+### 키: 서비스 호스트에 비공개 키를 두지 않는다
+
+App JWT 서명은 `NYORORI_SIGNER`로 고른다.
+
+| 값 | 의미 |
+|---|---|
+| `file` (기본) | `NYORORI_PRIVATE_KEY_PATH`의 PEM으로 프로세스 안에서 서명한다. 개발·시범용 |
+| `command` | 서명할 바이트를 stdin으로 받아 서명(base64url 또는 raw)을 stdout으로 내는 외부 명령에 위임한다. 키는 KMS/HSM에만 있고 서비스 호스트는 **비공개 키를 갖지 않는다** |
+
+KMS 예 (AWS KMS, RSA 2048 키의 `RSASSA_PKCS1_V1_5_SHA_256`):
+
+```bash
+NYORORI_SIGNER=command \
+NYORORI_SIGNER_COMMAND='["sh","-c","aws kms sign --key-id alias/nyorori-app --signing-algorithm RSASSA_PKCS1_V1_5_SHA_256 --message-type RAW --message fileb:///dev/stdin --output text --query Signature"]' \
+node dist/cli.js serve
+```
+
+서명 명령은 `NYORORI_SIGNER_COMMAND`(JSON argv)로 지정하며, 서비스는 JWT의 서명 입력(`header.payload`)만 넘기고 결과를 그대로 붙인다. 명령의 환경은 서비스가 정리해서 넘기므로(필요한 클라우드 자격 증명만 `NYORORI_SIGNER_ENV`로 통과), 명령이 설치 토큰이나 웹훅 비밀을 볼 수 없다. KMS 키 정책으로 "이 서비스 역할만 sign 가능"을 두면 호스트가 뚫려도 공격자는 JWT를 **그 자리에서만** 만들 수 있고 키를 가져가지 못한다. 설치 토큰은 1시간짜리이며 저장소 범위로 좁힌다.
+
+### 워커: 분석은 다른 프로세스, 가능하면 다른 컨테이너에서
+
+`runGatesIsolated()`는 분석을 분리된 자식 프로세스(`dist/pipeline/worker.js`)에서 돌린다(stdin JSON → stdout JSON, 환경 변수는 `PATH`·임시 `HOME`·로케일만, V8 힙 1 GiB, 벽시계 300초, 응답 64 MiB). 이것은 **자원 경계이지 OS 샌드박스가 아니다.** 운영에서는 `NYORORI_WORKER_COMMAND`(JSON argv 접두사)로 워커를 컨테이너나 샌드박스 안에 띄운다.
+
+```bash
+NYORORI_WORKER_COMMAND='["docker","run","--rm","-i","--init","--network","none","--memory","1g","--pids-limit","256","--read-only","--tmpfs","/tmp","-v","/var/lib/nyorori/mirrors:/var/lib/nyorori/mirrors:ro","-v","/var/lib/nyorori/runs:/var/lib/nyorori/runs","-v","/var/lib/nyorori/artifacts:/var/lib/nyorori/artifacts:ro","-v","/opt/cccc:/opt/cccc:ro","nyorori-worker:1.8.5"]' \
+NYORORI_WORKER_MODULE=/app/dist/pipeline/worker.js \
+node dist/cli.js serve
+```
+
+워커는 `<접두사> node --max-old-space-size=1024 <worker module>`로 시작되며 같은 프로토콜을 쓴다. 요청 JSON에는 워커가 읽고 쓰는 호스트 경로가 들어 있으므로 접두사가 **같은 경로**에 bind-mount해야 한다.
+
+| 요청 필드 | 내용 | 마운트 |
+|---|---|---|
+| `repoDir` | 저장소 bare mirror (`NYORORI_WORKDIR/mirrors/...`) | 읽기 전용 |
+| `workDir` | 임시 트리 (`NYORORI_WORKDIR/runs`) | 읽기·쓰기 |
+| `ccccBinary` | 고정 측정기 | 읽기 전용 |
+| `artifactZip.path` | required workflow 산출물 zip (`NYORORI_WORKDIR/artifacts`) | 읽기 전용 |
+
+그 밖의 호스트 파일은 필요 없다. 이미지에는 Node 22, `dist/`, `node_modules/`, git만 있으면 되고 네트워크는 끊는다(`--network none`). 벽시계 초과 시 서비스는 접두사 프로세스 그룹을 `SIGKILL`하므로 접두사가 그것을 컨테이너까지 전달해야 한다(`docker run --rm --init`, 또는 `timeout 300` 래핑). 접두사에는 컨테이너 도구가 필요한 변수(`DOCKER_HOST`, `DOCKER_CONFIG`, `DOCKER_CONTEXT`, `CONTAINERS_CONF`, `XDG_RUNTIME_DIR`, `TMPDIR`)만 더 넘긴다. 접두사가 없으면 같은 호스트의 자식 프로세스로 돈다(개발용).
+
+이 두 축을 모두 적용하면 서비스 호스트에는 비공개 키가 없고, 적대적 바이트를 여는 프로세스에는 설치 토큰도 웹훅 비밀도 없다.
 
 ## 5. 장애 대응 (기획서 13.4)
 

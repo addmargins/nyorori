@@ -132,7 +132,7 @@ node dist/cli.js replay --repo /srv/git/repo --pairs /srv/replay/pairs.json \
 1. GitHub App을 만든다. 권한은 Checks: write, Contents: read, Pull requests: read, Issues: write(부채 이슈), Actions: read, Members: read(org)이고, 이벤트는 `pull_request`, `merge_group`, `issue_comment`를 구독한다.
 2. 게이트 저장소의 commit을 조직 ruleset의 "Require workflows to pass before merging"으로 붙인다. 대상은 `templates/workflows/gate-untrusted-tests.yml`(이 저장소에서는 실행되지 않는 템플릿)이고, 그 저장소·경로·SHA를 정책 `provenance.trusted_workflows`에 넣는다.
 3. 대상 저장소의 필수 체크는 `quality-gate` 하나만 두고, 예상 출처를 게이트 App으로 고정한다. merge queue를 켠다. 공식 판정은 `merge_group`이다.
-4. 서비스를 실행한다. App 키는 이 프로세스에만 둔다.
+4. 서비스를 실행한다. 운영에서는 비공개 키를 호스트에 두지 말고 KMS/HSM 서명 명령에 위임하며(`NYORORI_SIGNER=command`), 분석 워커는 컨테이너 접두사(`NYORORI_WORKER_COMMAND`)로 격리한다. 둘 다 [`docs/operations.md`](docs/operations.md) 4b절에 예가 있다. 아래는 개발용 최소 실행이다.
 
 ```bash
 NYORORI_APP_ID=123 NYORORI_PRIVATE_KEY_PATH=/secrets/app.pem NYORORI_WEBHOOK_SECRET=... \
@@ -179,6 +179,10 @@ PR 댓글 명령(전체 문법은 [`docs/operations.md`](docs/operations.md) 3�
 - **두 승인자 규칙**: commit 작성자나 `Co-authored-by`의 신원을 로그인으로 확인할 수 없으면, 모든 승인(waiver, 단순화 리뷰, 테스트 승인, override)에 독립 승인자 두 명이 필요하다. PR commit이 250개 이상이면 승인을 받지 않는다.
 - **산출물 zip 제한**: 아카이브 100 MiB, 항목 1,000개, 항목당 64 MiB, 읽는 항목 합계 512 MiB, 압축률 200배까지다. 이름이 허용 목록(`tests.C.json`, `coverage/coverage-final.json` 등)에 있는 항목만 읽는다. 위반하면 INCONCLUSIVE `UNTRUSTED_ARTIFACT`다.
 - **waiver 원장**: 서비스는 판정을 게시할 때 (PR, head)별 판정을 `NYORORI_WORKDIR/verdicts`에 저장한다. PR이 병합되면(`pull_request` closed + merged) 그 head의 판정을 다시 읽어, 적용된 waiver를 `waivers.jsonl`에 한 줄씩 추가한다. 경로는 `NYORORI_LEDGER`로 바꿀 수 있고 기본값은 `NYORORI_WORKDIR/waivers.jsonl`이다. waiver마다 90일 기한의 `complexity-debt` 이슈도 연다. merge queue 판정이 있으면 그것을 PR 사전 확인보다 우선하고, 병합을 막는 판정이면 아무것도 기록하지 않는다. 같은 이벤트가 다시 와도 waiver id로 중복을 걸러서, 원장 줄과 이슈가 두 번 생기지 않는다. 분기별 예산(`waivers.per_quarter_budget`)은 이 원장으로 센다.
+
+### 배포 모드
+
+이 저장소가 구현한 모드는 **App 서비스 모드**(게이트 서비스가 git blob에서 G1~G3을 계산하고 `quality-gate` 체크를 게시, G4~G7은 required workflow의 산출물)이다. GitHub Actions만으로 돌리는 **Actions-only 모드**는 [`docs/review/deployment-shapes.md`](docs/review/deployment-shapes.md)에 다섯 관점으로 비교해 두었고, 문서화된 향후 선택지일 뿐 구현되지 않았다. 그 검토의 §5가 지적한 두 결함(`workflow_run` 미구독, 키와 파서의 동거)은 서비스 모드에서 고쳤다.
 
 ## Development
 

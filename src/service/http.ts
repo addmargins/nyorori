@@ -46,6 +46,13 @@ const EVENT_SHAPES: Record<string, (p: Record<string, unknown>) => boolean> = {
   pull_request: (p) => isObj(p.pull_request) && isObj(p.repository),
   merge_group: (p) => isObj(p.merge_group) && isObj(p.repository),
   issue_comment: (p) => isObj(p.comment) && isObj(p.issue) && isObj(p.repository),
+  workflow_run: (p) =>
+    isObj(p.workflow_run) &&
+    isObj(p.repository) &&
+    typeof p.workflow_run.head_sha === "string" &&
+    typeof p.workflow_run.path === "string" &&
+    typeof p.workflow_run.run_attempt === "number" &&
+    "conclusion" in p.workflow_run,
 };
 
 function isObj(v: unknown): v is Record<string, unknown> {

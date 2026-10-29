@@ -238,6 +238,11 @@ export const policySchema = z
     tests: z
       .object({
         mode: mode.default("enforce"),
+        /**
+         * How long the service keeps the required check in_progress waiting for
+         * the untrusted workflow's evidence before INCONCLUSIVE(REPORT_MISSING).
+         */
+        evidence_wait_minutes: z.number().int().positive().default(90),
         /** Paths whose modification needs independent approval (spec 8.3, 12.2). */
         protected_paths: z
           .array(glob)

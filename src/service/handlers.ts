@@ -8,7 +8,8 @@ import { QUALITY_GATE_CHECK, type QualityGateVerdict } from "../aggregate/types.
 import { toCheckRun, verdictToCheckRun, type CheckRunOutput } from "../report/checkrun.js";
 import { hasGateCommand } from "../waivers/command.js";
 import type { CheckRunRecord, GitHubClient, RepoRef } from "./client.js";
-import type { JobJournal } from "./journal.js";
+import { MemoryWaitStore, waitKey, type JobJournal, type WaitRecord, type WaitStore } from "./journal.js";
+import { renderSummaryMarkdown } from "../report/markdown.js";
 import type { MergedPullRequest } from "./merge.js";
 
 export interface EvaluationContext {
@@ -23,6 +24,8 @@ export interface EvaluationContext {
   checkSha: string;
   /** Webhook delivery that caused this evaluation, for the job journal. */
   deliveryId?: string;
+  /** Resumed wait: the deadline set when the evaluation was first parked. */
+  waitDeadline?: string;
 }
 
 export interface Evaluation {
@@ -30,6 +33,13 @@ export interface Evaluation {
   results: GateResult[];
   /** Called once the verdict's check run is published (e.g. to store it for the merge event). */
   onPublished?: () => Promise<void>;
+  /**
+   * Set when an enforce-mode Actions gate has no evidence for C yet and a
+   * trusted workflow may still deliver it. The handler parks the evaluation
+   * (check in_progress) instead of publishing the verdict.
+   */
+  waiting?: { workflows: string[] };
+  evidenceWaitMinutes?: number;
 }
 
 export interface ServiceDeps {
@@ -45,8 +55,17 @@ export interface ServiceDeps {
   onMerged?: (m: MergedPullRequest) => Promise<void>;
   /** Durable job records; replayed on startup by `replayPendingJobs`. */
   journal?: JobJournal;
+  /** Parked evaluations; defaults to the journal, else one in-memory store per process. */
+  waits?: WaitStore;
   /** Injectable for tests; defaults to a real timer. */
   sleep?: (ms: number) => Promise<void>;
+  now?: () => Date;
+}
+
+const defaultWaits = new MemoryWaitStore();
+
+function waitStore(deps: ServiceDeps): WaitStore {
+  return deps.waits ?? deps.journal ?? defaultWaits;
 }
 
 /**
@@ -106,7 +125,7 @@ export function checkExternalId(ctx: Pick<EvaluationContext, "base" | "candidate
   return `${ctx.base}:${ctx.candidate}:${policyRevision ?? "-"}`;
 }
 
-async function journal(deps: ServiceDeps, ctx: EvaluationContext, status: "running" | "done" | "superseded" | "failed", note?: string): Promise<void> {
+async function journal(deps: ServiceDeps, ctx: EvaluationContext, status: "running" | "waiting" | "done" | "superseded" | "failed", note?: string): Promise<void> {
   if (!deps.journal || !ctx.deliveryId) return;
   await deps.journal.update(`${ctx.repo.owner}/${ctx.repo.repo}`, ctx.deliveryId, status, note).catch((e) => deps.log?.("journal write failed", { error: String(e) }));
 }
@@ -221,6 +240,11 @@ async function evaluateAndPublish(
     await journal(deps, ctx, "superseded", "test merge moved");
     return null;
   }
+  if (evaluation.waiting) {
+    await parkEvaluation(deps, ctx, evaluation, key, ext, queue);
+    return evaluation;
+  }
+  await waitStore(deps).clearWait(waitKey(waitRecordKey(ctx))).catch(() => undefined);
   const checks = [
     ...evaluation.results.map((r) => toCheckRun(r)),
     toCheckRun(evaluation.verdict.review),
@@ -241,6 +265,118 @@ async function waitingCheck(deps: ServiceDeps, ctx: EvaluationContext, out: Chec
   const target = existing.sort((a, b) => b.id - a.id)[0];
   if (target) await deps.client.updateCheckRun(ctx.repo, target.id, req);
   else await deps.client.createCheckRun(ctx.repo, req);
+}
+
+function waitRecordKey(ctx: EvaluationContext): Pick<WaitRecord, "repository" | "kind" | "pr" | "checkSha"> {
+  return { repository: `${ctx.repo.owner}/${ctx.repo.repo}`, kind: ctx.kind, ...(ctx.prNumber !== undefined ? { pr: ctx.prNumber } : {}), checkSha: ctx.checkSha };
+}
+
+/**
+ * Evidence from the untrusted workflow is not there yet: publish G1–G3 now
+ * (author feedback), keep the required check in_progress so a merge queue
+ * waits rather than ejecting the PR, and park the job until the matching
+ * workflow_run completes or the deadline passes (deployment-shapes §5).
+ */
+async function parkEvaluation(deps: ServiceDeps, ctx: EvaluationContext, evaluation: Evaluation, key: string, ext: string, queue: EvaluationQueue): Promise<void> {
+  const now = deps.now?.() ?? new Date();
+  const workflows = evaluation.waiting!.workflows;
+  const minutes = evaluation.evidenceWaitMinutes ?? 90;
+  const deadline = ctx.waitDeadline ?? new Date(now.getTime() + minutes * 60_000).toISOString();
+  for (const r of evaluation.results) await upsertCheck(deps, ctx, toCheckRun(r), "completed");
+  const summary = [
+    `Waiting for evidence from ${workflows.join(", ")} until ${deadline} (policy tests.evidence_wait_minutes = ${minutes}).`,
+    "The service-side gates have already run:",
+    "",
+    renderSummaryMarkdown(evaluation.results),
+  ].join("\n");
+  const out: CheckRunOutput = { name: QUALITY_GATE_CHECK, conclusion: "failure", title: `waiting for test evidence (${workflows.join(", ")})`, summary };
+  await upsertCheck(deps, ctx, out, "in_progress");
+  queue.published.set(key, { externalId: ext, checks: [] });
+  const wait: WaitRecord = {
+    ...waitRecordKey(ctx),
+    ...(ctx.prHeadSha ? { prHeadSha: ctx.prHeadSha } : {}),
+    base: ctx.base,
+    candidate: ctx.candidate,
+    policyRevision: deps.policyRevision ?? "-",
+    workflows,
+    deadline,
+    ...(ctx.deliveryId ? { deliveryId: ctx.deliveryId } : {}),
+    startedAt: now.toISOString(),
+  };
+  await waitStore(deps).putWait(waitKey(wait), wait);
+  await journal(deps, ctx, "waiting", `waiting for ${workflows.join(", ")} until ${deadline}`);
+}
+
+function contextOfWait(w: WaitRecord): EvaluationContext {
+  const [owner, repo] = w.repository.split("/") as [string, string];
+  return {
+    repo: { owner, repo },
+    kind: w.kind,
+    ...(w.pr !== undefined ? { prNumber: w.pr } : {}),
+    ...(w.prHeadSha ? { prHeadSha: w.prHeadSha } : {}),
+    base: w.base,
+    candidate: w.candidate,
+    checkSha: w.checkSha,
+    ...(w.deliveryId ? { deliveryId: w.deliveryId } : {}),
+    waitDeadline: w.deadline,
+  };
+}
+
+/** Re-runs a parked evaluation; the usual generation/supersede rules apply. */
+export async function resumeWait(deps: ServiceDeps, wait: WaitRecord): Promise<Evaluation | null> {
+  deps.log?.("resuming parked evaluation", { repository: wait.repository, checkSha: wait.checkSha, workflows: wait.workflows });
+  return runAndPublish(deps, contextOfWait(wait));
+}
+
+interface WorkflowRunPayload {
+  action: string;
+  repository: { owner: { login: string }; name: string };
+  workflow_run: { head_sha: string; path: string; conclusion: string | null; run_attempt: number; event?: string };
+}
+
+/**
+ * A completed run of a trusted workflow for a parked head resumes that
+ * evaluation. Runs for other heads, other workflows or unparked commits are
+ * ignored: the evaluation itself re-checks provenance from the API.
+ */
+export async function handleWorkflowRun(deps: ServiceDeps, payload: WorkflowRunPayload): Promise<Evaluation | null> {
+  if (payload.action !== "completed") return null;
+  const repository = `${payload.repository.owner.login}/${payload.repository.name}`;
+  const run = payload.workflow_run;
+  let last: Evaluation | null = null;
+  for (const { wait } of await waitStore(deps).listWaits()) {
+    if (wait.repository !== repository || wait.checkSha !== run.head_sha || !wait.workflows.includes(run.path)) continue;
+    last = await resumeWait(deps, wait);
+  }
+  return last;
+}
+
+/**
+ * Deadline and race sweeper: parked evaluations past their deadline become
+ * INCONCLUSIVE(REPORT_MISSING); those whose trusted run completed without a
+ * webhook reaching us are resumed. Called on every event and from a timer.
+ */
+export async function sweepWaiting(deps: ServiceDeps, now: Date = deps.now?.() ?? new Date()): Promise<{ expired: number; resumed: number }> {
+  let expired = 0;
+  let resumed = 0;
+  for (const { key, wait } of await waitStore(deps).listWaits()) {
+    const ctx = contextOfWait(wait);
+    if (Date.parse(wait.deadline) <= now.getTime()) {
+      const minutes = Math.round((Date.parse(wait.deadline) - Date.parse(wait.startedAt)) / 60_000);
+      await upsertCheck(deps, ctx, failingCheck("INCONCLUSIVE: REPORT_MISSING", `no evidence from ${wait.workflows.join(", ")} within ${minutes} minutes`), "completed");
+      await waitStore(deps).clearWait(key);
+      await journal(deps, ctx, "failed", "evidence deadline passed");
+      expired++;
+      continue;
+    }
+    if (!deps.client.listWorkflowRuns) continue;
+    const runs = await deps.client.listWorkflowRuns(ctx.repo, wait.checkSha).catch(() => []);
+    if (runs.some((r) => r.status === "completed" && r.headSha === wait.checkSha && r.event === wait.kind && wait.workflows.includes(r.path))) {
+      await resumeWait(deps, wait);
+      resumed++;
+    }
+  }
+  return { expired, resumed };
 }
 
 /** Linear backoff 3 s → 10 s over five tries while GitHub computes the test merge. */
@@ -370,10 +506,12 @@ export async function dispatchEvent(deps: ServiceDeps, event: string, payload: u
   if (out === null && deps.journal && deliveryId && repository && JOURNALED_EVENTS.has(event)) {
     await deps.journal.update(repository, deliveryId, "done", "no evaluation needed or already reported").catch(() => undefined);
   }
+  // Every event doubles as a sweep so a lost workflow_run webhook delays, never strands, a wait.
+  await sweepWaiting(deps).catch((e) => deps.log?.("sweep failed", { error: String(e) }));
   return out;
 }
 
-const JOURNALED_EVENTS = new Set(["pull_request", "merge_group", "issue_comment"]);
+const JOURNALED_EVENTS = new Set(["pull_request", "merge_group", "issue_comment", "workflow_run"]);
 
 async function dispatchInner(deps: ServiceDeps, event: string, payload: unknown, deliveryId?: string): Promise<Evaluation | null> {
   switch (event) {
@@ -383,6 +521,8 @@ async function dispatchInner(deps: ServiceDeps, event: string, payload: unknown,
       return handleMergeGroupEvent(deps, payload as MergeGroupPayload, deliveryId);
     case "issue_comment":
       return handleIssueComment(deps, payload as IssueCommentPayload, deliveryId);
+    case "workflow_run":
+      return handleWorkflowRun(deps, payload as WorkflowRunPayload);
     default:
       return null;
   }
@@ -393,7 +533,7 @@ async function dispatchInner(deps: ServiceDeps, event: string, payload: unknown,
  * process last stopped. Each one re-reads everything from GitHub, so a stale
  * job can only end as SUPERSEDED. Runs sequentially, oldest first.
  */
-export async function replayPendingJobs(deps: ServiceDeps, journal: JobJournal): Promise<{ replayed: number; dropped: number }> {
+export async function replayPendingJobs(deps: ServiceDeps, journal: JobJournal): Promise<{ replayed: number; dropped: number; waits: number }> {
   let replayed = 0;
   let dropped = 0;
   for (const job of await journal.pending()) {
@@ -412,5 +552,8 @@ export async function replayPendingJobs(deps: ServiceDeps, journal: JobJournal):
       dropped++;
     }
   }
-  return { replayed, dropped };
+  // Parked evaluations survive as journal state; a sweep re-arms them (deadline, evidence that arrived meanwhile).
+  const waits = (await journal.listWaits()).length;
+  await sweepWaiting({ ...deps, journal, waits: journal });
+  return { replayed, dropped, waits };
 }
