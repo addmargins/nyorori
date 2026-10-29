@@ -6,7 +6,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { withVerdictInconclusive, type ArtifactProvenance } from "../aggregate/index.js";
-import { runGatesIsolated } from "../pipeline/isolated.js";
+import { runGatesIsolated, type IsolationOptions } from "../pipeline/isolated.js";
 import type { ArtifactZip, Artifacts, PullRequestContext } from "../pipeline/types.js";
 import type { Policy } from "../policy/schema.js";
 import { inRoster, isAiLoopBot, MAX_ENUMERABLE_COMMITS, type CommitIdentity, type TeamRosters } from "../review/independence.js";
@@ -33,6 +33,8 @@ export interface ServiceConfig {
   ledger?: LedgerStore;
   /** Published verdicts per (PR, head), read back when the PR merges. */
   verdicts?: VerdictStore;
+  /** Worker isolation (container prefix, timeouts); from NYORORI_WORKER_* in `serve`. */
+  isolation?: IsolationOptions;
 }
 
 type Timeline = Array<{ sha: string; observedAt: string }>;
@@ -377,7 +379,7 @@ export function createServiceEvaluator(cfg: ServiceConfig): (ctx: EvaluationCont
       official: ctx.kind === "merge_group",
       authority: "github-app",
       ...(prc ? { pr: prc.pr } : {}),
-    }).finally(() => (found.artifactZip ? rm(found.artifactZip.path, { force: true }) : undefined));
+    }, cfg.isolation ?? {}).finally(() => (found.artifactZip ? rm(found.artifactZip.path, { force: true }) : undefined));
     let verdict = out.verdict;
     if (found.problem) {
       verdict = { ...withVerdictInconclusive(verdict, { reason: "UNTRUSTED_ARTIFACT", detail: found.problem, authorFixable: false }), authority: out.authority };

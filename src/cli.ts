@@ -15,7 +15,8 @@ import { runGates } from "./pipeline/run.js";
 import { replayCommand } from "./replay/cli.js";
 import type { PullRequestContext, RunGatesOptions } from "./pipeline/types.js";
 import { loadPolicy } from "./policy/load.js";
-import { dispatchEvent, replayPendingJobs, type ServiceDeps } from "./service/handlers.js";
+import { dispatchEvent, replayPendingJobs, sweepWaiting, type ServiceDeps } from "./service/handlers.js";
+import { createSigner } from "./service/signer.js";
 import { FileDeliveryStore, JobJournal } from "./service/journal.js";
 import { loadArtifactDir } from "./replay/inputs.js";
 import { writeRunOutputs } from "./replay/outputs.js";
@@ -43,9 +44,10 @@ const USAGE = `usage:
       "docker run" line) wraps the analysis worker in a container; see docs/operations.md.
   nyorori fixtures [--cccc <bin>] [--dir <fixtures dir>]
   nyorori replay --repo <dir> --pairs <pairs.json> --policy <file.json> --out <dir> [...]  (see: nyorori replay --help)
-  nyorori serve [--port <n>]   (env: NYORORI_APP_ID, NYORORI_PRIVATE_KEY_PATH,
-                                NYORORI_WEBHOOK_SECRET, NYORORI_POLICY, NYORORI_CCCC, NYORORI_WORKDIR,
-                                NYORORI_LEDGER)
+  nyorori serve [--port <n>]   (env: NYORORI_APP_ID, NYORORI_WEBHOOK_SECRET, NYORORI_POLICY, NYORORI_CCCC,
+                                NYORORI_WORKDIR, NYORORI_LEDGER, NYORORI_SIGNER=file|command with
+                                NYORORI_PRIVATE_KEY_PATH or NYORORI_SIGNER_COMMAND[/_KID],
+                                NYORORI_WORKER_COMMAND[/_MODULE/_TIMEOUT_MS])
 
 exit codes: 0 PASS/N/A/waived · 1 FAIL · 2 INCONCLUSIVE · 64 usage error`;
 
@@ -152,7 +154,14 @@ async function cmdServe(argv: string[]): Promise<number> {
   const appId = Number(env("NYORORI_APP_ID"));
   if (!Number.isInteger(appId)) throw new UsageError("NYORORI_APP_ID must be an integer");
   const loaded = await loadPolicy(env("NYORORI_POLICY"));
-  const api = new GitHubApi({ appId, privateKeyPem: await readFile(env("NYORORI_PRIVATE_KEY_PATH"), "utf8") });
+  // Key custody (docs/operations.md 4b): with NYORORI_SIGNER=command the private key never enters this process.
+  const signer = createSigner({
+    kind: (process.env.NYORORI_SIGNER ?? "file") as "file" | "command",
+    privateKeyPem: process.env.NYORORI_PRIVATE_KEY_PATH ? await readFile(process.env.NYORORI_PRIVATE_KEY_PATH, "utf8") : undefined,
+    command: process.env.NYORORI_SIGNER_COMMAND,
+    kid: process.env.NYORORI_SIGNER_KID,
+  });
+  const api = new GitHubApi({ appId, signer });
   const log = (msg: string, extra?: Record<string, unknown>) => process.stderr.write(`${JSON.stringify({ msg, ...extra })}\n`);
   const workDir = process.env.NYORORI_WORKDIR ?? join(tmpdir(), "nyorori-service");
   const ledgerPath = process.env.NYORORI_LEDGER ?? join(workDir, "waivers.jsonl");
@@ -180,6 +189,7 @@ async function cmdServe(argv: string[]): Promise<number> {
     log,
     ledger,
     verdicts,
+    isolation: isolationFromEnv(),
   });
   const onMerged = async (m: MergedPullRequest) => {
     const r = await recordMergedPullRequest({ client: api, ledger, verdicts, issued, policy: loaded.policy, log }, m);
@@ -188,10 +198,13 @@ async function cmdServe(argv: string[]): Promise<number> {
   // Durable job journal: deliveries queued or running at the last shutdown are replayed, old ones pruned.
   const journal = new JobJournal(join(workDir, "jobs"));
   const deliveries = new FileDeliveryStore(join(workDir, "deliveries.log"));
-  const deps: ServiceDeps = { client: api, appId, evaluate, log, policyRevision: loaded.revision, onMerged, journal };
+  const deps: ServiceDeps = { client: api, appId, evaluate, log, policyRevision: loaded.revision, onMerged, journal, waits: journal };
   const replayed = await replayPendingJobs(deps, journal);
   const pruned = await journal.prune(30 * 24 * 60 * 60 * 1000);
   log("journal", { ...replayed, pruned });
+  // Parked evaluations (waiting for test evidence) expire or resume even when a workflow_run webhook is lost.
+  const sweeper = setInterval(() => sweepWaiting(deps).catch((e) => log("sweep failed", { error: String(e) })), 60_000);
+  sweeper.unref();
   const server = createWebhookServer({
     secret: env("NYORORI_WEBHOOK_SECRET"),
     dispatch: (event, payload, delivery) => dispatchEvent(deps, event, payload, delivery),

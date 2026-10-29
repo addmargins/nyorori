@@ -20,7 +20,6 @@ import { buildZip } from "./zip.js";
 
 const PEM = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ type: "pkcs1", format: "pem" }).toString();
 const APP_ID = 77;
-const REPO = { owner: "org", repo: "app" };
 const WF = { repository: "org/gate", path: ".github/workflows/gate-untrusted-tests.yml", shas: ["b".repeat(40)] };
 const T0 = Date.parse("2026-10-29T10:00:00Z");
 
@@ -99,7 +98,8 @@ class FakeGitHub {
   completeWorkflow(headSha: string, event: "pull_request" | "merge_group", mergeSha: string): void {
     this.runs = [{
       id: 1, run_attempt: 1, event, head_sha: headSha, status: "completed", conclusion: "success",
-      path: ".github/workflows/x.yml", repository: { full_name: "org/app" },
+      // An org-required workflow run reports the gate repository's workflow path.
+      path: WF.path, repository: { full_name: "org/app" },
       referenced_workflows: [{ path: `${WF.repository}/${WF.path}@refs/heads/main`, sha: WF.shas[0]! }],
       run_started_at: "2026-10-29T10:01:00Z",
     }];

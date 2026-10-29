@@ -129,7 +129,7 @@ node dist/cli.js replay --repo /srv/git/repo --pairs /srv/replay/pairs.json \
 
 ## Deploying the gate service
 
-1. GitHub App을 만든다. 권한은 Checks: write, Contents: read, Pull requests: read, Issues: write(부채 이슈), Actions: read, Members: read(org)이고, 이벤트는 `pull_request`, `merge_group`, `issue_comment`를 구독한다.
+1. GitHub App을 만든다. 권한은 Checks: write, Contents: read, Pull requests: read, Issues: write(부채 이슈), Actions: read, Members: read(org)이고, 이벤트는 `pull_request`, `merge_group`, `issue_comment`, 그리고 테스트 증거 대기를 풀어 주는 `workflow_run`을 구독한다.
 2. 게이트 저장소의 commit을 조직 ruleset의 "Require workflows to pass before merging"으로 붙인다. 대상은 `templates/workflows/gate-untrusted-tests.yml`(이 저장소에서는 실행되지 않는 템플릿)이고, 그 저장소·경로·SHA를 정책 `provenance.trusted_workflows`에 넣는다.
 3. 대상 저장소의 필수 체크는 `quality-gate` 하나만 두고, 예상 출처를 게이트 App으로 고정한다. merge queue를 켠다. 공식 판정은 `merge_group`이다.
 4. 서비스를 실행한다. 운영에서는 비공개 키를 호스트에 두지 말고 KMS/HSM 서명 명령에 위임하며(`NYORORI_SIGNER=command`), 분석 워커는 컨테이너 접두사(`NYORORI_WORKER_COMMAND`)로 격리한다. 둘 다 [`docs/operations.md`](docs/operations.md) 4b절에 예가 있다. 아래는 개발용 최소 실행이다.
