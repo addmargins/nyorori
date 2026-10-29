@@ -76,7 +76,7 @@ describe("1. agent-invoker independence", () => {
 });
 
 describe("2. evidence binding", () => {
-  const run: WorkflowRun = { id: 10, runAttempt: 2, event: "merge_group", headSha: C, status: "completed", conclusion: "success", repository: "o/r", path: WF.path, referencedWorkflows: [], runStartedAt: "2026-10-28T12:00:00Z" };
+  const run: WorkflowRun = { id: 10, runAttempt: 2, event: "merge_group", headSha: C, status: "completed", conclusion: "success", repository: "o/r", path: WF.path, workflowRepository: WF.repository, referencedWorkflows: [], runStartedAt: "2026-10-28T12:00:00Z" };
   const art = (over: Partial<ArtifactRef> = {}): ArtifactRef => ({ id: 1, name: `nyorori-gate-${C}`, expired: false, createdAt: "2026-10-28T12:05:00Z", workflowRunHeadSha: C, ...over });
 
   it("binds only an artifact created after the attempt started for the looked-up commit", () => {

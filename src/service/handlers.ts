@@ -79,6 +79,8 @@ export class EvaluationQueue {
   private readonly tails = new Map<string, Promise<unknown>>();
   /** Last published check outputs per key, so a yielding evaluation can re-assert them. */
   readonly published = new Map<string, { externalId: string; checks: CheckRunOutput[] }>();
+  /** Waits being resumed right now; a duplicate webhook or a sweep tick joins instead of re-evaluating. */
+  readonly resuming = new Set<string>();
 
   begin(key: string, externalId: string): number {
     const gen = (this.gens.get(key)?.gen ?? 0) + 1;
@@ -372,8 +374,18 @@ export async function resumeWait(deps: ServiceDeps, wait: WaitRecord): Promise<E
     if (deps.journal && wait.deliveryId) await deps.journal.update(wait.repository, wait.deliveryId, "superseded", "head moved while waiting").catch(() => undefined);
     return null;
   }
+  const inFlight = `${queueKey(deps, ctx)}|${wait.checkSha}|${wait.candidate}`;
+  if (queue.resuming.has(inFlight)) {
+    deps.log?.("resume already in flight", { repository: wait.repository, checkSha: wait.checkSha });
+    return null;
+  }
+  queue.resuming.add(inFlight);
   deps.log?.("resuming parked evaluation", { repository: wait.repository, checkSha: wait.checkSha, workflows: wait.workflows, ...(wait.expired ? { afterExpiry: true } : {}) });
-  return runAndPublish(deps, ctx);
+  try {
+    return await runAndPublish(deps, ctx);
+  } finally {
+    queue.resuming.delete(inFlight);
+  }
 }
 
 interface WorkflowRunPayload {

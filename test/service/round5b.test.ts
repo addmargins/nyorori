@@ -145,6 +145,32 @@ describe("B3: a stale wait never supersedes the current head", () => {
   });
 });
 
+describe("resume in flight guard", () => {
+  it("a duplicate webhook and a sweep tick during a resume do not evaluate again", async () => {
+    const client = new Fake();
+    const calls: EvaluationContext[] = [];
+    const h: Hooks = { evidence: new Set() };
+    const d = deps(client, evaluator(h, calls));
+    await dispatchEvent(d, "pull_request", prEvent(HEAD), "d1");
+    h.evidence.add(C);
+    client.workflowRuns.push({ id: 1, path: WF, status: "completed", conclusion: "success", headSha: HEAD, event: "pull_request" });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    h.before = async () => gate;
+    const n = calls.length;
+    const a = dispatchEvent(d, "workflow_run", runEvent(HEAD), "x1");
+    await new Promise((r) => setTimeout(r, 10));
+    const b = dispatchEvent(d, "workflow_run", runEvent(HEAD), "x2");
+    const c = sweepWaiting(d);
+    await new Promise((r) => setTimeout(r, 10));
+    release();
+    await Promise.all([a, b, c]);
+    expect(calls.length - n).toBe(1);
+    expect(client.qg(HEAD)).toMatchObject({ status: "completed", conclusion: "success" });
+    expect(client.runs.filter((r) => r.name === "quality-gate" && r.headSha === HEAD)).toHaveLength(1);
+  });
+});
+
 describe("B7c: a throwing resume ends the wait", () => {
   it("publishes TOOL_ERROR once and is not re-resumed by later sweeps", async () => {
     const client = new Fake();

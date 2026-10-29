@@ -342,13 +342,17 @@ async function findArtifacts(cfg: ServiceConfig, ctx: EvaluationContext, prHead:
     }
     for (const run of runs) {
       if (run.event !== ctx.kind || run.status !== "completed") continue;
+      if (run.path === wf.path && run.workflowRepository === undefined) {
+        problems.push(`run ${run.id} of ${wf.path}: workflow owner unknown (no workflow_url); not accepted as evidence`);
+        continue;
+      }
       const prov = provenanceOf(run, wf);
       if (!prov) continue;
       const cur = best.get(wf.path);
       if (!cur || run.id > cur.run.id || (run.id === cur.run.id && run.runAttempt > cur.run.runAttempt)) best.set(wf.path, { run, prov });
     }
   }
-  const refused = new Set(problems.length ? trusted.filter((w) => problems.some((p) => p.includes(` ${w.path};`))).map((w) => w.path) : []);
+  const refused = new Set(problems.length ? trusted.filter((w) => problems.some((p) => p.includes(` ${w.path};`) || p.includes(` ${w.path}:`))).map((w) => w.path) : []);
   const pending = trusted.map((w) => w.path).filter((p) => !best.has(p) && !refused.has(p));
   if (problems.length) return { artifacts: {}, pending, problem: problems.join("; ") };
   if (best.size === 0) return { artifacts: {}, pending };
