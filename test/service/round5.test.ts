@@ -118,7 +118,8 @@ describe("defect 1: the first evaluation waits for test evidence", () => {
     expect(await sweepWaiting(d, new Date(started + 91 * 60_000))).toEqual({ expired: 1, resumed: 0 });
     expect(client.qg()).toMatchObject({ status: "completed", conclusion: "failure" });
     expect(client.qg()!.req).toMatchObject({ title: "INCONCLUSIVE: REPORT_MISSING", summary: `no evidence from ${WF} within 90 minutes` });
-    expect(await d.waits!.listWaits()).toEqual([]);
+    // The expired record stays one more wait period so a late workflow_run can still re-evaluate (A3).
+    expect((await d.waits!.listWaits()).map((w) => w.wait.expired)).toEqual([true]);
   });
 
   it("a resumed wait keeps its original deadline", async () => {
@@ -178,7 +179,7 @@ describe("defect 1: the first evaluation waits for test evidence", () => {
     expect(evidenceRequired(defaultPolicy({ tests: { mode: "degraded" }, coverage: { mode: "observe" } }))).toBe(false);
     expect(evidenceRequired(defaultPolicy())).toBe(true);
     expect(evidenceRequired(defaultPolicy({ tests: { mode: "observe" }, coverage: { mode: "enforce" } }))).toBe(true);
-    expect(defaultPolicy().tests.evidence_wait_minutes).toBe(90);
+    expect(defaultPolicy().tests.evidence_wait_minutes).toBe(45);
   });
 
   it("a restart re-arms journaled waits", async () => {

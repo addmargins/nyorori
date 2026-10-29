@@ -13,7 +13,7 @@
 - 서비스는 같은 이름이라도 자기 App이 만들지 않은 체크를 읽지도 갱신하지도 않는다(`ownCheckRuns`).
 - Actions 산출물은 `gate-result.json`의 내용이 아니라 **GitHub API에서 읽은 run 정보**(workflow 경로, workflow SHA, head SHA, event, run attempt)로 출처를 확인한다. 산출물 안의 `metadata.json`은 신뢰하지 않는다.
 - `pull_request_target`은 쓰지 않는다.
-- **테스트 증거 대기.** push 직후에는 필수 workflow가 아직 돌고 있어 G4·G5·G7의 산출물이 없다. 이때 서비스는 REPORT_MISSING을 게시하지 않고, G1~G3 결과를 체크 본문에 실어 `quality-gate`를 **in_progress**("waiting for test evidence (<workflow>)")로 두고 작업을 `waiting`으로 저널에 적는다(merge queue는 in_progress 체크를 기다리므로 PR이 큐에서 빠지지 않는다). App은 `workflow_run` 이벤트를 구독해야 하며, 신뢰 workflow의 완료 run이 대기 중인 head(pull_request면 PR head, merge_group이면 C)와 일치하면 평가를 재개한다. 다른 head·다른 workflow의 run은 무시한다. 웹훅을 놓쳐도 매 이벤트와 60초 타이머의 sweeper가 완료 run을 API에서 찾아 재개하고, `tests.evidence_wait_minutes`(기본 90)를 넘기면 `INCONCLUSIVE(REPORT_MISSING, "no evidence from <workflow> within N minutes")`를 게시한다. 대기 중 새 push가 오면 이전 대기는 새 대기로 대체된다. Actions 게이트가 모두 observe/degraded면 기다리지 않는다. run이 실패로 끝났지만 보고서가 있으면 그것은 대기가 아니라 `TESTS_FAILED`다. 대기 상태는 저널에 있으므로 재시작 후 `replayPendingJobs`가 다시 arm한다.
+- **테스트 증거 대기.** push 직후에는 필수 workflow가 아직 돌고 있어 G4·G5·G7의 산출물이 없다. 이때 서비스는 REPORT_MISSING을 게시하지 않고, G1~G3 결과를 체크 본문에 실어 `quality-gate`를 **in_progress**("waiting for test evidence (<workflow>)")로 두고 작업을 `waiting`으로 저널에 적는다(merge queue는 in_progress 체크를 기다리므로 PR이 큐에서 빠지지 않는다). App은 `workflow_run` 이벤트를 구독해야 하며, 신뢰 workflow의 완료 run이 대기 중인 head(pull_request면 PR head, merge_group이면 C)와 일치하면 평가를 재개한다. 다른 head·다른 workflow의 run은 무시하고, PR head가 이미 바뀐 오래된 대기는 재개하지 않고 지운다. 신뢰 workflow가 여럿이면(예: 테스트와 커버리지가 다른 workflow) 모두 완료될 때까지 기다리며, 각 run의 산출물을 합쳐 읽는다(같은 항목을 두 run이 다르게 올리면 `UNTRUSTED_ARTIFACT`). 후보 트리가 신뢰 workflow와 같은 경로의 파일을 직접 정의하면 그 경로의 run은 증거로 받지 않고, run의 workflow 정의가 게이트 저장소 것이어야 한다(PR이 같은 경로에 `uses:`로 재사용 workflow를 부르는 경우를 막는다). 웹훅을 놓쳐도 매 이벤트와 60초 타이머의 sweeper가 완료 run을 API에서 찾아 재개하고, `tests.evidence_wait_minutes`(기본 45)를 넘기면 `INCONCLUSIVE(REPORT_MISSING, "no evidence from <workflow> within N minutes")`를 게시한다. GitHub merge queue의 상태 체크 timeout 기본값은 60분이므로 이 값은 그보다 작게 둔다(초과하면 큐가 먼저 PR을 빼낸다). 만료 뒤 같은 head의 신뢰 workflow가 늦게 완료되면 그 `workflow_run`은 새 평가로 취급해 다시 판정한다(만료 후 한 대기 주기 동안; 그 뒤에는 다음 PR 이벤트가 있어야 한다). 대기 중 새 push가 오면 이전 대기는 새 대기로 대체된다. Actions 게이트가 모두 observe/degraded면 기다리지 않는다. run이 실패로 끝났지만 보고서가 있으면 그것은 대기가 아니라 `TESTS_FAILED`다. 대기 상태는 저널에 있으므로 재시작 후 `replayPendingJobs`가 다시 arm한다.
 
 ## 2. 역할 (기획서 16.1)
 
@@ -159,7 +159,7 @@ q5: pass
 
 | 시크릿 | 위치 | 교체 |
 |---|---|---|
-| App 비공개 키 | `NYORORI_SIGNER=command`(권장): 키는 KMS/HSM에 두고 `NYORORI_SIGNER_COMMAND`(argv JSON 배열)가 stdin의 JWT 서명 입력에 RS256 서명을 해 base64url로 stdout에 낸다. 이 프로세스(적대적 git 객체·zip을 파싱하는 곳)에는 키가 들어오지 않는다. `NYORORI_SIGNER=file` + `NYORORI_PRIVATE_KEY_PATH`: 서비스 프로세스만 읽는 파일(0400). 어느 쪽이든 Actions 시크릿에는 절대 두지 않는다(spec 10.1) | command: KMS에서 키를 교체하고 App에 새 공개키를 등록한다(재시작 불필요). file: GitHub App 설정에서 새 키를 만들고 파일을 바꾼 뒤 재시작. 옛 키는 새 키로 발급된 체크가 보인 뒤 삭제 |
+| App 비공개 키 | `NYORORI_SIGNER=command`(권장): 키는 KMS/HSM에 두고 `NYORORI_SIGNER_COMMAND`(argv JSON 배열)가 stdin의 JWT 서명 입력에 RS256 서명을 해 base64url로 stdout에 낸다. 명령에는 `PATH`와 `NYORORI_SIGNER_ENV`(JSON 배열의 변수 **이름**, 예 `["AWS_PROFILE","AWS_REGION"]`)에 적은 변수만 전달되며 `NYORORI_*`, `GITHUB_TOKEN`, `*_SECRET`은 적어도 전달되지 않는다. `NYORORI_SIGNER_TIMEOUT_MS`(기본 10000), `NYORORI_SIGNER_KID`. 이 프로세스(적대적 git 객체·zip을 파싱하는 곳)에는 키가 들어오지 않는다. `NYORORI_SIGNER=file` + `NYORORI_PRIVATE_KEY_PATH`: 서비스 프로세스만 읽는 파일(0400). 어느 쪽이든 Actions 시크릿에는 절대 두지 않는다(spec 10.1) | command: KMS에서 키를 교체하고 App에 새 공개키를 등록한다(재시작 불필요). file: GitHub App 설정에서 새 키를 만들고 파일을 바꾼 뒤 재시작. 옛 키는 새 키로 발급된 체크가 보인 뒤 삭제 |
 | webhook 시크릿 (`NYORORI_WEBHOOK_SECRET`) | 환경 변수 또는 0400 파일 | GitHub App의 webhook 시크릿을 바꾸고 재시작. 서명이 맞지 않는 배달은 401로 거부되므로 교체 중 몇 건은 GitHub에서 재전송한다 |
 | 설치 토큰 | 메모리에만. 저장소 하나와 사용 권한(checks: write, contents: read, pull_requests: read, issues: write, actions: read, members: read)으로 범위를 좁혀 발급 | 1시간 만료, 5분 전 재발급. 디스크에 쓰지 않는다 |
 
@@ -213,10 +213,19 @@ KMS 예 (AWS KMS, RSA 2048 키의 `RSASSA_PKCS1_V1_5_SHA_256`):
 ```bash
 NYORORI_SIGNER=command \
 NYORORI_SIGNER_COMMAND='["sh","-c","aws kms sign --key-id alias/nyorori-app --signing-algorithm RSASSA_PKCS1_V1_5_SHA_256 --message-type RAW --message fileb:///dev/stdin --output text --query Signature"]' \
+NYORORI_SIGNER_ENV='["AWS_REGION","AWS_PROFILE","AWS_CONFIG_FILE","AWS_SHARED_CREDENTIALS_FILE","AWS_ACCESS_KEY_ID","AWS_SECRET_ACCESS_KEY","AWS_SESSION_TOKEN","HOME"]' \
+NYORORI_SIGNER_TIMEOUT_MS=10000 \
 node dist/cli.js serve
 ```
 
-서명 명령은 `NYORORI_SIGNER_COMMAND`(JSON argv)로 지정하며, 서비스는 JWT의 서명 입력(`header.payload`)만 넘기고 결과를 그대로 붙인다. 명령의 환경은 서비스가 정리해서 넘기므로(필요한 클라우드 자격 증명만 `NYORORI_SIGNER_ENV`로 통과), 명령이 설치 토큰이나 웹훅 비밀을 볼 수 없다. KMS 키 정책으로 "이 서비스 역할만 sign 가능"을 두면 호스트가 뚫려도 공격자는 JWT를 **그 자리에서만** 만들 수 있고 키를 가져가지 못한다. 설치 토큰은 1시간짜리이며 저장소 범위로 좁힌다.
+| 변수 | 의미 |
+|---|---|
+| `NYORORI_SIGNER_COMMAND` | JSON argv. 셸 없이 그대로 실행하며, stdin으로 JWT의 서명 입력(`header.payload`)을 받고 stdout에 서명(base64url 또는 base64)만 출력해야 한다. 그 밖의 출력이나 0이 아닌 종료 코드는 서명 실패다 |
+| `NYORORI_SIGNER_ENV` | 명령에 **통과시킬 환경 변수 이름**의 JSON 배열. 명령의 환경은 `PATH`와 여기 적힌 변수뿐이다. 설치 토큰, 웹훅 비밀, `NYORORI_*`는 어떤 경우에도 넘어가지 않는다 |
+| `NYORORI_SIGNER_TIMEOUT_MS` | 서명 한 번의 제한 시간(기본 10,000 ms). 넘기면 그 JWT 발급은 실패하고 평가는 INCONCLUSIVE로 보고된다 |
+| `NYORORI_SIGNER_KID` | 키 저장소가 키 id를 주면 JWT 헤더의 `kid`에 넣는다 |
+
+`NYORORI_SIGNER=command`일 때 서비스는 `NYORORI_PRIVATE_KEY_PATH`를 읽지 않는다. 키 파일이 호스트에 있어도 프로세스에 들어오지 않도록, command 모드에서는 그 변수를 아예 두지 않는다. KMS 키 정책으로 "이 서비스 역할만 sign 가능"을 두면 호스트가 뚫려도 공격자는 JWT를 **그 자리에서만** 만들 수 있고 키를 가져가지 못한다. 설치 토큰은 1시간짜리이며 저장소 범위로 좁힌다.
 
 ### 워커: 분석은 다른 프로세스, 가능하면 다른 컨테이너에서
 
@@ -240,6 +249,10 @@ node dist/cli.js serve
 그 밖의 호스트 파일은 필요 없다. 이미지에는 Node 22, `dist/`, `node_modules/`, git만 있으면 되고 네트워크는 끊는다(`--network none`). 벽시계 초과 시 서비스는 접두사 프로세스 그룹을 `SIGKILL`하므로 접두사가 그것을 컨테이너까지 전달해야 한다(`docker run --rm --init`, 또는 `timeout 300` 래핑). 접두사에는 컨테이너 도구가 필요한 변수(`DOCKER_HOST`, `DOCKER_CONFIG`, `DOCKER_CONTEXT`, `CONTAINERS_CONF`, `XDG_RUNTIME_DIR`, `TMPDIR`)만 더 넘긴다. 접두사가 없으면 같은 호스트의 자식 프로세스로 돈다(개발용).
 
 이 두 축을 모두 적용하면 서비스 호스트에는 비공개 키가 없고, 적대적 바이트를 여는 프로세스에는 설치 토큰도 웹훅 비밀도 없다.
+
+### 증거 대기와 merge queue 시간 제한 (B8)
+
+push 직후에는 required workflow의 산출물이 아직 없으므로 서비스는 `quality-gate`를 **in_progress**("waiting for test evidence")로 두고 `workflow_run` 완료를 기다린다(기획서 보완, `deployment-shapes.md` §5). 대기 한도는 정책 `tests.evidence_wait_minutes`(기본 **45분**)이고, 넘기면 INCONCLUSIVE `REPORT_MISSING`으로 닫는다. 이 값은 반드시 merge queue의 **status check timeout**(GitHub 기본 60분)보다 작아야 한다. 같거나 크면 큐가 우리 체크를 기다리다 PR을 먼저 내보내고, 그 뒤에 도착한 증거는 아무 판정도 바꾸지 못한다. 큐의 제한을 바꾸면 이 값도 같이 바꾼다.
 
 ## 5. 장애 대응 (기획서 13.4)
 

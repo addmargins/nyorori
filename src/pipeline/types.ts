@@ -119,6 +119,8 @@ export interface RunGatesOutput {
   appliedWaivers: AppliedWaiver[];
   /** Requested waivers with no valid approval yet, with the copyable approval command's inputs. */
   pendingWaivers: PendingWaiver[];
+  /** Workflow files present in the candidate tree (`.github/workflows/*`), for the provenance check. */
+  candidateWorkflowPaths: string[];
 }
 
 export interface PendingWaiver {

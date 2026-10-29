@@ -28,6 +28,8 @@ export interface WaitRecord {
   deadline: string;
   deliveryId?: string;
   startedAt: string;
+  /** Deadline passed and INCONCLUSIVE was published; a late matching run still re-evaluates (A3). */
+  expired?: boolean;
 }
 
 /** Where parked evaluations live; the journal implements it durably, tests may use memory. */
@@ -187,10 +189,9 @@ export class JobJournal implements WaitStore {
       const at = this.now().toISOString();
       rec.status = status;
       if (status === "running") rec.startedAt = at;
-      if (TERMINAL.has(status)) {
-        rec.finishedAt = at;
-        delete rec.payload; // nothing left to replay
-      }
+      if (TERMINAL.has(status)) rec.finishedAt = at;
+      // A finished job has nothing to replay; a parked one is re-armed from its wait record, not its payload.
+      if (TERMINAL.has(status) || status === "waiting") delete rec.payload;
       if (note) rec.note = note;
       await this.write(file, rec);
     });

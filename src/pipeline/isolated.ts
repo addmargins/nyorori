@@ -198,6 +198,7 @@ export async function failedRunOutput(opts: RunGatesOptions, detail: string): Pr
     feedback: buildGateFeedback(all, { attempt: opts.attempt ?? 1, preserve: [] }),
     appliedWaivers: [],
     pendingWaivers: [],
+    candidateWorkflowPaths: [],
   };
 }
 

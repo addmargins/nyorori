@@ -16,7 +16,7 @@ import { replayCommand } from "./replay/cli.js";
 import type { PullRequestContext, RunGatesOptions } from "./pipeline/types.js";
 import { loadPolicy } from "./policy/load.js";
 import { dispatchEvent, replayPendingJobs, sweepWaiting, type ServiceDeps } from "./service/handlers.js";
-import { createSigner } from "./service/signer.js";
+import { CommandSigner, createSigner, type AppJwtSigner } from "./service/signer.js";
 import { FileDeliveryStore, JobJournal } from "./service/journal.js";
 import { loadArtifactDir } from "./replay/inputs.js";
 import { writeRunOutputs } from "./replay/outputs.js";
@@ -46,7 +46,7 @@ const USAGE = `usage:
   nyorori replay --repo <dir> --pairs <pairs.json> --policy <file.json> --out <dir> [...]  (see: nyorori replay --help)
   nyorori serve [--port <n>]   (env: NYORORI_APP_ID, NYORORI_WEBHOOK_SECRET, NYORORI_POLICY, NYORORI_CCCC,
                                 NYORORI_WORKDIR, NYORORI_LEDGER, NYORORI_SIGNER=file|command with
-                                NYORORI_PRIVATE_KEY_PATH or NYORORI_SIGNER_COMMAND[/_KID],
+                                NYORORI_PRIVATE_KEY_PATH or NYORORI_SIGNER_COMMAND[/_ENV/_TIMEOUT_MS/_KID],
                                 NYORORI_WORKER_COMMAND[/_MODULE/_TIMEOUT_MS])
 
 exit codes: 0 PASS/N/A/waived · 1 FAIL · 2 INCONCLUSIVE · 64 usage error`;
@@ -149,18 +149,55 @@ function env(name: string): string {
   return v;
 }
 
+/** JSON array of strings from an environment variable, or a usage error naming it. */
+function envStringArray(name: string): string[] | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new UsageError(`${name} must be a JSON array of strings`);
+  }
+  if (!Array.isArray(parsed) || !parsed.every((x) => typeof x === "string" && x.length > 0)) throw new UsageError(`${name} must be a JSON array of strings`);
+  return parsed as string[];
+}
+
+/**
+ * Key custody (docs/operations.md 4b). NYORORI_SIGNER=file reads the PEM;
+ * NYORORI_SIGNER=command never touches a key file: the signing command gets
+ * only PATH plus the variables named in NYORORI_SIGNER_ENV (cloud credentials
+ * for the KMS CLI), and NYORORI_SIGNER_TIMEOUT_MS bounds each signature.
+ */
+async function signerFromEnv(): Promise<AppJwtSigner> {
+  const kind = process.env.NYORORI_SIGNER ?? "file";
+  if (kind === "file") {
+    return createSigner({ kind: "file", privateKeyPem: await readFile(env("NYORORI_PRIVATE_KEY_PATH"), "utf8") });
+  }
+  if (kind !== "command") throw new UsageError("NYORORI_SIGNER must be \"file\" or \"command\"");
+  const argv = envStringArray("NYORORI_SIGNER_COMMAND");
+  if (!argv || argv.length === 0) throw new UsageError("NYORORI_SIGNER=command needs NYORORI_SIGNER_COMMAND (JSON argv)");
+  const forwarded: Record<string, string> = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
+  for (const name of envStringArray("NYORORI_SIGNER_ENV") ?? []) {
+    if (process.env[name] !== undefined) forwarded[name] = process.env[name]!;
+  }
+  const timeoutRaw = process.env.NYORORI_SIGNER_TIMEOUT_MS;
+  const timeoutMs = timeoutRaw === undefined ? undefined : Number(timeoutRaw);
+  if (timeoutMs !== undefined && (!Number.isInteger(timeoutMs) || timeoutMs <= 0)) throw new UsageError("NYORORI_SIGNER_TIMEOUT_MS must be a positive integer");
+  return new CommandSigner({
+    argv,
+    env: forwarded,
+    ...(process.env.NYORORI_SIGNER_KID ? { kid: process.env.NYORORI_SIGNER_KID } : {}),
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+  });
+}
+
 async function cmdServe(argv: string[]): Promise<number> {
   const { values } = parseArgs({ args: argv, options: { port: { type: "string", default: "8080" } }, strict: true });
   const appId = Number(env("NYORORI_APP_ID"));
   if (!Number.isInteger(appId)) throw new UsageError("NYORORI_APP_ID must be an integer");
   const loaded = await loadPolicy(env("NYORORI_POLICY"));
-  // Key custody (docs/operations.md 4b): with NYORORI_SIGNER=command the private key never enters this process.
-  const signer = createSigner({
-    kind: (process.env.NYORORI_SIGNER ?? "file") as "file" | "command",
-    privateKeyPem: process.env.NYORORI_PRIVATE_KEY_PATH ? await readFile(process.env.NYORORI_PRIVATE_KEY_PATH, "utf8") : undefined,
-    command: process.env.NYORORI_SIGNER_COMMAND,
-    kid: process.env.NYORORI_SIGNER_KID,
-  });
+  const signer = await signerFromEnv();
   const api = new GitHubApi({ appId, signer });
   const log = (msg: string, extra?: Record<string, unknown>) => process.stderr.write(`${JSON.stringify({ msg, ...extra })}\n`);
   const workDir = process.env.NYORORI_WORKDIR ?? join(tmpdir(), "nyorori-service");

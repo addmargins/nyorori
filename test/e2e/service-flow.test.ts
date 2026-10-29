@@ -32,9 +32,7 @@ class FakeGitHub {
   readonly checks: CheckRecord[] = [];
   runs: Array<Record<string, unknown>> = [];
   artifactZip: Buffer | null = null;
-  constructor(
-    private readonly pr: { number: number; head: string; mergeRef: string; base: string },
-  ) {}
+  constructor(public pr: { number: number; head: string; mergeRef: string; base: string }) {}
 
   readonly fetch = async (url: string, init?: RequestInit): Promise<Response> => {
     const method = init?.method ?? "GET";
@@ -98,8 +96,8 @@ class FakeGitHub {
   completeWorkflow(headSha: string, event: "pull_request" | "merge_group", mergeSha: string): void {
     this.runs = [{
       id: 1, run_attempt: 1, event, head_sha: headSha, status: "completed", conclusion: "success",
-      // An org-required workflow run reports the gate repository's workflow path.
-      path: WF.path, repository: { full_name: "org/app" },
+      // An org-required workflow run reports the gate repository's workflow path and is defined there.
+      path: WF.path, repository: { full_name: "org/app" }, workflow_url: `https://api.github.com/repos/${WF.repository}/actions/workflows/1`,
       referenced_workflows: [{ path: `${WF.repository}/${WF.path}@refs/heads/main`, sha: WF.shas[0]! }],
       run_started_at: "2026-10-29T10:01:00Z",
     }];
@@ -119,7 +117,7 @@ class FakeGitHub {
 }
 
 /** A PR whose head H adds a small file; M is GitHub's test merge (parents base, H). */
-function prRepo(): { repo: TestRepo; base: string; head: string; merge: string; bare: string; gitBase: string } {
+function prRepo(): { repo: TestRepo; base: string; head: string; merge: string; head2: string; merge2: string; bare: string; gitBase: string } {
   const repo = new TestRepo();
   const base = repo.commit({ "README.md": "x\n", "src/a.test.js": "import { it, expect } from 'vitest';\nit('a', () => { expect(1).toBe(1); });\n" });
   repo.git("checkout", "-q", "-b", "feature");
@@ -127,12 +125,19 @@ function prRepo(): { repo: TestRepo; base: string; head: string; merge: string; 
   repo.git("checkout", "-q", "main");
   repo.git("merge", "-q", "--no-ff", "-m", "test merge", "feature");
   const merge = repo.git("rev-parse", "HEAD").trim();
+  // A later push H2 on the same PR and GitHub's new test merge M2 (parents base, H2).
+  repo.git("checkout", "-q", "feature");
+  const head2 = repo.commit({ "src/b.js": fnWithCogc("b", 2) });
+  repo.git("checkout", "-q", "--detach", base);
+  repo.git("merge", "-q", "--no-ff", "-m", "test merge 2", "feature");
+  const merge2 = repo.git("rev-parse", "HEAD").trim();
+  repo.git("checkout", "-q", "main");
   const gitBase = mkdtempSync(join(tmpdir(), "nyorori-remote-"));
   mkdirSync(join(gitBase, "org"));
   const bare = join(gitBase, "org", "app.git");
   execFileSync("git", ["clone", "-q", "--bare", repo.dir, bare]);
   execFileSync("git", ["-C", bare, "config", "uploadpack.allowAnySHA1InWant", "true"]);
-  return { repo, base, head, merge, bare, gitBase };
+  return { repo, base, head, merge, head2, merge2, bare, gitBase };
 }
 
 describe("service flow: evidence wait → workflow_run → verdict", () => {
@@ -214,10 +219,44 @@ describe("service flow: evidence wait → workflow_run → verdict", () => {
     expect(github.quality(fixture.merge)).toMatchObject({ status: "completed", conclusion: "success" });
   }, 60_000);
 
+  it("push during the wait: H2 gets its own wait and verdict; H1's late evidence never settles H2", async () => {
+    const pr = (head: string) => ({ ...prEvent, action: "synchronize", pull_request: { ...prEvent.pull_request, head: { sha: head } } });
+    const workflowRun = (head: string) => ({
+      action: "completed",
+      repository: prEvent.repository,
+      workflow_run: { head_sha: head, path: WF.path, conclusion: "success", run_attempt: 1, event: "pull_request" },
+    });
+    // H1 parked.
+    expect((await dispatchEvent(deps, "pull_request", pr(fixture.head), "r1"))?.waiting?.workflows).toEqual([WF.path]);
+    // The author pushes H2: GitHub moves the PR head and recomputes the test merge.
+    github.pr = { ...github.pr, head: fixture.head2, mergeRef: fixture.merge2 };
+    // H1's evidence lands while H2 is being evaluated (the per-PR queue serializes them).
+    github.completeWorkflow(fixture.head, "pull_request", fixture.merge);
+    const [h2, h1Late] = await Promise.all([
+      dispatchEvent(deps, "pull_request", pr(fixture.head2), "r2"),
+      dispatchEvent(deps, "workflow_run", workflowRun(fixture.head), "r3"),
+    ]);
+    // H2 is parked on its own wait; H1's run can only ever resume H1 (now superseded), never finish H2.
+    expect(h2?.waiting?.workflows).toEqual([WF.path]);
+    expect(h1Late === null || h1Late.verdict.candidate_sha !== fixture.merge2).toBe(true);
+    const waits = await deps.journal!.listWaits();
+    expect(waits.map((w) => w.wait.checkSha)).toEqual([fixture.head2]);
+    expect(github.quality(fixture.head2)).toMatchObject({ status: "in_progress", title: `waiting for test evidence (${WF.path})` });
+    const h2Checks = github.checks.filter((c) => c.name === "quality-gate" && c.headSha === fixture.head2);
+    expect(h2Checks.every((c) => c.status === "in_progress" || c.conclusion === "success")).toBe(true);
+    // H2's own evidence completes H2.
+    github.completeWorkflow(fixture.head2, "pull_request", fixture.merge2);
+    const done = await dispatchEvent(deps, "workflow_run", workflowRun(fixture.head2), "r4");
+    expect(done?.verdict.state, JSON.stringify({ inconclusive: done?.verdict.inconclusive, logs })).toBe("PASS");
+    expect(done?.verdict.candidate_sha).toBe(fixture.merge2);
+    expect(github.quality(fixture.head2)).toMatchObject({ status: "completed", conclusion: "success" });
+    expect(await deps.journal!.listWaits()).toHaveLength(0);
+  }, 90_000);
+
   it("a wait past its deadline becomes INCONCLUSIVE(REPORT_MISSING), never a pass", async () => {
     await dispatchEvent(deps, "pull_request", { ...prEvent, pull_request: { ...prEvent.pull_request, head: { sha: fixture.head } } }, "d5");
     expect(github.quality(fixture.head)!.status).toBe("in_progress");
-    clock = T0 + 91 * 60_000; // policy default: 90 minutes
+    clock = T0 + 46 * 60_000; // policy default: 45 minutes (below the merge queue's 60-minute timeout)
     const swept = await sweepWaiting(deps);
     expect(swept.expired).toBe(1);
     const final = github.quality(fixture.head)!;

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { deflateRawSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { CommentHeadStore } from "../../src/service/evaluator.js";
-import { GitHubApi, appJwt, ensureMirror, provenanceOf, type WorkflowRun } from "../../src/service/github.js";
+import { GitHubApi, appJwt, ensureMirror, provenanceOf, workflowRepositoryOf, type WorkflowRun } from "../../src/service/github.js";
 import { mergeGroupPrNumber } from "../../src/service/handlers.js";
 import { readZip } from "../../src/service/zip.js";
 import { TestRepo } from "../git/repo.js";
@@ -92,7 +92,7 @@ describe("GitHub App client", () => {
 describe("artifact provenance", () => {
   const run: WorkflowRun = {
     id: 10, runAttempt: 2, event: "merge_group", headSha: "c", status: "completed", conclusion: "success",
-    repository: "o/r", path: ".github/workflows/gate-untrusted-tests.yml",
+    repository: "o/r", path: ".github/workflows/gate-untrusted-tests.yml", workflowRepository: "org/gate",
     referencedWorkflows: [{ path: "org/gate/.github/workflows/gate-untrusted-tests.yml@refs/heads/main", sha: "w".repeat(40) }],
   };
   it("reads org-required workflows from referenced_workflows", () => {
@@ -104,6 +104,15 @@ describe("artifact provenance", () => {
   it("ignores runs of other workflows, and a run whose own path is not the trusted file", () => {
     expect(provenanceOf(run, { repository: "org/gate", path: ".github/workflows/other.yml" })).toBeNull();
     expect(provenanceOf({ ...run, path: ".github/workflows/x.yml" }, { repository: "org/gate", path: ".github/workflows/gate-untrusted-tests.yml" })).toBeNull();
+  });
+  it("B2(c): a PR-added same-path workflow that `uses:` the trusted reusable workflow is not provenance", () => {
+    const wf = { repository: "org/gate", path: ".github/workflows/gate-untrusted-tests.yml" };
+    // Its definition lives in the target repo (workflow_url → o/r), the required one's in the gate repo.
+    expect(provenanceOf({ ...run, workflowRepository: "o/r" }, wf)).toBeNull();
+    const { workflowRepository: _w, ...noUrl } = run;
+    expect(provenanceOf(noUrl, wf)).toBeNull(); // unknown definition owner in a non-gate repo: fail closed
+    expect(provenanceOf({ ...noUrl, repository: "org/gate", referencedWorkflows: [] }, wf)).not.toBeNull();
+    expect(workflowRepositoryOf("https://api.github.com/repos/org/gate/actions/workflows/123")).toBe("org/gate");
   });
 });
 

@@ -108,6 +108,7 @@ export async function runGates(input: RunGatesOptions): Promise<RunGatesOutput> 
       checkRun: verdictToCheckRun(verdict, all),
       appliedWaivers: appliedWaivers(waivers, results),
       pendingWaivers: waivers.pending,
+      candidateWorkflowPaths: [...ctx.treeC.keys()].filter((p) => p.startsWith(".github/workflows/")).sort(),
       feedback: buildGateFeedback(all, {
         attempt: opts.attempt ?? 1,
         preserve: ["Every test that passes on the base must still pass on the candidate."],

@@ -239,10 +239,12 @@ export const policySchema = z
       .object({
         mode: mode.default("enforce"),
         /**
+         * (B8: keep this below the merge queue's status-check timeout, 60 min by
+         * default on GitHub, or the queue ejects the PR before the evidence lands.)
          * How long the service keeps the required check in_progress waiting for
          * the untrusted workflow's evidence before INCONCLUSIVE(REPORT_MISSING).
          */
-        evidence_wait_minutes: z.number().int().positive().default(90),
+        evidence_wait_minutes: z.number().int().positive().default(45),
         /** Paths whose modification needs independent approval (spec 8.3, 12.2). */
         protected_paths: z
           .array(glob)

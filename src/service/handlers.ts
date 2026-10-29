@@ -184,6 +184,7 @@ export async function runAndPublish(deps: ServiceDeps, ctx: EvaluationContext): 
   const key = queueKey(deps, ctx);
   const ext = checkExternalId(ctx, deps.policyRevision);
   const gen = queue.begin(key, ext);
+  await clearOtherWaits(deps, ctx).catch((e) => deps.log?.("wait cleanup failed", { error: String(e) }));
   // Pending right away, so the previous verdict is not what the required check shows while queued.
   await upsertCheck(deps, ctx, { name: QUALITY_GATE_CHECK, conclusion: "failure", title: "running", summary: `B ${ctx.base}\nC ${ctx.candidate}` }, "in_progress", waitingExternalId(ctx.checkSha));
   return queue.run(key, () => evaluateAndPublish(deps, ctx, queue, key, gen, ext));
@@ -205,6 +206,7 @@ async function evaluateAndPublish(
     const latest = queue.latestExternalId(key);
     if (latest !== ext) {
       await upsertCheck(deps, ctx, SUPERSEDED(ctx), "completed");
+      await clearOwnWait(deps, ctx);
     } else {
       const last = queue.published.get(key);
       if (last && last.externalId === ext) for (const c of last.checks) await upsertCheck(deps, ctx, c, "completed");
@@ -223,6 +225,7 @@ async function evaluateAndPublish(
     const out = failingCheck("INCONCLUSIVE: TOOL_ERROR", `gate evaluation failed: ${String(e)}`);
     await upsertCheck(deps, ctx, out, "completed");
     queue.published.set(key, { externalId: ext, checks: [out] });
+    await clearOwnWait(deps, ctx);
     await journal(deps, ctx, "failed", String(e));
     return null;
   }
@@ -231,12 +234,14 @@ async function evaluateAndPublish(
     const out = failingCheck("INCONCLUSIVE: FINGERPRINT_MISMATCH", "evaluation was computed for a different B/C");
     await upsertCheck(deps, ctx, out, "completed");
     queue.published.set(key, { externalId: ext, checks: [out] });
+    await clearOwnWait(deps, ctx);
     await journal(deps, ctx, "failed", "fingerprint mismatch");
     return null;
   }
   if (!(await stillCurrent(deps, ctx))) {
     // The test merge moved; close ours without touching any other run.
     await upsertCheck(deps, ctx, SUPERSEDED(ctx), "completed");
+    await clearOwnWait(deps, ctx);
     await journal(deps, ctx, "superseded", "test merge moved");
     return null;
   }
@@ -244,7 +249,7 @@ async function evaluateAndPublish(
     await parkEvaluation(deps, ctx, evaluation, key, ext, queue);
     return evaluation;
   }
-  await waitStore(deps).clearWait(waitKey(waitRecordKey(ctx))).catch(() => undefined);
+  await clearOwnWait(deps, ctx);
   const checks = [
     ...evaluation.results.map((r) => toCheckRun(r)),
     toCheckRun(evaluation.verdict.review),
@@ -265,6 +270,29 @@ async function waitingCheck(deps: ServiceDeps, ctx: EvaluationContext, out: Chec
   const target = existing.sort((a, b) => b.id - a.id)[0];
   if (target) await deps.client.updateCheckRun(ctx.repo, target.id, req);
   else await deps.client.createCheckRun(ctx.repo, req);
+}
+
+/** Every terminal publish for (head, B, C) ends its own wait; another head's wait under the same PR key is left alone. */
+async function clearOwnWait(deps: ServiceDeps, ctx: EvaluationContext): Promise<void> {
+  const store = waitStore(deps);
+  const key = waitKey(waitRecordKey(ctx));
+  for (const w of await store.listWaits().catch(() => [])) {
+    if (w.key === key && w.wait.checkSha === ctx.checkSha && w.wait.candidate === ctx.candidate) await store.clearWait(w.key).catch(() => undefined);
+  }
+}
+
+/** A new evaluation of a PR supersedes any wait parked for another head or test merge of that PR (B3). */
+async function clearOtherWaits(deps: ServiceDeps, ctx: EvaluationContext): Promise<void> {
+  const store = waitStore(deps);
+  const key = waitKey(waitRecordKey(ctx));
+  for (const w of await store.listWaits()) {
+    if (w.key !== key || (w.wait.checkSha === ctx.checkSha && w.wait.candidate === ctx.candidate)) continue;
+    await store.clearWait(w.key);
+    if (deps.journal && w.wait.deliveryId) {
+      await deps.journal.update(w.wait.repository, w.wait.deliveryId, "superseded", `replaced by an evaluation of ${ctx.checkSha}`).catch(() => undefined);
+    }
+    deps.log?.("wait superseded", { repository: w.wait.repository, from: w.wait.checkSha, to: ctx.checkSha });
+  }
 }
 
 function waitRecordKey(ctx: EvaluationContext): Pick<WaitRecord, "repository" | "kind" | "pr" | "checkSha"> {
@@ -324,8 +352,24 @@ function contextOfWait(w: WaitRecord): EvaluationContext {
 
 /** Re-runs a parked evaluation; the usual generation/supersede rules apply. */
 export async function resumeWait(deps: ServiceDeps, wait: WaitRecord): Promise<Evaluation | null> {
-  deps.log?.("resuming parked evaluation", { repository: wait.repository, checkSha: wait.checkSha, workflows: wait.workflows });
-  return runAndPublish(deps, contextOfWait(wait));
+  const ctx = contextOfWait(wait);
+  const queue = deps.queue ?? defaultQueue;
+  // A stale wait must never bump the PR's generation: it would supersede the
+  // evaluation of the current head and leave that head without a wait (B3).
+  const latest = queue.latestExternalId(queueKey(deps, ctx));
+  let stale = latest !== undefined && latest !== checkExternalId(ctx, deps.policyRevision);
+  if (!stale && wait.kind === "pull_request" && wait.pr !== undefined) {
+    const pr = await deps.client.getPullRequest(ctx.repo, wait.pr).catch(() => null);
+    stale = pr !== null && pr.headSha !== wait.checkSha;
+  }
+  if (stale) {
+    deps.log?.("stale wait dropped", { repository: wait.repository, checkSha: wait.checkSha });
+    await waitStore(deps).clearWait(waitKey(wait));
+    if (deps.journal && wait.deliveryId) await deps.journal.update(wait.repository, wait.deliveryId, "superseded", "head moved while waiting").catch(() => undefined);
+    return null;
+  }
+  deps.log?.("resuming parked evaluation", { repository: wait.repository, checkSha: wait.checkSha, workflows: wait.workflows, ...(wait.expired ? { afterExpiry: true } : {}) });
+  return runAndPublish(deps, ctx);
 }
 
 interface WorkflowRunPayload {
@@ -361,10 +405,16 @@ export async function sweepWaiting(deps: ServiceDeps, now: Date = deps.now?.() ?
   let resumed = 0;
   for (const { key, wait } of await waitStore(deps).listWaits()) {
     const ctx = contextOfWait(wait);
+    const waitMs = Date.parse(wait.deadline) - Date.parse(wait.startedAt);
+    if (wait.expired) {
+      // Kept one more wait period so a late matching workflow_run can still re-evaluate (A3); then forgotten.
+      if (Date.parse(wait.deadline) + waitMs <= now.getTime()) await waitStore(deps).clearWait(key);
+      continue;
+    }
     if (Date.parse(wait.deadline) <= now.getTime()) {
-      const minutes = Math.round((Date.parse(wait.deadline) - Date.parse(wait.startedAt)) / 60_000);
+      const minutes = Math.round(waitMs / 60_000);
       await upsertCheck(deps, ctx, failingCheck("INCONCLUSIVE: REPORT_MISSING", `no evidence from ${wait.workflows.join(", ")} within ${minutes} minutes`), "completed");
-      await waitStore(deps).clearWait(key);
+      await waitStore(deps).putWait(key, { ...wait, expired: true });
       await journal(deps, ctx, "failed", "evidence deadline passed");
       expired++;
       continue;
@@ -502,8 +552,9 @@ export async function dispatchEvent(deps: ServiceDeps, event: string, payload: u
     await deps.journal.enqueue(repository, deliveryId, event, payload, 0).catch((e) => deps.log?.("journal write failed", { error: String(e) }));
   }
   const out = await dispatchInner(deps, event, payload, deliveryId);
-  // An event the handlers ignored (closed PR, no command) is done as far as the journal is concerned.
-  if (out === null && deps.journal && deliveryId && repository && JOURNALED_EVENTS.has(event)) {
+  // An event the handlers ignored (closed PR, no command) is done as far as the
+  // journal is concerned; so is a workflow_run, whose work belongs to the wait it resumed.
+  if ((out === null || event === "workflow_run") && deps.journal && deliveryId && repository && JOURNALED_EVENTS.has(event)) {
     await deps.journal.update(repository, deliveryId, "done", "no evaluation needed or already reported").catch(() => undefined);
   }
   // Every event doubles as a sweep so a lost workflow_run webhook delays, never strands, a wait.

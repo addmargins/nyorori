@@ -87,6 +87,8 @@ export interface WorkflowRun {
   referencedWorkflows: Array<{ path: string; sha: string }>;
   /** ISO time the (latest attempt of the) run started; artifacts must be newer. */
   runStartedAt?: string;
+  /** Repository that owns the run's workflow definition (from `workflow_url`); the gate repo for required workflows. */
+  workflowRepository?: string;
 }
 
 export interface ArtifactRef {
@@ -309,6 +311,7 @@ export class GitHubApi implements GitHubClient {
       repository: { full_name: string };
       referenced_workflows?: Array<{ path: string; sha: string }>;
       run_started_at?: string;
+      workflow_url?: string;
     };
     const raw = await this.paginate<Raw, { workflow_runs: Raw[] }>(
       repo,
@@ -327,6 +330,7 @@ export class GitHubApi implements GitHubClient {
       path: r.path,
       referencedWorkflows: r.referenced_workflows ?? [],
       ...(r.run_started_at ? { runStartedAt: r.run_started_at } : {}),
+      ...(workflowRepositoryOf(r.workflow_url) ? { workflowRepository: workflowRepositoryOf(r.workflow_url) } : {}),
     }));
   }
 
@@ -406,10 +410,21 @@ async function readCapped(res: Response, cap: number): Promise<Buffer> {
  * `referenced_workflows` as `owner/repo/path@ref` with their commit; a
  * repository's own workflow is identified by the run's repository and path.
  */
+/** `https://api.github.com/repos/{owner}/{repo}/actions/workflows/{id}` → `owner/repo`. */
+export function workflowRepositoryOf(workflowUrl: string | undefined): string | undefined {
+  const m = /\/repos\/([^/]+\/[^/]+)\/actions\/workflows\//.exec(workflowUrl ?? "");
+  return m?.[1];
+}
+
 export function provenanceOf(run: WorkflowRun, workflow: { repository: string; path: string }): ArtifactProvenance | null {
   const base = { runId: run.id, runAttempt: run.runAttempt, headSha: run.headSha, event: run.event, runConclusion: run.conclusion ?? "unknown" };
   // The run itself must be the trusted workflow file, not merely reference it.
   if (run.path !== workflow.path) return null;
+  // A PR-added workflow at the same path that `uses:` the trusted reusable
+  // workflow also lists it in referenced_workflows; what tells them apart is
+  // whose workflow definition ran. Required workflows run from the gate repo.
+  const definedIn = run.workflowRepository ?? run.repository;
+  if (definedIn !== workflow.repository) return null;
   for (const ref of run.referencedWorkflows) {
     const m = /^([^/]+\/[^/]+)\/(.+?)(?:@.*)?$/.exec(ref.path);
     if (m && m[1] === workflow.repository && m[2] === workflow.path) {
