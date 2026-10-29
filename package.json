@@ -1,0 +1,44 @@
+{
+  "name": "nyorori",
+  "version": "0.1.0",
+  "description": "Quality gate for AI-generated JS/TS code built on the cccc measurer",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "nyorori": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src test scripts eslint.config.js",
+    "fixtures": "node dist/cli.js fixtures",
+    "gen:policy": "npm run build && node scripts/gen-default-policy.mjs",
+    "demo": "node scripts/demo.mjs"
+  },
+  "dependencies": {
+    "@eslint/js": "^10.0.1",
+    "dependency-cruiser": "^18.7.0",
+    "eslint": "^10.13.0",
+    "prettier": "^3.9.10",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.0",
+    "@types/node": "^22.0.0"
+  },
+  "main": "dist/pipeline/index.js",
+  "files": [
+    "dist",
+    "policy",
+    "test/fixtures/cccc-rules",
+    "docs",
+    "scripts/fetch-cccc.sh",
+    "README.md"
+  ]
+}

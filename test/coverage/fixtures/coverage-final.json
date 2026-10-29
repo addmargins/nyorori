@@ -1,0 +1,59 @@
+{
+  "/home/runner/work/app/app/src/price.ts": {
+    "path": "/home/runner/work/app/app/src/price.ts",
+    "all": false,
+    "statementMap": {
+      "0": { "start": { "line": 2, "column": 2 }, "end": { "line": 2, "column": 25 } },
+      "1": { "start": { "line": 2, "column": 16 }, "end": { "line": 2, "column": 25 } },
+      "2": { "start": { "line": 3, "column": 2 }, "end": { "line": 3, "column": 24 } },
+      "3": { "start": { "line": 4, "column": 2 }, "end": { "line": 4, "column": 34 } },
+      "4": { "start": { "line": 8, "column": 2 }, "end": { "line": 8, "column": 16 } }
+    },
+    "s": { "0": 2, "1": 0, "2": 2, "3": 2, "4": 0 },
+    "branchMap": {
+      "0": {
+        "type": "if",
+        "line": 2,
+        "loc": { "start": { "line": 2, "column": 2 }, "end": { "line": 2, "column": 25 } },
+        "locations": [
+          { "start": { "line": 2, "column": 2 }, "end": { "line": 2, "column": 25 } },
+          { "start": {}, "end": {} }
+        ]
+      },
+      "1": {
+        "type": "cond-expr",
+        "line": 4,
+        "loc": { "start": { "line": 4, "column": 9 }, "end": { "line": 4, "column": 33 } },
+        "locations": [
+          { "start": { "line": 4, "column": 15 }, "end": { "line": 4, "column": 25 } },
+          { "start": { "line": 4, "column": 28 }, "end": { "line": 4, "column": 32 } }
+        ]
+      },
+      "2": {
+        "type": "binary-expr",
+        "line": 8,
+        "loc": { "start": { "line": 8, "column": 9 }, "end": { "line": 8, "column": 15 } },
+        "locations": [
+          { "start": { "line": 8, "column": 9 }, "end": { "line": 8, "column": 10 } },
+          { "start": { "line": 8, "column": 14 }, "end": { "line": 8, "column": 15 } }
+        ]
+      }
+    },
+    "b": { "0": [0, 2], "1": [1, 1], "2": [0, 0] },
+    "fnMap": {
+      "0": {
+        "name": "price",
+        "decl": { "start": { "line": 1, "column": 16 }, "end": { "line": 1, "column": 21 } },
+        "loc": { "start": { "line": 1, "column": 57 }, "end": { "line": 5, "column": null } },
+        "line": 1
+      },
+      "1": {
+        "name": "unused",
+        "decl": { "start": { "line": 7, "column": 16 }, "end": { "line": 7, "column": 22 } },
+        "loc": { "start": { "line": 7, "column": 43 }, "end": { "line": 9, "column": null } },
+        "line": 7
+      }
+    },
+    "f": { "0": 2, "1": 0 }
+  }
+}

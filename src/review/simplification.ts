@@ -1,0 +1,274 @@
+// G6 simplification review (spec 7.6). Any routing trigger makes a human
+// review mandatory; the approval is bound to the head SHA it was given on and
+// survives a push only when the push provably did not touch what was reviewed.
+
+import type { Policy } from "../policy/schema.js";
+import type { GateMode, GateResult, MeasurementFingerprint, TriggerHit, Violation } from "../types.js";
+import { NON_ROUTING_TRIGGERS } from "../types.js";
+import { finalizeGateResult } from "../report/result.js";
+import { CommandError, findCommands } from "../waivers/command.js";
+import { EDITED_COMMAND_NOTE, screenComments, type IssueComment } from "../waivers/index.js";
+import { independenceProblem, inRoster, requiredApprovers, secondApproverReason, type PrIdentityContext, type TeamRosters } from "./independence.js";
+
+export type ReviewVerdict = "NO_SIMPLIFICATION_NEEDED" | "SUGGESTED" | "REQUIRED";
+
+export interface RubricAnswer {
+  question: 1 | 2 | 3 | 4 | 5;
+  pass: boolean;
+  /** file:line references; mandatory for a failed item. */
+  evidence: string[];
+  note: string;
+}
+
+export interface ParsedReview {
+  verdict: ReviewVerdict;
+  /** PR head the reviewer looked at (`sha=`); the approval binds to it. */
+  sha: string;
+  answers: RubricAnswer[];
+  /** One-line disposition per trigger ID ("S1: helpers are named pricing rules"), ruling D13. */
+  dispositions: Record<string, string>;
+}
+
+/**
+ * A review comment plus the PR head the service had observed when it was
+ * posted. The approval itself binds to the explicit `sha=` in the command.
+ */
+export interface ReviewComment extends IssueComment {
+  headSha: string;
+}
+
+const EVIDENCE = /^[^\s:]+:\d+$/;
+
+/**
+ * Format (each rubric item is pass/fail so polarity never depends on how the
+ * question is phrased):
+ *
+ *   /simplification-review REQUIRED sha=<40-hex PR head reviewed>
+ *   q1: pass
+ *   q2: fail src/billing/plan.ts:42 processPart2 is a single-use helper dragging 5 locals
+ *   q3: pass
+ *   q4: pass
+ *   q5: pass
+ *   S1: split follows the pricing rules, each helper is a named rule
+ *   S4: long because of the exhaustive state table
+ *
+ * Every rubric item needs an explicit pass/fail and every routing trigger
+ * that fired needs a one-line disposition (ruling D13); nothing defaults.
+ */
+export function parseReview(body: string): ParsedReview | { problem: string } | null {
+  let cmds;
+  try {
+    cmds = findCommands(body, "simplification-review");
+  } catch (e) {
+    return { problem: (e as Error).message };
+  }
+  if (cmds.length === 0) return null;
+  if (cmds.length > 1) return { problem: "more than one /simplification-review in a comment" };
+  const cmd = cmds[0]!;
+  try {
+    const verdict = cmd.positional[0] as ReviewVerdict | undefined;
+    if (verdict !== "NO_SIMPLIFICATION_NEEDED" && verdict !== "SUGGESTED" && verdict !== "REQUIRED") {
+      throw new CommandError("verdict must be NO_SIMPLIFICATION_NEEDED, SUGGESTED or REQUIRED");
+    }
+    if (cmd.positional.length > 1) throw new CommandError(`unexpected "${cmd.positional[1]}"`);
+    const sha = (cmd.args.sha ?? "").toLowerCase();
+    if (!/^[0-9a-f]{40}$/.test(sha)) throw new CommandError("missing sha=<40-hex PR head you reviewed>");
+    for (const k of Object.keys(cmd.args)) if (k !== "sha") throw new CommandError(`unknown argument "${k}"`);
+    const answers = new Map<number, RubricAnswer>();
+    const dispositions: Record<string, string> = {};
+    for (const raw of cmd.bodyLines) {
+      const d = /^\s*(S\d{1,2})\s*[:=]\s*(.*)$/.exec(raw);
+      if (d) {
+        const id = d[1]!;
+        if (id in dispositions) throw new CommandError(`${id} disposition given twice`);
+        if (!d[2]!.trim()) throw new CommandError(`${id} disposition is empty`);
+        dispositions[id] = d[2]!.trim();
+        continue;
+      }
+      const m = /^\s*q([1-5])\s*[:=]\s*(pass|fail)\b(.*)$/i.exec(raw);
+      if (!m) continue;
+      const q = Number(m[1]) as RubricAnswer["question"];
+      if (answers.has(q)) throw new CommandError(`q${q} answered twice`);
+      const rest = m[3]!.trim();
+      const words = rest.split(/\s+/).filter(Boolean);
+      const evidence = words.filter((w) => EVIDENCE.test(w));
+      const note = words.filter((w) => !EVIDENCE.test(w)).join(" ");
+      const pass = m[2]!.toLowerCase() === "pass";
+      if (!pass && evidence.length === 0) throw new CommandError(`q${q} fails without file:line evidence`);
+      answers.set(q, { question: q, pass, evidence, note });
+    }
+    for (let q = 1; q <= 5; q++) if (!answers.has(q)) throw new CommandError(`q${q} is not answered`);
+    const list = [...answers.values()].sort((a, b) => a.question - b.question);
+    const coreFails = list.filter((a) => a.question <= 4 && !a.pass);
+    if (verdict === "REQUIRED" && coreFails.length === 0) {
+      throw new CommandError("REQUIRED needs at least one failed item among q1-q4");
+    }
+    if (verdict === "NO_SIMPLIFICATION_NEEDED" && coreFails.length > 0) {
+      throw new CommandError("NO_SIMPLIFICATION_NEEDED contradicts a failed item among q1-q4");
+    }
+    return { verdict, sha, answers: list, dispositions };
+  } catch (e) {
+    return { problem: (e as Error).message };
+  }
+}
+
+export interface CarryOverInfo {
+  /** patch-id of (approved SHA vs its base) equals that of (head vs base): a pure rebase. */
+  patchIdEqual: boolean;
+  /** Files touched by commits between the approved SHA and the current head. */
+  filesChangedSince: string[];
+}
+
+export interface LlmReview {
+  verdict: ReviewVerdict;
+  model: string;
+  answers?: RubricAnswer[];
+}
+
+export interface SimplificationReviewInput {
+  policy: Policy;
+  mode: GateMode;
+  base: string;
+  candidate: string;
+  /** PR head the approval must be bound to (merge_group: the PR head under test). */
+  headSha: string;
+  fingerprint: MeasurementFingerprint;
+  triggers: readonly TriggerHit[];
+  comments: readonly ReviewComment[];
+  identity: PrIdentityContext;
+  teams?: TeamRosters;
+  /** Keyed by the SHA a review was given on; absent means no carry-over evidence. */
+  carryOver?: Readonly<Record<string, CarryOverInfo>>;
+  /** Approvers of applied waivers, by unit key; a simplification reviewer among them clears that S6. */
+  waiverApprovers?: ReadonlyArray<{ unit: string; approver: string }>;
+  llm?: LlmReview;
+}
+
+interface AcceptedReview {
+  reviewer: string;
+  verdict: ReviewVerdict;
+  sha: string;
+  commentId: string;
+  dispositions: Record<string, string>;
+}
+
+export function routingTriggers(triggers: readonly TriggerHit[]): TriggerHit[] {
+  return triggers.filter((t) => t.routing && !NON_ROUTING_TRIGGERS.has(t.id));
+}
+
+function appliesToHead(sha: string, input: SimplificationReviewInput, triggeredFiles: Set<string> | null): boolean {
+  if (sha === input.headSha) return true;
+  const info = input.carryOver?.[sha];
+  if (!info) return false;
+  if (info.patchIdEqual) return true;
+  // A trigger without a file could be anywhere, so only a pure rebase carries it.
+  if (triggeredFiles === null) return false;
+  return info.filesChangedSince.every((f) => !triggeredFiles.has(f));
+}
+
+export function evaluateSimplificationReview(input: SimplificationReviewInput): GateResult {
+  const { policy } = input;
+  let routing = routingTriggers(input.triggers);
+
+  // S6 from a waiver is satisfied when the waiver's approver is also a simplification reviewer.
+  const clearedS6 = new Set(
+    (input.waiverApprovers ?? [])
+      .filter((w) => inRoster(w.approver, policy.review.simplification_reviewers, input.teams))
+      .map((w) => w.unit),
+  );
+  // Only waiver-sourced S6 (see waiverTriggers); override and degraded-gate S6 need a review.
+  routing = routing.filter((t) => !(t.id === "S6" && t.unit && clearedS6.has(t.unit) && t.evidence.startsWith("waiver ")));
+
+  const problems: Array<{ commentId: string; problem: string }> = [];
+  const latestByReviewer = new Map<string, AcceptedReview>();
+  const triggeredFiles = routing.every((t) => t.file) ? new Set(routing.map((t) => t.file!)) : null;
+  const screened = screenComments(input.comments);
+  for (const i of screened.ignored) problems.push({ commentId: i.id, problem: EDITED_COMMAND_NOTE });
+  const ordered = screened.kept.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  for (const c of ordered) {
+    const parsed = parseReview(c.body);
+    if (parsed === null) continue;
+    const commentId = String(c.id);
+    if ("problem" in parsed) {
+      problems.push({ commentId, problem: parsed.problem });
+      continue;
+    }
+    if (!inRoster(c.author.login, policy.review.simplification_reviewers, input.teams)) {
+      problems.push({ commentId, problem: `${c.author.login} is not a simplification reviewer` });
+      continue;
+    }
+    const indep = independenceProblem(c.author, input.identity, policy);
+    if (indep) {
+      problems.push({ commentId, problem: indep });
+      continue;
+    }
+    latestByReviewer.set(c.author.login.toLowerCase(), {
+      reviewer: c.author.login,
+      verdict: parsed.verdict,
+      sha: parsed.sha,
+      commentId,
+      dispositions: parsed.dispositions,
+    });
+  }
+
+  const current = [...latestByReviewer.values()].filter((r) => appliesToHead(r.sha, input, triggeredFiles));
+  const stale = [...latestByReviewer.values()].filter((r) => !current.includes(r));
+
+  const violations: Violation[] = [];
+  const firedIds = [...new Set(routing.map((t) => t.id))];
+  const ids = firedIds.join(", ");
+  const requiredBy = current.filter((r) => r.verdict === "REQUIRED");
+  const approvedBy: AcceptedReview[] = [];
+  for (const r of current) {
+    if (r.verdict === "REQUIRED") continue;
+    const undisposed = firedIds.filter((id) => !r.dispositions[id]);
+    if (undisposed.length > 0) {
+      problems.push({ commentId: r.commentId, problem: `approval gives no disposition for ${undisposed.join(", ")}` });
+      continue;
+    }
+    approvedBy.push(r);
+  }
+  if (routing.length > 0) {
+    if (requiredBy.length > 0) {
+      violations.push({
+        gate: "simplification-review",
+        reason: "REVIEW_CHANGES_REQUESTED",
+        file: "",
+        message: `simplification requested by ${requiredBy.map((r) => r.reviewer).join(", ")}`,
+        details: { reviews: requiredBy },
+      });
+    } else if (approvedBy.length < requiredApprovers(input.identity)) {
+      violations.push({
+        gate: "simplification-review",
+        reason: "REVIEW_REQUIRED",
+        file: "",
+        message:
+          approvedBy.length > 0
+            ? `simplification review needs a second independent approver (${secondApproverReason(input.identity)}): ${ids}`
+            : `simplification review required: ${ids}`,
+        details: { stale_reviews: stale.map((r) => ({ reviewer: r.reviewer, sha: r.sha })), rejected_reviews: problems },
+      });
+    }
+  }
+
+  return finalizeGateResult({
+    gate: "simplification-review",
+    mode: input.mode,
+    base: input.base,
+    candidate: input.candidate,
+    policyRevision: policy.revision,
+    fingerprint: input.fingerprint,
+    violations,
+    triggers: routing,
+    applicable: routing.length > 0,
+    observe: {
+      head_sha: input.headSha,
+      fired_triggers: firedIds,
+      required_approvers: requiredApprovers(input.identity),
+      approvals: approvedBy.map((r) => ({ reviewer: r.reviewer, verdict: r.verdict, sha: r.sha })),
+      stale_reviews: stale.map((r) => ({ reviewer: r.reviewer, sha: r.sha })),
+      rejected_reviews: problems,
+      llm: input.llm ?? null,
+    },
+  });
+}
