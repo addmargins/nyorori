@@ -288,6 +288,9 @@ async function clearOtherWaits(deps: ServiceDeps, ctx: EvaluationContext): Promi
   for (const w of await store.listWaits()) {
     if (w.key !== key || (w.wait.checkSha === ctx.checkSha && w.wait.candidate === ctx.candidate)) continue;
     await store.clearWait(w.key);
+    // The old head's check must not stay in_progress with nobody left to complete it.
+    const old = contextOfWait(w.wait);
+    if (!w.wait.expired) await upsertCheck(deps, old, SUPERSEDED(old), "completed").catch(() => undefined);
     if (deps.journal && w.wait.deliveryId) {
       await deps.journal.update(w.wait.repository, w.wait.deliveryId, "superseded", `replaced by an evaluation of ${ctx.checkSha}`).catch(() => undefined);
     }
@@ -365,6 +368,7 @@ export async function resumeWait(deps: ServiceDeps, wait: WaitRecord): Promise<E
   if (stale) {
     deps.log?.("stale wait dropped", { repository: wait.repository, checkSha: wait.checkSha });
     await waitStore(deps).clearWait(waitKey(wait));
+    if (!wait.expired) await upsertCheck(deps, ctx, SUPERSEDED(ctx), "completed").catch(() => undefined);
     if (deps.journal && wait.deliveryId) await deps.journal.update(wait.repository, wait.deliveryId, "superseded", "head moved while waiting").catch(() => undefined);
     return null;
   }

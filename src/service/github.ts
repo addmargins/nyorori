@@ -422,9 +422,10 @@ export function provenanceOf(run: WorkflowRun, workflow: { repository: string; p
   if (run.path !== workflow.path) return null;
   // A PR-added workflow at the same path that `uses:` the trusted reusable
   // workflow also lists it in referenced_workflows; what tells them apart is
-  // whose workflow definition ran. Required workflows run from the gate repo.
-  const definedIn = run.workflowRepository ?? run.repository;
-  if (definedIn !== workflow.repository) return null;
+  // whose workflow definition ran (`workflow_url`). Required workflows run
+  // from the gate repo. When the API gives no owner, the candidate-tree check
+  // in the evaluator (a PR cannot define the trusted path) is the backstop.
+  if (run.workflowRepository !== undefined && run.workflowRepository !== workflow.repository) return null;
   for (const ref of run.referencedWorkflows) {
     const m = /^([^/]+\/[^/]+)\/(.+?)(?:@.*)?$/.exec(ref.path);
     if (m && m[1] === workflow.repository && m[2] === workflow.path) {

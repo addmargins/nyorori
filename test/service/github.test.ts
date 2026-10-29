@@ -110,7 +110,8 @@ describe("artifact provenance", () => {
     // Its definition lives in the target repo (workflow_url → o/r), the required one's in the gate repo.
     expect(provenanceOf({ ...run, workflowRepository: "o/r" }, wf)).toBeNull();
     const { workflowRepository: _w, ...noUrl } = run;
-    expect(provenanceOf(noUrl, wf)).toBeNull(); // unknown definition owner in a non-gate repo: fail closed
+    // Unknown owner (no workflow_url): accepted on the referenced workflow; the evaluator's candidate-tree check backs it.
+    expect(provenanceOf(noUrl, wf)).not.toBeNull();
     expect(provenanceOf({ ...noUrl, repository: "org/gate", referencedWorkflows: [] }, wf)).not.toBeNull();
     expect(workflowRepositoryOf("https://api.github.com/repos/org/gate/actions/workflows/123")).toBe("org/gate");
   });
