@@ -18,6 +18,7 @@ import type { RunContext } from "./context.js";
 import type { GateDraft } from "./draft.js";
 import { candidatesFor, chooseBaseline, cutoffCommit, historyIndex, readFirstParentHistory, type FirstParentHistory } from "./history.js";
 import { normalizeSides, type MeasuredState } from "./service-gates.js";
+import { errorMessage } from "../util/errors.js";
 
 const KEPT: ReadonlySet<TriggerId> = new Set<TriggerId>(["S1", "S9", "S10", "S12"]);
 
@@ -139,7 +140,7 @@ export async function addMovingBaselineTriggers(ctx: RunContext, measured: Measu
     }
     note.hits = hits;
   } catch (e) {
-    note.error = { reason: "TOOL_ERROR", detail: e instanceof Error ? e.message : String(e) };
+    note.error = { reason: "TOOL_ERROR", detail: errorMessage(e) };
   }
   g1.observe = { ...g1.observe, moving_baseline: note };
 }

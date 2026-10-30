@@ -16,6 +16,7 @@ import { loadPairInputs } from "./inputs.js";
 import { pLimit } from "./limit.js";
 import { writeRunOutputs } from "./outputs.js";
 import { renderReplaySummary } from "./summary.js";
+import { errorMessage } from "../util/errors.js";
 
 export const DEFAULT_JOBS = 2;
 export const REPLAY_RESULT_FILE = "replay-result.json";
@@ -156,7 +157,7 @@ export async function replay(opts: ReplayOptions): Promise<ReplayReport> {
       try {
         report[side] = await runSide(pair, side, spec);
       } catch (e) {
-        report.errors.push({ side, message: e instanceof Error ? e.message : String(e) });
+        report.errors.push({ side, message: errorMessage(e) });
       }
     }
     if (report.current && report.comparison) report.delta = computeDelta(report.current, report.comparison);

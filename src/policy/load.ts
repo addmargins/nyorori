@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { parsePolicy, type Policy } from "./schema.js";
+import { errorMessage } from "../util/errors.js";
 
 export interface LoadedPolicy {
   policy: Policy;
@@ -35,7 +36,7 @@ export function loadPolicyFromText(text: string, opts: { revision?: string } = {
   try {
     raw = JSON.parse(text);
   } catch (e) {
-    throw new Error(`policy is not valid JSON: ${(e as Error).message}`, { cause: e });
+    throw new Error(`policy is not valid JSON: ${errorMessage(e)}`, { cause: e });
   }
   const parsed = parsePolicy(raw);
   const revision = opts.revision ?? policyDigest(parsed);

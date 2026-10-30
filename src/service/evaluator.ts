@@ -113,7 +113,6 @@ function teamsIn(policy: Policy): string[] {
 }
 
 const execFileP = promisify(execFile);
-const OID = /^[0-9a-f]{40}$/;
 const gitEnv = (mirror: string) => ({ PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: mirror, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" });
 
 async function git(mirror: string, args: string[]): Promise<string> {
@@ -261,7 +260,7 @@ async function pullRequestContext(
   for (const c of screenComments(comments).kept) {
     if (!inRoster(c.author.login, cfg.policy.review.simplification_reviewers, teams)) continue;
     const r = parseReview(c.body);
-    if (r && !("problem" in r) && OID.test(r.sha) && r.sha !== head) reviewed.add(r.sha);
+    if (r && !("problem" in r) && isObjectId(r.sha) && r.sha !== head) reviewed.add(r.sha);
   }
   // In a merge group the code that merges is C, so carry-over is measured against C.
   const target = ctx.kind === "merge_group" ? ctx.candidate : head;
@@ -294,6 +293,8 @@ async function pullRequestContext(
 
 /** Entry names the gates read; the worker inflates only these (src/pipeline/artifacts.ts). */
 import { ARTIFACT_ENTRIES } from "../pipeline/artifacts.js";
+import { isObjectId } from "../util/ids.js";
+import { errorMessage } from "../util/errors.js";
 export { ARTIFACT_ENTRIES };
 
 /**
@@ -370,7 +371,7 @@ async function findArtifacts(cfg: ServiceConfig, ctx: EvaluationContext, prHead:
       archives.push({ run, prov, bytes: await cfg.api.downloadArtifactArchive(ctx.repo, bound.artifact.id) });
     } catch (e) {
       cfg.log?.("artifact rejected", { artifact: bound.artifact.id, error: String(e) });
-      return { artifacts: {}, pending, problem: `artifact ${bound.artifact.id} of run ${run.id} was rejected: ${(e as Error).message}` };
+      return { artifacts: {}, pending, problem: `artifact ${bound.artifact.id} of run ${run.id} was rejected: ${errorMessage(e)}` };
     }
   }
   if (archives.length === 0) return { artifacts: {}, pending };
@@ -388,7 +389,7 @@ async function findArtifacts(cfg: ServiceConfig, ctx: EvaluationContext, prHead:
       try {
         entries = readZip(a.bytes, (n) => ARTIFACT_ENTRIES.has(n));
       } catch (e) {
-        return { artifacts: {}, pending, problem: `artifact of run ${a.run.id} was rejected: ${(e as Error).message}` };
+        return { artifacts: {}, pending, problem: `artifact of run ${a.run.id} was rejected: ${errorMessage(e)}` };
       }
       for (const [name, data] of entries) {
         const prior = merged.get(name);

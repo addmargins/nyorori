@@ -7,6 +7,7 @@ import { parseArgs } from "node:util";
 import { loadPolicy } from "../policy/load.js";
 import { DatasetError } from "./dataset.js";
 import { DEFAULT_JOBS, replay } from "./driver.js";
+import { errorMessage } from "../util/errors.js";
 
 /** Same value as the main CLI's EXIT_USAGE (not imported: cli.ts imports this module). */
 const EXIT_USAGE = 64;
@@ -86,7 +87,7 @@ export async function replayCommand(argv: string[]): Promise<number> {
   } catch (e) {
     const code = (e as { code?: unknown }).code;
     const usage = e instanceof ReplayUsageError || e instanceof DatasetError || (typeof code === "string" && code.startsWith("ERR_PARSE_ARGS"));
-    process.stderr.write(`nyorori replay: ${e instanceof Error ? e.message : String(e)}\n${usage ? REPLAY_USAGE + "\n" : ""}`);
+    process.stderr.write(`nyorori replay: ${errorMessage(e)}\n${usage ? REPLAY_USAGE + "\n" : ""}`);
     return usage ? EXIT_USAGE : EXIT_ERROR;
   }
 }

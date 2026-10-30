@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { FileLineMap, Inconclusive } from "../../types.js";
 import { changedLinesFromHunks } from "../coverage/changed.js";
 import { createPathResolver, type PathResolveOptions } from "../tests/paths.js";
+import { errorMessage } from "../../util/errors.js";
 
 /** Mutant statuses of the Stryker mutation-testing report schema. */
 const STRYKER_STATUSES = ["Killed", "Survived", "NoCoverage", "CompileError", "RuntimeError", "Timeout", "Ignored", "Pending"] as const;
@@ -86,7 +87,7 @@ export function summarizeMutation(
   try {
     parsed = reportSchema.safeParse(JSON.parse(text));
   } catch (e) {
-    return { ok: false, inconclusive: { reason: "SCHEMA", detail: `mutation report is not JSON: ${(e as Error).message}`, authorFixable: false } };
+    return { ok: false, inconclusive: { reason: "SCHEMA", detail: `mutation report is not JSON: ${errorMessage(e)}`, authorFixable: false } };
   }
   if (!parsed.success) {
     return { ok: false, inconclusive: { reason: "SCHEMA", detail: "mutation report does not match mutation-testing-report-schema", authorFixable: false } };

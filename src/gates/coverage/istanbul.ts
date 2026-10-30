@@ -5,6 +5,7 @@
 import { z } from "zod";
 import type { Inconclusive } from "../../types.js";
 import { createPathResolver, type PathResolveOptions } from "../tests/paths.js";
+import { errorMessage } from "../../util/errors.js";
 
 // v8-to-istanbul emits `{}` for implicit else locations and `null` end columns.
 const position = z.object({ line: z.number().int().optional(), column: z.number().nullable().optional() }).passthrough();
@@ -99,7 +100,7 @@ export function parseIstanbul(text: string | null | undefined, opts: PathResolve
   try {
     raw = JSON.parse(text);
   } catch (e) {
-    return bad("SCHEMA", `coverage report is not JSON: ${(e as Error).message}`);
+    return bad("SCHEMA", `coverage report is not JSON: ${errorMessage(e)}`);
   }
   const parsed = z.record(fileCoverage).safeParse(raw);
   if (!parsed.success) {

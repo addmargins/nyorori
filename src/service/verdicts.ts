@@ -7,6 +7,7 @@ import { join } from "node:path";
 import type { QualityGateVerdict } from "../aggregate/index.js";
 import type { AppliedWaiver } from "../pipeline/types.js";
 import type { RepoRef } from "./client.js";
+import { isObjectId } from "../util/ids.js";
 
 export interface StoredVerdict {
   repository: string;
@@ -20,7 +21,6 @@ export interface StoredVerdict {
   storedAt: string;
 }
 
-const SHA = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 const SEGMENT = /^[A-Za-z0-9._-]+$/;
 
 export class VerdictStore {
@@ -32,7 +32,7 @@ export class VerdictStore {
       throw new Error(`unsafe repository name ${repo.owner}/${repo.repo}`);
     }
     if (!Number.isInteger(pr) || pr <= 0) throw new Error(`invalid PR number ${pr}`);
-    if (!SHA.test(head)) throw new Error(`invalid head sha ${head}`);
+    if (!isObjectId(head)) throw new Error(`invalid head sha ${head}`);
     return join(this.dir, repo.owner, repo.repo, `pr-${pr}`, `${head}.${kind}.json`);
   }
 

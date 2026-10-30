@@ -14,6 +14,8 @@ import type {
 import { independenceProblem, inRoster, requiredApprovers, secondApproverReason, type PrIdentityContext, type TeamRosters } from "../review/independence.js";
 import { CommandError, findCommands, requireArgs } from "../waivers/command.js";
 import { EDITED_COMMAND_NOTE, screenComments, type IssueComment } from "../waivers/index.js";
+import { isObjectId } from "../util/ids.js";
+import { errorMessage } from "../util/errors.js";
 
 /**
  * Reasons a gate owner may override for one file. PARSE_ERROR_CANDIDATE only
@@ -66,7 +68,6 @@ export interface OverrideOutcome {
   rerunRequired: string[];
 }
 
-const OID = /^[0-9a-f]{40}([0-9a-f]{24})?$/;
 
 /**
  * Formats:
@@ -82,7 +83,7 @@ export function parseOverrides(comment: IssueComment): OverrideRequest[] | { com
         requireArgs(cmd, ["gate", "reason", "base", "candidate", "note"]);
         const base = a.base!.toLowerCase();
         const candidate = a.candidate!.toLowerCase();
-        if (!OID.test(base) || !OID.test(candidate)) throw new CommandError("base and candidate must be commit ids");
+        if (!isObjectId(base) || !isObjectId(candidate)) throw new CommandError("base and candidate must be commit ids");
         return {
           commentId,
           owner: comment.author.login,
@@ -97,7 +98,7 @@ export function parseOverrides(comment: IssueComment): OverrideRequest[] | { com
       requireArgs(cmd, ["gate", "reason", "file", "blob", "note"]);
       if (/[*?]/.test(a.file!)) throw new CommandError("wildcards are not allowed in override files");
       const blob = a.blob!.toLowerCase();
-      if (!OID.test(blob)) throw new CommandError("blob must be a git object id");
+      if (!isObjectId(blob)) throw new CommandError("blob must be a git object id");
       return {
         commentId,
         owner: comment.author.login,
@@ -110,7 +111,7 @@ export function parseOverrides(comment: IssueComment): OverrideRequest[] | { com
       };
     });
   } catch (e) {
-    return { commentId, problem: (e as Error).message };
+    return { commentId, problem: errorMessage(e) };
   }
 }
 

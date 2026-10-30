@@ -10,6 +10,7 @@ import { looksInternal, readAliasSpec, type AliasSpec } from "./aliases.js";
 import { changedComponents, cyclicComponents, findNewCycles, type NewCycle } from "./cycles.js";
 import { buildModuleGraph, type Cruiser, type DepEdge, type ModuleGraph } from "./graph.js";
 import { candidateTargets, classifyTarget, readPackages, type PackageInfo, type TargetContext } from "./targets.js";
+import { errorMessage } from "../../util/errors.js";
 
 export interface EvaluateDepsInput {
   /** Directories holding the complete code tree of B and C (all code files, not only changed ones). */
@@ -64,7 +65,7 @@ export async function evaluateDeps(input: EvaluateDepsInput): Promise<DepsEvalua
     return {
       violations: [],
       triggers: [],
-      inconclusive: [{ reason: "TOOL_ERROR", detail: `dependency-cruiser failed: ${(e as Error).message}`, authorFixable: false }],
+      inconclusive: [{ reason: "TOOL_ERROR", detail: `dependency-cruiser failed: ${errorMessage(e)}`, authorFixable: false }],
       observe: emptyObserve(),
     };
   }

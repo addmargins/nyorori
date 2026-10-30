@@ -13,6 +13,7 @@ import type { IssueComment } from "../waivers/index.js";
 import type { CheckRunRecord, CheckRunRequest, GitHubClient, IssueRequest, PullRequestInfo, RepoRef } from "./client.js";
 import { FileKeySigner, type AppJwtSigner } from "./signer.js";
 import { DEFAULT_ZIP_LIMITS, readZip, ZipError, type ZipLimits } from "./zip.js";
+import { isObjectId } from "../util/ids.js";
 
 export type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
@@ -462,7 +463,7 @@ export async function ensureMirror(repoUrl: string, token: string, dir: string, 
     await mkdir(dir, { recursive: true });
     await execFileP("git", ["init", "--bare", "-q", dir], { env });
   }
-  const want = shas.filter((s) => /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(s));
+  const want = shas.filter(isObjectId);
   if (want.length !== shas.length) throw new Error("ensureMirror only fetches full object ids");
   await execFileP("git", ["-C", dir, "fetch", "-q", "--no-tags", "--no-write-fetch-head", repoUrl, ...want], {
     env,

@@ -19,6 +19,7 @@ import { GATE_IDS, type GateResult, type Inconclusive } from "../types.js";
 import { authorityLine } from "./run.js";
 import type { Authority, RunGatesOptions, RunGatesOutput } from "./types.js";
 import { fromWireOutput, toWireOptions, type WireOutput } from "./worker.js";
+import { errorMessage } from "../util/errors.js";
 
 export interface IsolationOptions {
   /** Wall-clock limit for the whole analysis. */
@@ -221,7 +222,7 @@ export async function runGatesIsolated(opts: RunGatesOptions, isolation: Isolati
     try {
       wire = JSON.parse(got.stdout.toString("utf8")) as WireOutput;
     } catch (e) {
-      throw new WorkerError("MALFORMED", `analysis worker returned no readable result: ${(e as Error).message}`);
+      throw new WorkerError("MALFORMED", `analysis worker returned no readable result: ${errorMessage(e)}`);
     }
     return fromWireOutput(wire);
   } catch (e) {

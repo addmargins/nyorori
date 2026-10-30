@@ -9,6 +9,8 @@ import { finalizeGateResult } from "../report/result.js";
 import { CommandError, findCommands } from "../waivers/command.js";
 import { EDITED_COMMAND_NOTE, screenComments, type IssueComment } from "../waivers/index.js";
 import { independenceProblem, inRoster, requiredApprovers, secondApproverReason, type PrIdentityContext, type TeamRosters } from "./independence.js";
+import { isObjectId } from "../util/ids.js";
+import { errorMessage } from "../util/errors.js";
 
 export type ReviewVerdict = "NO_SIMPLIFICATION_NEEDED" | "SUGGESTED" | "REQUIRED";
 
@@ -60,7 +62,7 @@ export function parseReview(body: string): ParsedReview | { problem: string } | 
   try {
     cmds = findCommands(body, "simplification-review");
   } catch (e) {
-    return { problem: (e as Error).message };
+    return { problem: errorMessage(e) };
   }
   if (cmds.length === 0) return null;
   if (cmds.length > 1) return { problem: "more than one /simplification-review in a comment" };
@@ -72,7 +74,7 @@ export function parseReview(body: string): ParsedReview | { problem: string } | 
     }
     if (cmd.positional.length > 1) throw new CommandError(`unexpected "${cmd.positional[1]}"`);
     const sha = (cmd.args.sha ?? "").toLowerCase();
-    if (!/^[0-9a-f]{40}$/.test(sha)) throw new CommandError("missing sha=<40-hex PR head you reviewed>");
+    if (!isObjectId(sha)) throw new CommandError("missing sha=<full commit id of the PR head you reviewed>");
     for (const k of Object.keys(cmd.args)) if (k !== "sha") throw new CommandError(`unknown argument "${k}"`);
     const answers = new Map<number, RubricAnswer>();
     const dispositions: Record<string, string> = {};
@@ -108,7 +110,7 @@ export function parseReview(body: string): ParsedReview | { problem: string } | 
     }
     return { verdict, sha, answers: list, dispositions };
   } catch (e) {
-    return { problem: (e as Error).message };
+    return { problem: errorMessage(e) };
   }
 }
 

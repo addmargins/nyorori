@@ -7,6 +7,7 @@
 import { z } from "zod";
 import type { Inconclusive } from "../../types.js";
 import { createPathResolver, type PathResolveOptions } from "./paths.js";
+import { errorMessage } from "../../util/errors.js";
 
 export type TestStatus = "passed" | "failed" | "skipped" | "todo" | "pending";
 
@@ -135,7 +136,7 @@ export function parseJestJson(text: string, opts: PathResolveOptions = {}): Repo
   try {
     raw = JSON.parse(text);
   } catch (e) {
-    return fail("SCHEMA", `test report is not JSON: ${(e as Error).message}`);
+    return fail("SCHEMA", `test report is not JSON: ${errorMessage(e)}`);
   }
   const parsed = jestJsonSchema.safeParse(raw);
   if (!parsed.success) return fail("SCHEMA", `test report schema: ${parsed.error.issues[0]?.message ?? "invalid"}`);

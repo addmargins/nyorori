@@ -13,6 +13,7 @@ import type {
   WaiverApplied,
 } from "../types.js";
 import type { Scope } from "./scope.js";
+import { errorMessage } from "../util/errors.js";
 
 export interface GateDraft {
   gate: GateId;
@@ -59,7 +60,7 @@ export async function guard(
     const d = emptyDraft(gate, fingerprint, true);
     d.inconclusive.push({
       reason: "TOOL_ERROR",
-      detail: `${gate} could not run: ${e instanceof Error ? e.message : String(e)}`,
+      detail: `${gate} could not run: ${errorMessage(e)}`,
       authorFixable: false,
     });
     return d;

@@ -27,6 +27,7 @@ import { IssuedDebtStore, recordMergedPullRequest, type MergedPullRequest } from
 import { VerdictStore } from "./service/verdicts.js";
 import { createWebhookServer } from "./service/http.js";
 import { EXIT_CODE } from "./types.js";
+import { errorMessage } from "./util/errors.js";
 
 /** Usage errors use EX_USAGE so they are never confused with FAIL (1) or INCONCLUSIVE (2). */
 export const EXIT_USAGE = 64;
@@ -277,7 +278,7 @@ export async function main(argv: string[]): Promise<number> {
   } catch (e) {
     const code = (e as { code?: unknown }).code;
     const usage = e instanceof UsageError || (typeof code === "string" && code.startsWith("ERR_PARSE_ARGS"));
-    process.stderr.write(`nyorori: ${e instanceof Error ? e.message : String(e)}\n${usage ? USAGE + "\n" : ""}`);
+    process.stderr.write(`nyorori: ${errorMessage(e)}\n${usage ? USAGE + "\n" : ""}`);
     // Anything that is not a usage error is a gate that could not run: never a pass.
     return usage ? EXIT_USAGE : EXIT_CODE.INCONCLUSIVE;
   }

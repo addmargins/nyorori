@@ -10,6 +10,7 @@ import { independenceProblem, inRoster, requiredApprovers, secondApproverReason,
 import type { ReviewComment } from "../review/simplification.js";
 import { findCommands, requireArgs } from "./command.js";
 import { EDITED_COMMAND_NOTE, screenComments } from "./index.js";
+import { errorMessage } from "../util/errors.js";
 
 export const TEST_APPROVABLE_REASONS: ReadonlySet<ReasonCode> = new Set<ReasonCode>(["TEST_REMOVED", "TEST_CONFIG_WEAKENED"]);
 
@@ -64,7 +65,7 @@ export function applyTestApprovals(
       cmds = findCommands(c.body, "gate-approve-tests");
       for (const cmd of cmds) requireArgs(cmd, ["key", "sha", "note"]);
     } catch (e) {
-      rejected.push({ commentId, problem: (e as Error).message });
+      rejected.push({ commentId, problem: errorMessage(e) });
       continue;
     }
     for (const cmd of cmds) {

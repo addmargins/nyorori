@@ -16,6 +16,8 @@ import {
   type TeamRosters,
 } from "../review/independence.js";
 import { CommandError, findCommands, hasGateCommand, requireArgs } from "./command.js";
+import { isObjectId } from "../util/ids.js";
+import { errorMessage } from "../util/errors.js";
 
 export interface IssueComment {
   id: number | string;
@@ -182,7 +184,7 @@ export function parseWaiverRequest(comment: IssueComment, policy: Policy): Waive
   try {
     cmds = findCommands(comment.body, "gate-waive");
   } catch (e) {
-    return { commentId, problem: (e as Error).message };
+    return { commentId, problem: errorMessage(e) };
   }
   if (cmds.length === 0) return [];
   if (isAiLoopBot(comment.author.login, policy)) {
@@ -220,7 +222,7 @@ export function parseWaiverRequest(comment: IssueComment, policy: Policy): Waive
         ...(a.expires ? { expires: a.expires } : {}),
       });
     } catch (e) {
-      return { commentId, problem: (e as Error).message };
+      return { commentId, problem: errorMessage(e) };
     }
   }
   return out;
@@ -241,11 +243,11 @@ function parseApprovals(comment: IssueComment): Approval[] | WaiverRejection {
       requireArgs(cmd, ["blob"]);
       if (cmd.positional.length !== 1) throw new CommandError("expected exactly one waiver id");
       const blob = cmd.args.blob!.toLowerCase();
-      if (!/^[0-9a-f]{40}([0-9a-f]{24})?$/.test(blob)) throw new CommandError("blob must be a git object id");
+      if (!isObjectId(blob)) throw new CommandError("blob must be a git object id");
       return { commentId, waiverId: cmd.positional[0]!, approver: comment.author, approvedAt: comment.createdAt, blob };
     });
   } catch (e) {
-    return { commentId, problem: (e as Error).message };
+    return { commentId, problem: errorMessage(e) };
   }
 }
 

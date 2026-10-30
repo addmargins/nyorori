@@ -6,12 +6,14 @@
 import { realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 import { z } from "zod";
+import { isObjectId } from "../util/ids.js";
+import { errorMessage } from "../util/errors.js";
 
 export const MAX_PAIRS = 1000;
 
 const sha = z
   .string()
-  .regex(/^[0-9a-f]{40}$/, "must be a full lowercase 40-hex commit SHA (no refs, no abbreviations)");
+  .refine(isObjectId, "must be a full lowercase commit id, 40 or 64 hex digits (no refs, no abbreviations)");
 
 /** Pair ids become output directory names, so they are restricted to a safe charset. */
 const pairId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, "id must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}");
@@ -125,7 +127,7 @@ export async function loadDataset(path: string, repoDir: string, readText: (p: s
   try {
     raw = JSON.parse(await readText(datasetPath));
   } catch (e) {
-    throw new DatasetError(`dataset ${path} is not valid JSON: ${(e as Error).message}`);
+    throw new DatasetError(`dataset ${path} is not valid JSON: ${errorMessage(e)}`);
   }
   const dataset = parseDataset(raw);
   const baseDir = dirname(datasetPath);

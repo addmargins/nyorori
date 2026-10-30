@@ -8,6 +8,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Inconclusive, Manifest, Side } from "../types.js";
 import { isInvalidPath } from "./exec.js";
 import { batchCheck, listTree, MODE_EXECUTABLE, MODE_REGULAR, pathTooLong, readBlobsBatched } from "./manifest.js";
+import { errorMessage } from "../util/errors.js";
 
 export interface MaterializedFile {
   /** Repository path. */
@@ -81,7 +82,7 @@ export async function materializeSideChecked(
       problems.push({
         reason: (e as NodeJS.ErrnoException).code === "EEXIST" ? "CASE_COLLISION" : "TOOL_ERROR",
         file: s.path,
-        detail: `${side}: cannot materialize ${JSON.stringify(s.measuredPath)}: ${(e as Error).message}`,
+        detail: `${side}: cannot materialize ${JSON.stringify(s.measuredPath)}: ${errorMessage(e)}`,
         authorFixable: (e as NodeJS.ErrnoException).code === "EEXIST",
       });
       continue;

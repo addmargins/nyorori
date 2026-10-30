@@ -11,6 +11,7 @@ import { z } from "zod";
 import type { Policy } from "../policy/schema.js";
 import type { CcccFile, CcccFunction, Inconclusive, Side } from "../types.js";
 import { ccccArgsTemplate } from "./fingerprint.js";
+import { errorMessage } from "../util/errors.js";
 
 const fnSchema: z.ZodType<CcccFunction> = z.lazy(() =>
   z
@@ -143,7 +144,7 @@ export function validateCcccRun(run: Omit<CcccRun, "args">, timeoutMs: number, o
     }
     parsed = res.data;
   } catch (e) {
-    add("SCHEMA", `${side}: cccc output is not JSON: ${(e as Error).message}`);
+    add("SCHEMA", `${side}: cccc output is not JSON: ${errorMessage(e)}`);
     return { files: [], inconclusive: inc, baselineParseErrors: [] };
   }
 

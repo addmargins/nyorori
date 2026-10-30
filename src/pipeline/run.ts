@@ -22,6 +22,7 @@ import { complexityGate, depsGate, lintGate, measure, type MeasuredState } from 
 import { artifactsFromZip } from "./artifacts.js";
 import { assertToolsOutsideRepo } from "./paths.js";
 import type { AppliedWaiver, Authority, RunGatesOptions, RunGatesOutput } from "./types.js";
+import { errorMessage } from "../util/errors.js";
 
 async function buildContext(opts: RunGatesOptions, workDir: string): Promise<RunContext> {
   const policy = { ...opts.policy, revision: opts.policyRevision };
@@ -62,7 +63,7 @@ export async function runGates(input: RunGatesOptions): Promise<RunGatesOutput> 
     try {
       opts = { ...input, artifacts: { ...input.artifacts, ...(await artifactsFromZip(input.artifactZip)) } };
     } catch (e) {
-      zipProblem = `required-workflow artifact was rejected: ${e instanceof Error ? e.message : String(e)}`;
+      zipProblem = `required-workflow artifact was rejected: ${errorMessage(e)}`;
     }
   }
   await mkdir(opts.workDir, { recursive: true });
@@ -149,7 +150,7 @@ async function addPreviousAttemptTriggers(ctx: RunContext, workDir: string, g1: 
   } catch (e) {
     g1.inconclusive.push({
       reason: "TOOL_ERROR",
-      detail: `previous-attempt comparison against ${prev} failed: ${e instanceof Error ? e.message : String(e)}`,
+      detail: `previous-attempt comparison against ${prev} failed: ${errorMessage(e)}`,
       authorFixable: false,
     });
   }

@@ -5,6 +5,7 @@
 // No zip64: artifacts larger than 4 GiB are refused.
 
 import { inflateRawSync } from "node:zlib";
+import { errorMessage } from "../util/errors.js";
 
 const EOCD = 0x06054b50;
 const CENTRAL = 0x02014b50;
@@ -118,7 +119,7 @@ export function readZip(
         // The declared size is the hard ceiling: a lying header cannot inflate further.
         content = inflateRawSync(data, { maxOutputLength: Math.max(1, e.size) });
       } catch (err) {
-        throw new ZipError(`zip entry ${e.name} does not inflate to its declared size: ${(err as Error).message}`);
+        throw new ZipError(`zip entry ${e.name} does not inflate to its declared size: ${errorMessage(err)}`);
       }
     } else {
       throw new ZipError(`unsupported zip compression method ${e.method} for ${e.name}`);
