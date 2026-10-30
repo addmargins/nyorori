@@ -23,6 +23,8 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          # scripts/self-gate.sh needs the merge base with the target branch.
+          fetch-depth: 0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -62,3 +64,13 @@ jobs:
       - run: npm run build
       # Spec 6.1: the calculation-rule fixtures must not drift for the pinned measurer.
       - run: node dist/cli.js fixtures --cccc "$NYORORI_CCCC"
+
+      # The gate judges its own pull requests (policy/self.policy.json, read from the base side).
+      # continue-on-error keeps this advisory until the open scaffold PR has landed; flip it to
+      # false afterwards so OVER_LIMIT_NEW and LEGACY_WORSENED block like they do for adopters.
+      - name: Self gate
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        run: |
+          git fetch --no-tags --depth=1 origin "+refs/heads/${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}" || true
+          scripts/self-gate.sh "origin/${{ github.base_ref }}"

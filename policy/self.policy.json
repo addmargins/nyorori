@@ -1,0 +1,294 @@
+{
+  "schema_version": 1,
+  "measurer": {
+    "cccc_version": "cccc 1.8.5",
+    "cccc_sha256": "",
+    "allow_unpinned": true,
+    "timeout_ms": 120000,
+    "chunk_size": 1000,
+    "jobs": 4,
+    "determinism_sample_rate": 0.05,
+    "determinism_sample_rate_official": 1
+  },
+  "scope": {
+    "extensions": [
+      ".ts",
+      ".tsx",
+      ".mts",
+      ".cts",
+      ".js",
+      ".jsx",
+      ".mjs",
+      ".cjs"
+    ],
+    "declaration_suffixes": [
+      ".d.ts",
+      ".d.mts",
+      ".d.cts"
+    ],
+    "unmeasured_code_extensions": [
+      ".vue",
+      ".svelte",
+      ".astro",
+      ".mdx"
+    ],
+    "non_code_extensions": [
+      ".md",
+      ".markdown",
+      ".txt",
+      ".rst",
+      ".adoc",
+      ".csv",
+      ".tsv",
+      ".json",
+      ".jsonc",
+      ".json5",
+      ".yml",
+      ".yaml",
+      ".toml",
+      ".xml",
+      ".ini",
+      ".cfg",
+      ".conf",
+      ".properties",
+      ".env.example",
+      ".env.sample",
+      ".tsbuildinfo",
+      ".lock",
+      ".lockb",
+      ".patch",
+      ".diff",
+      ".snap",
+      ".map",
+      ".graphql",
+      ".gql",
+      ".prisma",
+      ".sql",
+      ".proto",
+      ".css",
+      ".scss",
+      ".sass",
+      ".less",
+      ".png",
+      ".jpg",
+      ".jpeg",
+      ".gif",
+      ".ico",
+      ".webp",
+      ".avif",
+      ".bmp",
+      ".woff",
+      ".woff2",
+      ".ttf",
+      ".otf",
+      ".eot",
+      ".mp4",
+      ".webm",
+      ".mov",
+      ".mp3",
+      ".wav",
+      ".ogg",
+      ".pdf",
+      ".zip",
+      ".gz",
+      ".tgz",
+      ".tar",
+      ".bz2",
+      ".xz",
+      ".7z",
+      ".po",
+      ".pot",
+      ".ftl",
+      ".xliff",
+      ".xlf",
+      ".gitignore",
+      ".gitattributes",
+      ".gitmodules",
+      ".npmrc",
+      ".nvmrc",
+      ".node-version",
+      ".editorconfig",
+      ".prettierrc",
+      ".prettierignore",
+      ".eslintignore",
+      ".dockerignore",
+      ""
+    ],
+    "script_capable_extensions": [
+      ".html",
+      ".htm",
+      ".xhtml",
+      ".svg"
+    ],
+    "foreign_code_extensions": [
+      ".py",
+      ".sh",
+      ".bash",
+      ".zsh",
+      ".rb",
+      ".go",
+      ".rs",
+      ".java",
+      ".kt",
+      ".kts",
+      ".scala",
+      ".php",
+      ".pl",
+      ".lua",
+      ".swift",
+      ".c",
+      ".h",
+      ".cc",
+      ".cpp",
+      ".hpp",
+      ".cs",
+      ".tf",
+      ".hcl",
+      ".ps1",
+      ".wasm"
+    ],
+    "exclude": [
+      "test/fixtures/**"
+    ],
+    "test_globs": [
+      "**/*.test.*",
+      "**/*.spec.*",
+      "**/__tests__/**",
+      "test/**",
+      "tests/**"
+    ],
+    "test_support_globs": [
+      "**/fixtures/**",
+      "**/__fixtures__/**",
+      "**/helpers/**",
+      "**/__mocks__/**",
+      "**/testutils/**"
+    ],
+    "jsx_in_js": [],
+    "max_file_bytes": 2097152,
+    "rename_similarity": 70,
+    "declaration_impl_check": true,
+    "sensitive_paths": [
+      ".gitattributes",
+      "**/.gitattributes",
+      ".gitmodules"
+    ]
+  },
+  "complexity": {
+    "mode": "enforce",
+    "cognitive_limit": 15,
+    "near_limit_low": 12,
+    "cyclomatic_observe_mark": 20,
+    "inclusive_cognitive_trigger": 25,
+    "anonymous_child_trigger": 8,
+    "vanish_min_units": 4,
+    "enforce_on_tests": false
+  },
+  "triggers": {
+    "s1": {
+      "visible_branch_slack": 2,
+      "min_unit_increase": 3,
+      "min_max_cognitive_drop": 5
+    },
+    "s4_max_function_lines": 60,
+    "s9": {
+      "branch_drop_ratio": 0.3,
+      "max_line_drop_ratio": 0.3,
+      "density_drop_ratio": 0.3,
+      "min_branch_drop": 3,
+      "min_branch_drop_lines": 2
+    },
+    "s10": {
+      "min_density": 0.6,
+      "min_new_units": 5,
+      "min_visible_branches": 8
+    },
+    "s12": {
+      "min_residue": 8,
+      "min_rise": 5,
+      "pr_total_rise": 15
+    },
+    "s3": {
+      "min_single_importer_modules": 2,
+      "min_efferent_increase": 5
+    },
+    "moving_baseline": {
+      "enabled": true,
+      "lookback_merges": 5,
+      "lookback_days": 30,
+      "route": false,
+      "max_files": 200
+    }
+  },
+  "lint": {
+    "mode": "enforce",
+    "max_params": 4,
+    "max_nested_callbacks": 3,
+    "enforced_rules": [],
+    "dynamic_code_allowlist": [
+      "scripts/manipulation-results.mjs",
+      "test/complexity/equivalence.test.ts",
+      "test/e2e/moving-baseline.test.ts"
+    ],
+    "suppression_allowlist": []
+  },
+  "deps": {
+    "mode": "enforce",
+    "block_forbidden_edges": false,
+    "forbidden": []
+  },
+  "tests": {
+    "mode": "observe",
+    "evidence_wait_minutes": 45,
+    "protected_paths": [
+      "vitest.config.*",
+      "vite.config.*",
+      "jest.config.*",
+      "stryker.conf*",
+      ".c8rc*",
+      ".nycrc*",
+      "tsconfig*.json",
+      "jsconfig*.json",
+      "eslint.config.*",
+      ".eslintrc*",
+      ".dependency-cruiser.*",
+      "cccc.toml",
+      ".cccc.toml",
+      ".github/**",
+      ".gitignore",
+      ".ignore",
+      ".gitattributes"
+    ]
+  },
+  "coverage": {
+    "mode": "observe",
+    "max_unexecuted_branches_abs": 2,
+    "max_unexecuted_branches_ratio": 0.1,
+    "provider": "v8",
+    "provider_version": "",
+    "ignore_comment_allowlist": []
+  },
+  "review": {
+    "mode": "observe",
+    "simplification_reviewers": [],
+    "waiver_approvers": [],
+    "gate_owners": [],
+    "bots": []
+  },
+  "waivers": {
+    "per_pr_budget": 3,
+    "per_quarter_budget": 30,
+    "max_days": 90
+  },
+  "ai_loop": {
+    "bot_accounts": [],
+    "max_retries": 2
+  },
+  "mutation": {
+    "mode": "observe"
+  },
+  "provenance": {
+    "trusted_workflows": []
+  },
+  "parser_lag_allowlist": []
+}
