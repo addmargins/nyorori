@@ -55,7 +55,8 @@ export interface CcccReport {
 // States and identifiers
 // ---------------------------------------------------------------------------
 
-export type Side = "B" | "C";
+export const SIDES = ["B", "C"] as const;
+export type Side = (typeof SIDES)[number];
 
 /** Ordered from most to least severe for aggregation (spec 4.2). */
 export const GATE_STATES = [
@@ -71,7 +72,8 @@ export type GateState = (typeof GATE_STATES)[number];
  * enforce: blocks. observe: recorded only (shadow). degraded: set by the 13.4
  * incident procedure; FAILs and routing triggers become required G6 review.
  */
-export type GateMode = "enforce" | "observe" | "degraded";
+export const GATE_MODES = ["enforce", "observe", "degraded"] as const;
+export type GateMode = (typeof GATE_MODES)[number];
 
 export const GATE_IDS = [
   "complexity",
@@ -94,76 +96,69 @@ export const EXIT_CODE: Record<GateState, 0 | 1 | 2> = {
 };
 
 /** Reason codes for INCONCLUSIVE (measurement could not be trusted). */
-export type InconclusiveReason =
-  | "MEASURER_MISMATCH"
-  | "MEASURER_EXIT"
-  | "EMPTY_OUTPUT"
-  | "SCHEMA"
-  | "MANIFEST_MISMATCH"
-  | "MEASURER_STDERR"
-  | "PARSE_ERROR_CANDIDATE"
-  | "INVARIANT_VIOLATION"
-  | "TIMEOUT"
-  | "UNITS_VANISHED"
-  | "NONDETERMINISM"
-  | "CASE_COLLISION"
-  | "LFS_POINTER"
-  | "FILE_TOO_LARGE"
-  | "UNREGISTERED_EXTENSION"
-  | "JSX_IN_JS"
-  | "INVALID_ENCODING"
-  | "PATH_TOO_LONG"
-  | "FINGERPRINT_MISMATCH"
-  | "TOOL_ERROR"
-  | "NO_TESTS_EXECUTED"
-  | "REPORT_MISSING"
-  | "UNTRUSTED_ARTIFACT";
+export const INCONCLUSIVE_REASONS = [
+  "MEASURER_MISMATCH",
+  "MEASURER_EXIT",
+  "EMPTY_OUTPUT",
+  "SCHEMA",
+  "MANIFEST_MISMATCH",
+  "MEASURER_STDERR",
+  "PARSE_ERROR_CANDIDATE",
+  "INVARIANT_VIOLATION",
+  "TIMEOUT",
+  "UNITS_VANISHED",
+  "NONDETERMINISM",
+  "CASE_COLLISION",
+  "LFS_POINTER",
+  "FILE_TOO_LARGE",
+  "UNREGISTERED_EXTENSION",
+  "JSX_IN_JS",
+  "INVALID_ENCODING",
+  "PATH_TOO_LONG",
+  "FINGERPRINT_MISMATCH",
+  "TOOL_ERROR",
+  "NO_TESTS_EXECUTED",
+  "REPORT_MISSING",
+  "UNTRUSTED_ARTIFACT",
+] as const;
+export type InconclusiveReason = (typeof INCONCLUSIVE_REASONS)[number];
 
 /** Reason codes for FAIL (policy violation the author can act on). */
-export type FailReason =
-  | "OVER_LIMIT_NEW"
-  | "OVER_LIMIT"
-  | "LEGACY_WORSENED"
-  | "UNMATCHED_OVER_BUDGET"
-  | "LINT_NEW_VIOLATION"
-  | "DYNAMIC_CODE"
-  | "BIDI_CONTROL"
-  | "SUPPRESSION_ADDED"
+export const FAIL_REASONS = [
+  "OVER_LIMIT_NEW",
+  "OVER_LIMIT",
+  "LEGACY_WORSENED",
+  "UNMATCHED_OVER_BUDGET",
+  "LINT_NEW_VIOLATION",
+  "DYNAMIC_CODE",
+  "BIDI_CONTROL",
+  "SUPPRESSION_ADDED",
   /** `@ts-ignore` added by a human: waivable (rulings D9). */
-  | "SUPPRESSION_ADDED_WAIVABLE"
-  | "DEP_NEW_CYCLE"
-  | "DEP_FORBIDDEN_EDGE"
-  | "TESTS_FAILED"
+  "SUPPRESSION_ADDED_WAIVABLE",
+  "DEP_NEW_CYCLE",
+  "DEP_FORBIDDEN_EDGE",
+  "TESTS_FAILED",
   /** Failing tests that also failed on B: waivable (rulings D14). */
-  | "TESTS_FAILED_ON_BASE"
-  | "TEST_REMOVED"
-  | "TEST_FOCUS_OR_SKIP"
-  | "TEST_NO_ASSERTION"
-  | "TEST_CONFIG_WEAKENED"
-  | "PROTECTED_PATH_MODIFIED"
-  | "POLICY_PATH_MODIFIED"
-  | "COVERAGE_UNEXECUTED"
-  | "REVIEW_REQUIRED"
-  | "REVIEW_CHANGES_REQUESTED";
+  "TESTS_FAILED_ON_BASE",
+  "TEST_REMOVED",
+  "TEST_FOCUS_OR_SKIP",
+  "TEST_NO_ASSERTION",
+  "TEST_CONFIG_WEAKENED",
+  "PROTECTED_PATH_MODIFIED",
+  "POLICY_PATH_MODIFIED",
+  "COVERAGE_UNEXECUTED",
+  "REVIEW_REQUIRED",
+  "REVIEW_CHANGES_REQUESTED",
+] as const;
+export type FailReason = (typeof FAIL_REASONS)[number];
 
-export type ReasonCode = InconclusiveReason | FailReason;
+export const REASON_CODES = [...INCONCLUSIVE_REASONS, ...FAIL_REASONS] as const;
+export type ReasonCode = (typeof REASON_CODES)[number];
 
-export type TriggerId =
-  | "S1"
-  | "S2"
-  | "S3"
-  | "S4"
-  | "S5"
-  | "S6"
-  | "S7"
-  | "S8"
-  | "S9"
-  | "S10"
-  | "S11"
-  | "S12";
+export const TRIGGER_IDS = ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11", "S12"] as const;
+export type TriggerId = (typeof TRIGGER_IDS)[number];
 
-/** S8 is observe-only; every other trigger routes to G6 when it fires. */
-/** Triggers that route even from observe-mode gates (rulings D16). */
+/** Triggers that route even from observe-mode gates (rulings D16). S8 is observe-only (NON_ROUTING_TRIGGERS). */
 export const ALWAYS_ROUTING_TRIGGERS: ReadonlySet<TriggerId> = new Set(["S6", "S11"]);
 export const NON_ROUTING_TRIGGERS: ReadonlySet<TriggerId> = new Set(["S8"]);
 
@@ -173,13 +168,15 @@ export const NON_ROUTING_TRIGGERS: ReadonlySet<TriggerId> = new Set(["S8"]);
 
 export type ChangeStatus = "A" | "M" | "D" | "R" | "C" | "T";
 
-export type UnmeasuredReason =
-  | "SYMLINK"
-  | "SUBMODULE"
-  | "TYPE_CHANGE"
-  | "UNSUPPORTED_FORMAT" // .vue .svelte .astro .mdx ...
-  | "FOREIGN_LANGUAGE" // .py .sh .go ... (rulings D5/D6)
-  | "MEASUREMENT_OVERRIDE";
+export const UNMEASURED_REASONS = [
+  "SYMLINK",
+  "SUBMODULE",
+  "TYPE_CHANGE",
+  "UNSUPPORTED_FORMAT", // .vue .svelte .astro .mdx ...
+  "FOREIGN_LANGUAGE", // .py .sh .go ... (rulings D5/D6)
+  "MEASUREMENT_OVERRIDE",
+] as const;
+export type UnmeasuredReason = (typeof UNMEASURED_REASONS)[number];
 
 export type ExcludedReason = "DECLARATION_FILE" | "POLICY_EXCLUDE" | "NOT_CODE";
 

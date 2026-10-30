@@ -50,7 +50,9 @@ export function testId(file: string, ancestors: readonly string[], title: string
   return JSON.stringify([file, ...ancestors.map(normalizeTitle), normalizeTitle(title)]);
 }
 
-const jestStatus = z.enum(["passed", "failed", "skipped", "pending", "todo", "disabled", "focused"]);
+/** Test statuses of the Jest/Vitest JSON reporter. */
+const JEST_STATUSES = ["passed", "failed", "skipped", "pending", "todo", "disabled", "focused"] as const;
+const jestStatus = z.enum(JEST_STATUSES);
 
 const jestJsonSchema = z.object({
   numTotalTests: z.number().int().nonnegative(),

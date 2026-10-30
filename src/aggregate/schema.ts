@@ -2,12 +2,12 @@
 // produced by PR-executing jobs are untrusted input to the aggregator.
 
 import { z } from "zod";
-import { GATE_IDS, GATE_STATES, type GateResult } from "../types.js";
+import { GATE_IDS, GATE_MODES, GATE_STATES, INCONCLUSIVE_REASONS, REASON_CODES, SIDES, TRIGGER_IDS, UNMEASURED_REASONS, type GateResult } from "../types.js";
 
 const violation = z
   .object({
     gate: z.enum(GATE_IDS),
-    reason: z.string(),
+    reason: z.enum(REASON_CODES),
     file: z.string(),
     unit: z.string().optional(),
     line: z.number().int().optional(),
@@ -22,7 +22,7 @@ const violation = z
   .passthrough();
 
 const trigger = z.object({
-  id: z.enum(["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S10", "S11"]),
+  id: z.enum(TRIGGER_IDS),
   gate: z.enum(GATE_IDS),
   file: z.string().optional(),
   unit: z.string().optional(),
@@ -34,7 +34,7 @@ export const gateResultSchema = z.object({
   schema_version: z.literal(1),
   gate: z.enum(GATE_IDS),
   state: z.enum(GATE_STATES),
-  mode: z.enum(["enforce", "observe"]),
+  mode: z.enum(GATE_MODES),
   base_sha: z.string(),
   candidate_sha: z.string(),
   policy_revision: z.string(),
@@ -48,20 +48,20 @@ export const gateResultSchema = z.object({
       tools: z.record(z.string()).optional(),
     })
     .passthrough(),
-  reasons: z.array(z.string()),
+  reasons: z.array(z.enum(REASON_CODES)),
   violations: z.array(violation),
   inconclusive: z.array(
-    z.object({ reason: z.string(), file: z.string().optional(), detail: z.string(), authorFixable: z.boolean() }),
+    z.object({ reason: z.enum(INCONCLUSIVE_REASONS), file: z.string().optional(), detail: z.string(), authorFixable: z.boolean() }),
   ),
   triggers: z.array(trigger),
   waivers_applied: z.array(
     z.object({ id: z.string(), unit: z.string(), metric: z.string(), ceiling: z.number(), approver: z.string() }),
   ),
-  unmeasured: z.array(z.object({ path: z.string(), side: z.enum(["B", "C"]), reason: z.string() })),
+  unmeasured: z.array(z.object({ path: z.string(), side: z.enum(SIDES), reason: z.enum(UNMEASURED_REASONS) })),
   observe: z.record(z.unknown()),
   summary: z.string(),
 });
 
 export function parseGateResult(raw: unknown): GateResult {
-  return gateResultSchema.parse(raw) as unknown as GateResult;
+  return gateResultSchema.parse(raw) satisfies GateResult;
 }

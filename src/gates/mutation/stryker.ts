@@ -6,7 +6,9 @@ import type { FileLineMap, Inconclusive } from "../../types.js";
 import { changedLinesFromHunks } from "../coverage/changed.js";
 import { createPathResolver, type PathResolveOptions } from "../tests/paths.js";
 
-const status = z.enum(["Killed", "Survived", "NoCoverage", "CompileError", "RuntimeError", "Timeout", "Ignored", "Pending"]);
+/** Mutant statuses of the Stryker mutation-testing report schema. */
+const STRYKER_STATUSES = ["Killed", "Survived", "NoCoverage", "CompileError", "RuntimeError", "Timeout", "Ignored", "Pending"] as const;
+const status = z.enum(STRYKER_STATUSES);
 const loc = z.object({ line: z.number().int(), column: z.number().int() });
 
 const reportSchema = z

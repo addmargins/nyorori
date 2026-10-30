@@ -3,8 +3,9 @@
 // (cccc.toml, eslint.config.js, .gitignore...) may influence these values.
 
 import { z } from "zod";
+import { GATE_MODES } from "../types.js";
 
-const mode = z.enum(["enforce", "observe", "degraded"]);
+const mode = z.enum(GATE_MODES);
 const glob = z.string().min(1);
 
 export const policySchema = z

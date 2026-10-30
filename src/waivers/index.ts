@@ -4,7 +4,7 @@
 
 import { createHash } from "node:crypto";
 import type { Policy } from "../policy/schema.js";
-import type { GateId, ReasonCode, TriggerHit, Violation, WaiverApplied } from "../types.js";
+import { INCONCLUSIVE_REASONS, type GateId, type ReasonCode, type TriggerHit, type Violation, type WaiverApplied } from "../types.js";
 import {
   independenceProblem,
   inRoster,
@@ -80,13 +80,7 @@ export const NON_WAIVABLE_REASONS: ReadonlySet<ReasonCode> = new Set<ReasonCode>
 ]);
 
 /** Measurement reasons: INCONCLUSIVE is handled by overrides, never by waivers. */
-const INCONCLUSIVE_REASONS: ReadonlySet<string> = new Set([
-  "MEASURER_MISMATCH", "MEASURER_EXIT", "EMPTY_OUTPUT", "SCHEMA", "MANIFEST_MISMATCH", "MEASURER_STDERR",
-  "PARSE_ERROR_CANDIDATE", "INVARIANT_VIOLATION", "TIMEOUT", "UNITS_VANISHED", "NONDETERMINISM",
-  "CASE_COLLISION", "LFS_POINTER", "FILE_TOO_LARGE", "UNREGISTERED_EXTENSION", "JSX_IN_JS",
-  "INVALID_ENCODING", "FINGERPRINT_MISMATCH", "TOOL_ERROR", "NO_TESTS_EXECUTED", "REPORT_MISSING",
-  "UNTRUSTED_ARTIFACT",
-]);
+const MEASUREMENT_REASONS: ReadonlySet<string> = new Set(INCONCLUSIVE_REASONS);
 
 /**
  * Whether a violation may be covered by a waiver. Producers may mark the
@@ -99,7 +93,7 @@ export function isWaivable(v: Violation): boolean {
   if (reason === "TESTS_FAILED_ON_BASE" || reason === "SUPPRESSION_ADDED_WAIVABLE") return true;
   if (reason === "TESTS_FAILED") return v.details?.["base_broken"] === true;
   if (reason === "SUPPRESSION_ADDED") return v.details?.["waivable"] === true;
-  return !NON_WAIVABLE_REASONS.has(v.reason) && !INCONCLUSIVE_REASONS.has(reason);
+  return !NON_WAIVABLE_REASONS.has(v.reason) && !MEASUREMENT_REASONS.has(reason);
 }
 
 /** The metric a waiver names: the violation's metric, or its reason code when it has none. */

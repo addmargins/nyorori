@@ -13,6 +13,19 @@ export default tseslint.config(
     languageOptions: { globals: { console: "readonly", process: "readonly", URL: "readonly", Buffer: "readonly" } },
   },
   {
+    files: ["src/**/*.ts"],
+    rules: {
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "CallExpression[callee.object.name='z'][callee.property.name='enum'] > ArrayExpression",
+          message:
+            "Do not list a closed set inside z.enum. Pass its `as const` tuple: TRIGGER_IDS, GATE_IDS, GATE_MODES, GATE_STATES, REASON_CODES, INCONCLUSIVE_REASONS, FAIL_REASONS, UNMEASURED_REASONS or SIDES from src/types.ts. A set that belongs to an external format gets its own named tuple next to its parser.",
+        },
+      ],
+    },
+  },
+  {
     rules: {
       // `_`-prefixed bindings are deliberate (destructuring a field away, unused callback args).
       "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_", destructuredArrayIgnorePattern: "^_" }],
